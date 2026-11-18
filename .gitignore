@@ -1,0 +1,41 @@
+# Dependencies & Environment
+node_modules/
+.env
+*.env
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Large binaries, models, & experimental engines
+cake/
+cake.exe
+exo-repo/
+llama-b11429/
+*.gguf
+*.bin
+*.dll
+*.exe
+*.so
+*.dylib
+*.pdb
+*.rlib
+*.rmeta
+
+# Logs & Runtime telemetry
+logs/
+*.log
+
+# IDE & OS files
+.agents/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Android build outputs
+android-apk/**/build/
+android-apk/**/.gradle/
+android-apk/local.properties
