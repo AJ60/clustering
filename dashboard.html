@@ -3,410 +3,2340 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Universal 1-Hop Star GGUF Cluster | llama.cpp v1.0.0</title>
+  <title>Universal 1-Hop Star GGUF Cluster</title>
+  <meta name="description" content="Coordinator dashboard, greedy layer allocator, and OpenAI-compatible inference proxy for a heterogeneous 1-hop star GGUF cluster on llama.cpp v1.0.0.">
+  <meta property="og:title" content="Universal 1-Hop Star GGUF Cluster">
+  <meta property="og:description" content="Coordinator dashboard, greedy layer allocator, and OpenAI-compatible inference proxy for a heterogeneous 1-hop star GGUF cluster on llama.cpp v1.0.0.">
   <style>
     :root {
-      --bg: #0d1117;
-      --card-bg: #161b22;
-      --border: #30363d;
-      --text: #c9d1d9;
-      --text-bright: #f0f6fc;
-      --text-muted: #8b949e;
-      --accent: #58a6ff;
-      --success: #3fb950;
-      --warning: #d29922;
-      --danger: #f85149;
-      --purple: #bc8cff;
+      --bg: #0b0f17;
+      --surface: #121824;
+      --surface-alt: #0e141e;
+      --border: #1e293b;
+      --border-strong: #334155;
+      --text: #cbd5e1;
+      --text-bright: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --accent-soft: rgba(37, 99, 235, 0.14);
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --warn-bg: rgba(245, 158, 11, 0.12);
+      --err: #ef4444;
+      --err-bg: rgba(239, 68, 68, 0.12);
+      --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-family: var(--font-sans);
       background: var(--bg);
       color: var(--text);
       line-height: 1.5;
-      padding: 20px;
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
     }
-    header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding-bottom: 20px;
+
+    .tabular { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+    /* Top Bar Contract: 3 zones separated cleanly */
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      background: rgba(11, 15, 23, 0.94);
+      backdrop-filter: blur(8px);
       border-bottom: 1px solid var(--border);
-      margin-bottom: 20px;
     }
-    h1 { font-size: 1.4rem; color: var(--text-bright); }
-    .badge {
-      display: inline-block;
-      padding: 4px 10px;
-      border-radius: 12px;
-      font-size: 0.75rem;
+
+    .topbar-inner {
+      max-width: 1360px;
+      margin: 0 auto;
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 32px;
+    }
+
+    .brand {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-bright);
+      letter-spacing: -0.01em;
+      text-decoration: none;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .nav-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      flex-shrink: 0;
+      transition: color 0.15s ease;
+    }
+
+    .nav-links a:hover { color: var(--text-bright); text-decoration: underline; text-underline-offset: 6px; }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 16px;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      font-family: var(--font-sans);
+      font-size: 13px;
       font-weight: 600;
-      text-transform: uppercase;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+      transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
     }
-    .badge-ok { background: rgba(63, 185, 80, 0.2); color: var(--success); border: 1px solid var(--success); }
-    .badge-warn { background: rgba(210, 153, 34, 0.2); color: var(--warning); border: 1px solid var(--warning); }
-    .badge-err { background: rgba(248, 81, 73, 0.2); color: var(--danger); border: 1px solid var(--danger); }
-    
-    .grid {
+
+    .btn:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .btn-primary { background: var(--accent); color: #ffffff; }
+    .btn-primary:hover { background: var(--accent-hover); }
+
+    .btn-secondary {
+      background: var(--surface-alt);
+      color: var(--text-bright);
+      border-color: var(--border-strong);
+    }
+    .btn-secondary:hover { background: #1a2232; }
+
+    .btn-sm { padding: 6px 12px; font-size: 12px; }
+
+    .container {
+      max-width: 1360px;
+      margin: 0 auto;
+      padding: 24px 24px 120px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    /* Workspace Toolbar */
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .toolbar-left {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .segmented {
+      display: inline-flex;
+      padding: 3px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      gap: 2px;
+    }
+
+    .segmented button {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 6px 14px;
+      border-radius: 5px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .segmented button.active {
+      background: var(--accent);
+      color: #ffffff;
+    }
+
+    .meta-strip {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .meta-strip strong { color: var(--text-bright); font-weight: 600; }
+
+    select, input[type="text"], input[type="number"], input[type="password"] {
+      background: var(--surface-alt);
+      border: 1px solid var(--border-strong);
+      color: var(--text-bright);
+      padding: 7px 10px;
+      border-radius: 6px;
+      font-family: var(--font-sans);
+      font-size: 13px;
+    }
+
+    /* Banners */
+    .notice-banner {
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .notice-warn {
+      background: var(--warn-bg);
+      border: 1px solid rgba(245, 158, 11, 0.45);
+      color: #fcd34d;
+    }
+
+    .notice-sim {
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.45);
+      color: #7dd3fc;
+      letter-spacing: 0.02em;
+    }
+
+    /* Grid Layouts */
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1.05fr 1.35fr;
+      gap: 20px;
+      align-items: stretch;
+    }
+
+    .grid-equal {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 20px;
-      margin-bottom: 20px;
+      align-items: stretch;
     }
-    @media (max-width: 900px) {
-      .grid { grid-template-columns: 1fr; }
+
+    .auto-ribbon {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
     }
-    .card {
-      background: var(--card-bg);
+
+    .auto-stat {
+      background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 16px;
+      padding: 12px 14px;
+      min-width: 0;
     }
-    .card-title {
-      font-size: 1.05rem;
-      color: var(--text-bright);
-      margin-bottom: 12px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    
-    /* Topology SVG */
-    #topology-container {
-      width: 100%;
-      height: 240px;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      background: #090d13;
-      border-radius: 6px;
-      overflow: hidden;
-      border: 1px solid #21262d;
-    }
-    svg text { font-family: monospace; font-size: 11px; }
 
-    /* Node Cards */
-    .node-list {
+    .auto-stat-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      margin-bottom: 4px;
+    }
+
+    .auto-stat-value {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-bright);
+      overflow-wrap: anywhere;
+    }
+
+    .auto-stat-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 2px;
+      overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 1080px) {
+      .grid-2, .grid-equal { grid-template-columns: 1fr; }
+      .auto-ribbon { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .nav-links { display: none; }
+    }
+
+    @media (max-width: 640px) {
+      .auto-ribbon { grid-template-columns: 1fr; }
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
       display: flex;
       flex-direction: column;
+      gap: 16px;
+      min-width: 0;
+    }
+
+    .panel-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      justify-content: space-between;
       gap: 12px;
-      max-height: 480px;
+    }
+
+    .panel-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-bright);
+    }
+
+    .panel-sub {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    /* Topology SVG */
+    .topology-box {
+      width: 100%;
+      height: 290px;
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    svg text { font-family: var(--font-mono); font-size: 11px; }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    /* Summary KPI Row - dedicated wrapping cells prevent clipping/overlap */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+
+    .kpi-cell {
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      min-width: 0;
+    }
+
+    .kpi-label { font-size: 11px; color: var(--text-muted); margin-bottom: 3px; }
+    .kpi-val {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-bright);
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      max-height: 54px;
       overflow-y: auto;
     }
-    .node-item {
-      background: #0d1117;
+
+    /* Node Data Table */
+    .table-wrap { width: 100%; overflow-x: auto; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    th {
+      text-align: left;
+      padding: 8px 8px;
+      color: var(--text-muted);
+      font-weight: 600;
+      border-bottom: 1px solid var(--border-strong);
+      white-space: nowrap;
+    }
+
+    th.num, td.num { text-align: right; }
+
+    td {
+      padding: 9px 8px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255, 255, 255, 0.02); }
+
+    .state-ok { color: var(--ok); font-weight: 600; }
+    .state-warn { color: var(--warn); font-weight: 600; }
+    .state-err { color: var(--err); font-weight: 600; }
+    .state-offline { color: var(--text-muted); font-weight: 600; }
+
+    .cmd-box {
+      background: var(--surface-alt);
       border: 1px solid var(--border);
       border-radius: 6px;
       padding: 12px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: #93c5fd;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }
-    .node-header {
-      display: flex;
-      justify-content: space-between;
-      margin-bottom: 6px;
-      font-weight: 600;
-      color: var(--text-bright);
-    }
-    .node-meta {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-      gap: 6px;
-      font-size: 0.8rem;
-      color: var(--text-muted);
-    }
-    .node-meta span b { color: var(--text); }
-    .progress-bar {
-      width: 100%;
-      height: 6px;
-      background: #21262d;
-      border-radius: 3px;
-      margin-top: 6px;
-      overflow: hidden;
-    }
-    .progress-fill { height: 100%; background: var(--accent); transition: width 0.3s; }
-    .progress-fill.hot { background: var(--danger); }
 
-    /* Chat UI */
-    .chat-box {
+    /* Advanced Mode Controls */
+    .adv-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    @media (max-width: 900px) {
+      .adv-grid { grid-template-columns: 1fr; }
+    }
+
+    .field {
       display: flex;
       flex-direction: column;
-      height: 400px;
+      gap: 6px;
+      min-width: 0;
     }
-    .chat-history {
-      flex: 1;
-      overflow-y: auto;
-      padding: 10px;
-      background: #090d13;
+
+    .field label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .check-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+      padding-top: 4px;
+    }
+
+    .check-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    .adv-subhead {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-bright);
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .profile-bar {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 12px;
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
       border-radius: 6px;
-      margin-bottom: 10px;
+    }
+
+    .exp-box {
+      margin-top: 6px;
+      padding: 14px;
+      border-radius: 6px;
+      background: var(--surface-alt);
+      border: 1px dashed var(--border-strong);
       display: flex;
       flex-direction: column;
       gap: 10px;
-      font-size: 0.9rem;
     }
-    .msg {
-      max-width: 80%;
-      padding: 8px 12px;
-      border-radius: 8px;
+
+    /* Virtual Test Checks */
+    .check-list {
+      display: flex;
+      flex-direction: column;
     }
-    .msg.user {
-      align-self: flex-end;
-      background: #1f6feb;
-      color: #fff;
+
+    .check-entry {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 16px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
     }
-    .msg.assistant {
-      align-self: flex-start;
-      background: #21262d;
+
+    .check-entry:last-child { border-bottom: none; }
+
+    /* Code Browser */
+    .file-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .file-tab {
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 5px 10px;
+      border-radius: 5px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .file-tab.active {
+      background: var(--accent-soft);
+      border-color: var(--accent);
       color: var(--text-bright);
     }
-    .chat-controls {
+
+    pre.code-view {
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 14px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.55;
+      max-height: 360px;
+      overflow: auto;
+      color: #e2e8f0;
+    }
+
+    /* Chat & Logs */
+    .chat-box {
       display: flex;
+      flex-direction: column;
+      height: 340px;
+      gap: 10px;
+    }
+
+    .chat-history {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .msg {
+      max-width: 85%;
+      padding: 9px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .msg.user { align-self: flex-end; background: var(--accent); color: #ffffff; }
+    .msg.assistant { align-self: flex-start; background: #1e293b; color: var(--text-bright); }
+    .msg.error { align-self: flex-start; background: var(--err-bg); border: 1px solid rgba(239, 68, 68, 0.45); color: #fca5a5; }
+
+    .chat-controls { display: flex; gap: 8px; align-items: center; }
+    .chat-controls input[type="text"] { flex: 1; }
+
+    pre.log-viewer {
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.5;
+      height: 340px;
+      overflow-y: auto;
+      color: #86efac;
+    }
+
+    /* Floating Resource Monitor HUD (bottom-right draggable & collapsible) */
+    .floating-hud {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      width: 348px;
+      max-width: calc(100vw - 24px);
+      z-index: 60;
+      background: rgba(15, 22, 34, 0.96);
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(8px);
+      overflow: hidden;
+    }
+
+    .floating-hud.expanded {
+      width: 440px;
+    }
+
+    .hud-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 9px 12px;
+      background: #141d2d;
+      border-bottom: 1px solid var(--border);
+      cursor: grab;
+      user-select: none;
+    }
+
+    .hud-header:active { cursor: grabbing; }
+
+    .hud-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-bright);
+      display: flex;
+      align-items: center;
       gap: 8px;
     }
-    input[type="text"], textarea {
-      flex: 1;
-      background: #090d13;
-      border: 1px solid var(--border);
-      color: var(--text-bright);
-      padding: 8px 12px;
-      border-radius: 6px;
-      outline: none;
-      font-family: inherit;
-    }
-    button {
-      background: #238636;
-      border: 1px solid rgba(240, 246, 252, 0.1);
-      color: #ffffff;
-      padding: 8px 16px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-weight: 600;
-    }
-    button:hover { background: #2ea043; }
 
-    /* Logs */
-    pre.log-viewer {
-      background: #090d13;
-      border: 1px solid #21262d;
-      border-radius: 6px;
-      padding: 10px;
-      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-      font-size: 0.75rem;
-      max-height: 180px;
-      overflow-y: auto;
-      color: #7ee787;
+    .hud-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--ok);
+      flex-shrink: 0;
     }
+
+    .hud-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .hud-btn {
+      background: var(--surface-alt);
+      border: 1px solid var(--border-strong);
+      color: var(--text);
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .hud-btn:hover { color: var(--text-bright); border-color: var(--accent); }
+
+    .hud-body {
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 360px;
+      overflow-y: auto;
+    }
+
+    .hud-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-muted);
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .hud-node-card {
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      font-size: 11px;
+    }
+
+    .hud-node-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .hud-metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 4px 10px;
+      color: var(--text-muted);
+    }
+
+    .hud-metrics strong { color: var(--text-bright); font-weight: 600; }
+
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
 
-  <header>
-    <div>
-      <h1>Universal 1-Hop Star GGUF Cluster</h1>
-      <span style="font-size: 0.8rem; color: var(--text-muted);">llama.cpp v1.0.0 &bull; RPC v9 &bull; Zero C++ Edits</span>
-    </div>
-    <div>
-      <span id="cluster-status-badge" class="badge badge-ok">CLUSTER ACTIVE</span>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a href="#cluster" class="brand">Universal 1-Hop Star Cluster</a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#cluster">Live Cluster</a>
+        <a href="#virtual-test">Virtual Sandbox</a>
+        <a href="#rust-kit">Rust &amp; NDK Kit</a>
+        <a href="#chat-logs">Chat &amp; Logs</a>
+      </nav>
+      <button class="btn btn-primary" id="btn-launch" onclick="discoverAndLaunch()">Auto-Discover &amp; Launch</button>
     </div>
   </header>
 
-  <div class="grid">
-    <!-- Star Topology Visualization -->
-    <div class="card">
-      <div class="card-title">
-        <span>Hub-and-Spoke Star Topology (1-Hop RF/USB)</span>
-        <span id="topology-count" style="font-size: 0.8rem; color: var(--text-muted);">0 Nodes</span>
-      </div>
-      <div id="topology-container">
-        <svg id="topology-svg" width="100%" height="100%" viewBox="0 0 450 230"></svg>
-      </div>
-      <div style="margin-top: 10px; font-size: 0.75rem; color: var(--text-muted); display: flex; justify-content: space-around;">
-        <span><b style="color: #58a6ff;">--</b> USB RNDIS (&lt;0.5ms)</span>
-        <span><b style="color: #3fb950;">--</b> Wi-Fi Hotspot (~1.2ms)</span>
-        <span><b style="color: #d29922;">--</b> Home LAN Wi-Fi</span>
-      </div>
-    </div>
-
-    <!-- Cluster Plan & Telemetry -->
-    <div class="card">
-      <div class="card-title">
-        <span>Active GGUF Cluster Plan</span>
-        <span id="plan-model" style="font-size: 0.8rem; color: var(--accent);">Default Model</span>
-      </div>
-      <div style="font-size: 0.85rem; display: flex; flex-direction: column; gap: 8px;">
-        <div><b>RPC Endpoints:</b> <span id="plan-rpc" style="font-family: monospace; color: var(--purple);">None</span></div>
-        <div><b>Tensor Split:</b> <span id="plan-split" style="font-family: monospace;">1.0</span></div>
-        <div><b>Cluster Safe RAM Cap:</b> <span id="plan-ram" style="color: var(--success); font-weight: bold;">0 MB</span></div>
-        <div><b>Flags:</b> <span id="plan-flags" style="font-family: monospace; font-size: 0.75rem; color: var(--text-muted);">--host 0.0.0.0 --port 8080</span></div>
-      </div>
-      <hr style="border: 0; border-top: 1px solid var(--border); margin: 12px 0;">
-      <div class="card-title" style="margin-bottom: 6px;">
-        <span>Connected Hardware Nodes</span>
-      </div>
-      <div id="node-cards" class="node-list"></div>
-    </div>
-  </div>
-
-  <div class="grid">
-    <!-- OpenAI Compatible Chat -->
-    <div class="card">
-      <div class="card-title">Distributed Cluster Chat (OpenAI API /v1/chat/completions)</div>
-      <div class="chat-box">
-        <div id="chat-history" class="chat-history">
-          <div class="msg assistant">Cluster online. Type a prompt to test distributed inference across the 1-hop star network.</div>
+  <main class="container">
+    <!-- Workspace Toolbar -->
+    <section class="toolbar" aria-label="Cluster workspace controls">
+      <div class="toolbar-left">
+        <div class="segmented" role="tablist" aria-label="Operating Mode">
+          <button id="tab-default" class="active" onclick="setUiMode('default')">Default Mode</button>
+          <button id="tab-advanced" onclick="setUiMode('advanced')">Advanced Mode</button>
         </div>
-        <div class="chat-controls">
-          <input type="text" id="chat-input" placeholder="Type prompt here..." onkeydown="if(event.key==='Enter') sendChat()">
-          <button onclick="sendChat()" id="send-btn">Send</button>
+        <select id="model-preset" onchange="applyPreset()" aria-label="GGUF Model Preset">
+          <option value="moe-30b">Qwen3-30B-A3B MoE (Q4_K_M · 18.5 GB)</option>
+          <option value="ternary-27b">BitNet b1.58 Ternary (TQ1_0 · 6.4 GB)</option>
+          <option value="dense-32b">Qwen2.5-32B Dense (Q4_K_M · 19.8 GB)</option>
+          <option value="dense-70b">Llama-3.3-70B Dense (Q4_K_M · 40.5 GB)</option>
+        </select>
+        <div class="meta-strip">
+          <span>Pin: <strong id="meta-pin">v1.0.0 · RPC v9</strong></span>
+          <span aria-hidden="true">·</span>
+          <span>Mode: <strong>Live Cluster</strong></span>
+          <span aria-hidden="true">·</span>
+          <span id="meta-llama-status" class="state-warn">llama-server offline (port 8080)</span>
+          <span aria-hidden="true">·</span>
+          <span id="meta-action-status">Ready</span>
         </div>
       </div>
-    </div>
-
-    <!-- Cluster Log Stream -->
-    <div class="card">
-      <div class="card-title">
-        <span>Mandatory Structured Logs (logs/cluster.log)</span>
-        <button style="padding: 2px 8px; font-size: 0.75rem;" onclick="fetchLogs()">Refresh</button>
+      <div style="display: flex; gap: 8px;">
+        <button class="btn btn-secondary btn-sm" onclick="runVirtualTest()">Run 4-Node Virtual Test</button>
+        <button class="btn btn-secondary btn-sm" onclick="resetLocal()">Reset Live Cluster</button>
       </div>
-      <pre id="log-viewer" class="log-viewer">Loading cluster logs...</pre>
+    </section>
+
+    <!-- Zero-Config Auto-Adaptive Summary Ribbon -->
+    <section class="auto-ribbon" aria-label="Auto-adaptive cluster classification">
+      <div class="auto-stat">
+        <div class="auto-stat-label">Cluster Strength Tier</div>
+        <div class="auto-stat-value" id="auto-tier-val">Tier B</div>
+        <div class="auto-stat-sub" id="auto-tier-sub">Auto-profiled in &lt;1.5s</div>
+      </div>
+      <div class="auto-stat">
+        <div class="auto-stat-label">Auto-Elected Master</div>
+        <div class="auto-stat-value tabular" id="auto-master-val">master-hub</div>
+        <div class="auto-stat-sub" id="auto-master-sub">Role policy: auto</div>
+      </div>
+      <div class="auto-stat">
+        <div class="auto-stat-label">Compute Backend</div>
+        <div class="auto-stat-value" id="auto-backend-val">stock llama.cpp v1.0.0</div>
+        <div class="auto-stat-sub" id="auto-backend-sub">1-Hop Star RPC v9</div>
+      </div>
+      <div class="auto-stat">
+        <div class="auto-stat-label">Auto-Fit Context &amp; Batching</div>
+        <div class="auto-stat-value tabular" id="auto-ctx-val">-c 4096 · --parallel 1</div>
+        <div class="auto-stat-sub" id="auto-ctx-sub">Sarathi --cont-batching active</div>
+      </div>
+    </section>
+
+    <!-- Live Cluster Topology & Scheduler Matrix (Strict Live Mode Only) -->
+    <section id="cluster" class="grid-2">
+      <div class="panel">
+        <div class="panel-head">
+          <h2 class="panel-title">Live 1-Hop Star Topology</h2>
+          <span class="panel-sub tabular" id="topology-count">1 Node</span>
+        </div>
+        <div class="topology-box">
+          <svg id="topology-svg" width="100%" height="100%" viewBox="0 0 580 300" aria-label="Live cluster star topology"></svg>
+        </div>
+        <div class="legend">
+          <span><strong style="color: #38bdf8;">—</strong> ADB USB / RNDIS (&lt;0.5ms)</span>
+          <span><strong style="color: #22c55e;">—</strong> 5 GHz Hotspot (~1.2ms)</span>
+          <span><strong style="color: #ef4444;">- -</strong> Pruned (Loss &gt;2% / RTT &gt;15ms)</span>
+          <span><strong style="color: #64748b;">- -</strong> Offline / Missed Heartbeat</span>
+        </div>
+        <div class="kpi-grid">
+          <div class="kpi-cell">
+            <div class="kpi-label">Live Safe Pool / Allocated</div>
+            <div class="kpi-val tabular" id="kpi-pool">0 MB</div>
+          </div>
+          <div class="kpi-cell">
+            <div class="kpi-label">Model Need (+15%)</div>
+            <div class="kpi-val tabular" id="kpi-needed">0 MB</div>
+          </div>
+          <div class="kpi-cell">
+            <div class="kpi-label">--tensor-split (Normalized)</div>
+            <div class="kpi-val tabular" id="kpi-split">100.0</div>
+          </div>
+          <div class="kpi-cell">
+            <div class="kpi-label">Verified --rpc Endpoints</div>
+            <div class="kpi-val tabular" id="kpi-rpc">Local Only</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2 class="panel-title">Live Node Telemetry &amp; Cap-Bounded Allocation</h2>
+          <span class="panel-sub" id="ram-policy-sub">Android: ≤50% RAM cap · Linux/Windows: MemAvailable - 1024 MB</span>
+        </div>
+
+        <div id="mmap-warning" class="notice-banner notice-warn hidden" role="status">
+          <span>MMAP STREAMING ACTIVE — Model Need (+15%) exceeds Live Safe Cluster Memory; <code>--no-mmap</code> is omitted to prevent OOM.</span>
+        </div>
+
+        <div class="table-wrap" id="live-node-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Node</th>
+                <th>Silicon / Thermal</th>
+                <th class="num">Link / Safe Pool</th>
+                <th class="num">Share / Rate</th>
+                <th class="num">Alloc / State</th>
+              </tr>
+            </thead>
+            <tbody id="node-table-body">
+              <tr><td colspan="5" style="color: var(--text-muted);">Loading live cluster telemetry...</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div>
+          <div class="panel-head" style="margin-bottom: 6px;">
+            <span class="panel-sub">Verified Stock llama-server Command (v1.0.0)</span>
+            <button class="btn btn-secondary btn-sm" onclick="copyText('cmd-preview', this)">Copy Command</button>
+          </div>
+          <div class="cmd-box" id="cmd-preview">Loading command...</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Auto-Adaptive Mechanism Trace & Discovered ./models/ GGUF Inventory -->
+    <section id="auto-trace" class="grid-equal" aria-label="Auto-tuning trace and model inventory">
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">Auto-Adaptive Tuning Trace (30-System Synthesis)</h2>
+            <span class="panel-sub">Real-time rationale for activated, standby, and pruned optimization mechanisms</span>
+          </div>
+          <span class="panel-sub tabular" id="decisions-count">0 mechanisms</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Mechanism</th>
+                <th>Category</th>
+                <th>Status</th>
+                <th>Auto-Tune Rationale</th>
+              </tr>
+            </thead>
+            <tbody id="decisions-table-body">
+              <tr><td colspan="4" style="color: var(--text-muted);">Loading auto-tune trace...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">Auto-Discovered ./models/ GGUF Inventory</h2>
+            <span class="panel-sub" id="active-model-summary">Binary GGUF header inspection (0x46554747)</span>
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick="scanModels()">Rescan ./models/</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>GGUF Model</th>
+                <th>Arch / Quant</th>
+                <th class="num">Size</th>
+                <th>Fit</th>
+                <th class="num">Action</th>
+              </tr>
+            </thead>
+            <tbody id="models-table-body">
+              <tr><td colspan="5" style="color: var(--text-muted);">Scanning ./models/ ...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Self-Learning EMA Cluster Profiles (cluster_history.json) -->
+    <section id="learned-history" class="panel" aria-label="Self-learning EMA profiles">
+      <div class="panel-head">
+        <div>
+          <h2 class="panel-title">Self-Learning EMA Cluster Profiles (cluster_history.json)</h2>
+          <span class="panel-sub">0.7/0.3 EMA performance weights updated after 50+ token sessions; auto-downscales nodes on thermal throttle</span>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <span class="panel-sub tabular" id="learned-count">0 learned profiles</span>
+          <button class="btn btn-secondary btn-sm" onclick="resetLearnedHistory()">Reset Learned Profile</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Node / Silicon</th>
+              <th>Arch / Quant / Link</th>
+              <th class="num">Learned Score</th>
+              <th class="num">Eff Tok/s/GB</th>
+              <th class="num">Thermal Sustain</th>
+              <th class="num">Load Scale</th>
+              <th class="num">Sessions / Throttles</th>
+            </tr>
+          </thead>
+          <tbody id="learned-table-body">
+            <tr><td colspan="7" style="color: var(--text-muted);">Warm-started from 1.5s hardware profiler; EMA entries persist after completed 50+ token generations.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Advanced Mode Panel -->
+    <section id="advanced-panel" class="panel hidden" aria-label="Advanced tuning controls">
+      <div class="panel-head">
+        <div>
+          <h2 class="panel-title">Advanced Mode: Memory Allocation, Output Sampling &amp; Experimental Tuning</h2>
+          <span class="panel-sub">Tune RAM/VRAM safety pools, planner thresholds, batching, and sampling parameters for best quality or throughput</span>
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button class="btn btn-secondary btn-sm" onclick="resetTuningDefaults()">Reset Tuning Defaults</button>
+          <button class="btn btn-primary btn-sm" onclick="applyAdvancedConfig()">Apply &amp; Recompute Plan</button>
+        </div>
+      </div>
+
+      <div class="profile-bar">
+        <span style="font-size: 12px; font-weight: 600; color: var(--text-muted); margin-right: 4px;">Quick Tuning Profile:</span>
+        <button class="btn btn-secondary btn-sm" onclick="applyTuningProfile('balanced')">Balanced Default</button>
+        <button class="btn btn-secondary btn-sm" onclick="applyTuningProfile('quality')">Best Output / Reasoning</button>
+        <button class="btn btn-secondary btn-sm" onclick="applyTuningProfile('throughput')">Max Throughput</button>
+        <button class="btn btn-secondary btn-sm" onclick="applyTuningProfile('edge')">Low-RAM Edge Conserving</button>
+      </div>
+
+      <div class="adv-subhead">
+        <span>1. RAM, VRAM &amp; Planner Threshold Tuning</span>
+        <span style="font-size: 11px; font-weight: 500; text-transform: none; color: var(--text-muted);">Invariant: alloc_mb ≤ safe_cap_mb + vram_safe_mb always enforced</span>
+      </div>
+      <div class="adv-grid">
+        <div class="field">
+          <label for="adv-role-override">Node Role Policy (Auto-Election Override)</label>
+          <select id="adv-role-override">
+            <option value="auto">Auto (Strongest Score Elects Master)</option>
+            <option value="master">Force Master Hub</option>
+            <option value="worker">Force Worker Spoke</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="adv-desktop-ram-cap">Linux / Windows / macOS RAM Pool % (of MemAvailable - Reserve)</label>
+          <input type="number" id="adv-desktop-ram-cap" min="10" max="100" value="100">
+        </div>
+        <div class="field">
+          <label for="adv-vram-cap">GPU VRAM Safe Allocation % (10–100%, 450 MB reserve on ≤8 GB)</label>
+          <input type="number" id="adv-vram-cap" min="10" max="100" value="90">
+        </div>
+        <div class="field">
+          <label for="adv-os-reserve">OS / Kernel Headroom Reserve (MB)</label>
+          <input type="number" id="adv-os-reserve" min="256" max="8192" step="128" value="1024">
+        </div>
+        <div class="field">
+          <label for="adv-ram-cap" id="adv-ram-cap-label">Android Physical RAM Cap % (Max 50%, ignores zram)</label>
+          <input type="number" id="adv-ram-cap" min="10" max="50" value="50">
+        </div>
+        <div class="field">
+          <label for="adv-max-rtt">Max Spoke p95 RTT Before Pruning (ms)</label>
+          <input type="number" id="adv-max-rtt" min="1" max="250" step="0.5" value="15">
+        </div>
+        <div class="field">
+          <label for="adv-max-loss">Max Packet Loss Before Pruning (%)</label>
+          <input type="number" id="adv-max-loss" min="0" max="25" step="0.5" value="2">
+        </div>
+        <div class="field">
+          <label for="adv-thermal-threshold">Thermal Throttle Prune Headroom (0.50–0.99)</label>
+          <input type="number" id="adv-thermal-threshold" min="0.50" max="0.99" step="0.05" value="0.90">
+        </div>
+        <div class="field">
+          <label for="adv-min-alloc">Minimum Worthwhile Spoke Allocation (MB)</label>
+          <input type="number" id="adv-min-alloc" min="64" max="4096" step="64" value="256">
+        </div>
+      </div>
+
+      <div class="adv-subhead">
+        <span>1b. Proactive Thermal-Safe Balancer Limits &amp; Cooldown Hysteresis</span>
+        <span style="font-size: 11px; font-weight: 500; text-transform: none; color: var(--text-muted);">Auto-sheds -25% on Shed °C and moves 0 layers cleanly on Critical °C</span>
+      </div>
+      <div class="adv-grid">
+        <div class="field">
+          <label for="adv-th-android-warn">Android Warn °C (Default 42°C)</label>
+          <input type="number" id="adv-th-android-warn" min="35" max="50" step="0.5" value="42">
+        </div>
+        <div class="field">
+          <label for="adv-th-android-shed">Android Shed -25% °C (Default 45°C)</label>
+          <input type="number" id="adv-th-android-shed" min="38" max="55" step="0.5" value="45">
+        </div>
+        <div class="field">
+          <label for="adv-th-android-crit">Android Emergency Offload °C (Default 48°C)</label>
+          <input type="number" id="adv-th-android-crit" min="40" max="60" step="0.5" value="48">
+        </div>
+        <div class="field">
+          <label for="adv-th-gpu-warn">GPU Warn °C (Default 78°C)</label>
+          <input type="number" id="adv-th-gpu-warn" min="55" max="90" step="1" value="78">
+        </div>
+        <div class="field">
+          <label for="adv-th-gpu-shed">GPU Shed -25% °C (Default 83°C)</label>
+          <input type="number" id="adv-th-gpu-shed" min="60" max="95" step="1" value="83">
+        </div>
+        <div class="field">
+          <label for="adv-th-gpu-crit">GPU Emergency Offload °C (Default 87°C)</label>
+          <input type="number" id="adv-th-gpu-crit" min="65" max="100" step="1" value="87">
+        </div>
+        <div class="field">
+          <label for="adv-th-cpu-warn">Desktop / Pi CPU Warn °C (Default 75°C)</label>
+          <input type="number" id="adv-th-cpu-warn" min="55" max="95" step="1" value="75">
+        </div>
+        <div class="field">
+          <label for="adv-th-cpu-crit">Desktop / Pi CPU Critical °C (Default 88°C)</label>
+          <input type="number" id="adv-th-cpu-crit" min="65" max="105" step="1" value="88">
+        </div>
+        <div class="field">
+          <label for="adv-th-hysteresis">Cooldown Hysteresis Band °C / Hold (s)</label>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+            <input type="number" id="adv-th-hysteresis" min="2" max="15" step="0.5" value="5" aria-label="Hysteresis C">
+            <input type="number" id="adv-th-hold" min="5" max="180" step="5" value="30" aria-label="Cooldown hold seconds">
+          </div>
+        </div>
+      </div>
+
+      <div class="adv-subhead">
+        <span>1c. Per-Node Overrides &amp; Manual Weight / Thread Controls</span>
+        <button class="btn btn-secondary btn-sm" onclick="resetLearnedHistory()">Reset Learned Profile</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Node ID</th>
+              <th>Enabled</th>
+              <th class="num">RAM Cap %</th>
+              <th class="num">VRAM Cap %</th>
+              <th class="num">Threads</th>
+              <th class="num">Manual Weight</th>
+              <th class="num">Max CPU °C</th>
+            </tr>
+          </thead>
+          <tbody id="node-overrides-body">
+            <tr><td colspan="7" style="color: var(--text-muted);">Waiting for discovered cluster nodes...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="adv-subhead">
+        <span>2. Model Execution &amp; Best-Output Sampling (Stock llama.cpp v1.0.0)</span>
+        <label class="check-item" style="font-size: 12px; font-weight: 600; text-transform: none;">
+          <input type="checkbox" id="adv-emit-tuning"> Emit Batch &amp; Sampling Tuning Flags (-b, -ub, --temp, --min-p, ...)
+        </label>
+      </div>
+      <div class="adv-grid">
+        <div class="field">
+          <label for="adv-ngl">GPU Offload Layers (-ngl)</label>
+          <input type="number" id="adv-ngl" min="0" max="999" value="99">
+        </div>
+        <div class="field">
+          <label for="adv-ctx">Context Length (-c, 0 = auto-fit 90% spare RAM)</label>
+          <input type="number" id="adv-ctx" min="0" max="131072" step="512" value="4096">
+        </div>
+        <div class="field">
+          <label for="adv-kv">KV Cache Precision (-ctk / -ctv)</label>
+          <select id="adv-kv">
+            <option value="q8_0">q8_0 (Balanced precision)</option>
+            <option value="f16">f16 (Unquantized max quality)</option>
+            <option value="q4_0">q4_0 (Compact KV for 4 GB spokes)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="adv-cache-reuse">KV Prefix Cache Reuse (--cache-reuse)</label>
+          <input type="number" id="adv-cache-reuse" min="0" max="4096" step="64" value="256">
+        </div>
+        <div class="field">
+          <label for="adv-parallel-slots">Batch Parallel Slots (--parallel, 0 = auto by Tier)</label>
+          <input type="number" id="adv-parallel-slots" min="0" max="32" step="1" value="0">
+        </div>
+        <div class="field">
+          <label for="adv-batch">Prompt Batch Size (-b)</label>
+          <input type="number" id="adv-batch" min="64" max="16384" step="64" value="2048">
+        </div>
+        <div class="field">
+          <label for="adv-ubatch">Micro-Batch Size (-ub)</label>
+          <input type="number" id="adv-ubatch" min="32" max="8192" step="32" value="512">
+        </div>
+        <div class="field">
+          <label for="adv-threads">Host CPU Threads (-t, 0 = auto P-core pin)</label>
+          <input type="number" id="adv-threads" min="0" max="256" value="0">
+        </div>
+        <div class="field">
+          <label for="adv-temp">Temperature (--temp)</label>
+          <input type="number" id="adv-temp" min="0" max="2" step="0.05" value="0.7">
+        </div>
+        <div class="field">
+          <label for="adv-top-p">Nucleus Top-P (--top-p)</label>
+          <input type="number" id="adv-top-p" min="0.01" max="1" step="0.05" value="0.9">
+        </div>
+        <div class="field">
+          <label for="adv-top-k">Top-K (--top-k)</label>
+          <input type="number" id="adv-top-k" min="0" max="200" step="1" value="40">
+        </div>
+        <div class="field">
+          <label for="adv-min-p">Min-P (--min-p)</label>
+          <input type="number" id="adv-min-p" min="0" max="1" step="0.01" value="0.05">
+        </div>
+        <div class="field">
+          <label for="adv-repeat-penalty">Repeat Penalty (--repeat-penalty)</label>
+          <input type="number" id="adv-repeat-penalty" min="0.8" max="2" step="0.05" value="1.1">
+        </div>
+        <div class="field">
+          <label for="adv-seed">Deterministic Seed (--seed, -1 = random)</label>
+          <input type="number" id="adv-seed" min="-1" max="2147483647" step="1" value="-1">
+        </div>
+        <div class="field">
+          <label for="adv-ot">MoE Expert Override (-ot quoted regex)</label>
+          <input type="text" id="adv-ot" value=".ffn_.*_exps.=CPU">
+        </div>
+        <div class="field">
+          <label for="adv-draft">Speculative Draft Model (--model-draft)</label>
+          <input type="text" id="adv-draft" placeholder="e.g. models/Qwen3-0.6B-Q4_K_M.gguf">
+        </div>
+        <div class="field">
+          <label for="adv-split">Manual --tensor-split Override (blank = normalized auto)</label>
+          <input type="text" id="adv-split" placeholder="e.g. 67.4,28.9,3.7">
+        </div>
+        <div class="field">
+          <label for="adv-apikey">Server API Key (--api-key, optional)</label>
+          <input type="password" id="adv-apikey" placeholder="Optional bearer key">
+        </div>
+      </div>
+
+      <div class="check-row">
+        <label class="check-item"><input type="checkbox" id="adv-cont-batching" checked> Continuous Batching (--cont-batching)</label>
+        <label class="check-item"><input type="checkbox" id="adv-flash-attn" checked> Flash Attention (--flash-attn)</label>
+        <label class="check-item"><input type="checkbox" id="adv-mlock"> Lock Model Weights in RAM (--mlock)</label>
+        <label class="check-item"><input type="checkbox" id="adv-cache-c" checked> Worker Local Tensor Cache (rpc-server -c)</label>
+      </div>
+
+      <div class="exp-box">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+          <strong style="font-size: 13px; color: #fcd34d;">3. Experimental Overrides, Compute Fork Selector &amp; Ternary Kernels</strong>
+          <label class="check-item" style="font-size: 12px;">
+            <input type="checkbox" id="adv-exp-enable" onchange="toggleExperimentalForkInputs()"> Enable experimental overrides &amp; fork flags
+          </label>
+        </div>
+        <div class="adv-grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
+          <div class="field">
+            <label for="adv-backend-pref">Compute Backend Selector (./bin/ drop-in or stock)</label>
+            <select id="adv-backend-pref">
+              <option value="auto">Auto-Detect (ik_llama.cpp -> tandem.cpp -> stock v1.0.0)</option>
+              <option value="stock">Force Stock llama.cpp v1.0.0 (RPC v9)</option>
+              <option value="ik_llama">Prefer ik_llama.cpp (Fused MoE / MLA)</option>
+              <option value="tandem">Prefer tandem.cpp (CPU-miss Overlap)</option>
+            </select>
+          </div>
+          <div class="field" style="justify-content: flex-end;">
+            <label class="check-item"><input type="checkbox" id="adv-ternary-mode"> BitNet b1.58 Ternary Kernel Mode (TQ1_0 / TQ2_0)</label>
+          </div>
+        </div>
+        <div class="check-row">
+          <label class="check-item"><input type="checkbox" id="adv-allow-android-over50" disabled onchange="toggleExperimentalForkInputs()"> Unlock &gt;50% Android RAM Cap (up to 85%, risks Android lmkd SIGKILL)</label>
+          <label class="check-item"><input type="checkbox" id="adv-async-rpc" disabled> Async ggml-rpc Pipelining (--rpc-async)</label>
+          <label class="check-item"><input type="checkbox" id="adv-fp8-wire" disabled> FP8 Wire Compression (--rpc-wire-quant fp8)</label>
+        </div>
+      </div>
+    </section>
+
+    <!-- Isolated Virtual Sandbox (NEVER pollutes Live Cluster) -->
+    <section id="virtual-test" class="panel">
+      <div class="panel-head">
+        <div>
+          <h2 class="panel-title">4-Node Virtual Sandbox Test</h2>
+          <span class="panel-sub">Isolated simulation of RTX 3050 Master + 12GB USB Android + 4GB Wi-Fi Android (3% loss) + 4GB Pi 400</span>
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="runVirtualTest()">Execute Virtual Verification</button>
+      </div>
+
+      <div id="virtual-sandbox-banner" class="notice-banner notice-sim hidden">
+        <span>SIMULATED — NOT REAL HARDWARE · Live cluster registry and /api/nodes remain completely untouched.</span>
+        <span class="tabular" id="sim-summary-meta"></span>
+      </div>
+
+      <div id="virtual-sandbox-body" class="grid-2 hidden">
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+          <div class="topology-box" style="height: 260px;">
+            <svg id="sim-topology-svg" width="100%" height="100%" viewBox="0 0 580 300" aria-label="Simulated 4-node star topology"></svg>
+          </div>
+          <div class="kpi-grid" style="padding-top: 8px;">
+            <div class="kpi-cell">
+              <div class="kpi-label">Sim Normalized --tensor-split</div>
+              <div class="kpi-val tabular" id="sim-kpi-split">-</div>
+            </div>
+            <div class="kpi-cell">
+              <div class="kpi-label">Sim --rpc Endpoints</div>
+              <div class="kpi-val tabular" id="sim-kpi-rpc">-</div>
+            </div>
+          </div>
+          <div class="cmd-box" id="sim-cmd-preview"></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Simulated Node</th>
+                <th class="num">p95 RTT / Loss</th>
+                <th class="num">Safe Cap + VRAM</th>
+                <th class="num">Score</th>
+                <th class="num">Sim Alloc</th>
+              </tr>
+            </thead>
+            <tbody id="sim-node-table"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="virtual-checks" class="check-list">
+        <div style="color: var(--text-muted); font-size: 13px;">
+          Click "Execute Virtual Verification" to verify cap-bounded allocation, normalized --tensor-split, 32-byte v1.0.0/RPC v9 pinning, 50% Android RAM cap, and lossy spoke pruning inside this isolated sandbox.
+        </div>
+      </div>
+    </section>
+
+    <!-- Rust clusterd & Android NDK r28 Kit Browser -->
+    <section id="rust-kit" class="panel">
+      <div class="panel-head">
+        <div>
+          <h2 class="panel-title">clusterd Rust Core, Android NDK r28 &amp; Multi-OS CI Kit</h2>
+          <span class="panel-sub">Rust 2021 (std + serde + serde_json) · adb_tunnel.rs · 16 KB ELF NDK r28 · Windows/Linux/Android CI matrix</span>
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="copyText('rust-code-view', this)">Copy Active File</button>
+      </div>
+      <div class="file-tabs" id="rust-file-tabs" role="tablist" aria-label="clusterd source files"></div>
+      <pre class="code-view" id="rust-code-view">Loading clusterd Rust source files...</pre>
+    </section>
+
+    <!-- OpenAI Proxy Chat & Structured Logs -->
+    <section id="chat-logs" class="grid-equal">
+      <div class="panel">
+        <div class="panel-head">
+          <h2 class="panel-title">Live Inference Proxy (/v1/chat/completions → :8080)</h2>
+          <label class="check-item" style="font-size: 12px;">
+            <input type="checkbox" id="chat-stream" checked> Stream SSE
+          </label>
+        </div>
+        <div class="chat-box">
+          <div id="chat-history" class="chat-history">
+            <div class="msg assistant">Requests proxy strictly to real llama-server on port 8080 (returns HTTP 503 when offline).</div>
+          </div>
+          <div class="chat-controls">
+            <input type="text" id="chat-input" placeholder="Send prompt to /v1/chat/completions..." onkeydown="if(event.key==='Enter') sendChat()">
+            <button class="btn btn-primary" onclick="sendChat()">Send</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2 class="panel-title">Structured Cluster Logs (logs/cluster.log)</h2>
+          <button class="btn btn-secondary btn-sm" onclick="fetchLogs()">Refresh</button>
+        </div>
+        <pre id="log-viewer" class="log-viewer">Loading cluster logs...</pre>
+      </div>
+    </section>
+  </main>
+
+  <!-- Floating Draggable & Collapsible Resource Monitor HUD (1.5s SSE stream) -->
+  <aside id="floating-hud" class="floating-hud" aria-label="Floating Resource Monitor HUD">
+    <div id="hud-drag-handle" class="hud-header">
+      <div class="hud-title">
+        <span class="hud-dot" id="hud-sse-dot"></span>
+        <span>Resource Monitor HUD</span>
+        <span class="tabular" id="hud-cluster-tok" style="color: #93c5fd;">0.0 tok/s</span>
+      </div>
+      <div class="hud-actions">
+        <button class="hud-btn" id="btn-popout-hud" onclick="togglePopoutHud()">Pop-Out</button>
+        <button class="hud-btn" id="btn-collapse-hud" onclick="toggleHudCollapse()">_</button>
+      </div>
     </div>
-  </div>
+    <div id="hud-body" class="hud-body">
+      <div class="hud-summary">
+        <span id="hud-tier-badge">Tier B</span>
+        <span class="tabular" id="hud-stream-state">SSE /api/events · 1.5s</span>
+      </div>
+      <div id="hud-nodes-list" style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 11px; color: var(--text-muted);">Connecting to live SSE telemetry...</div>
+      </div>
+    </div>
+  </aside>
 
   <script>
+    const MODEL_PRESETS = {
+      "moe-30b": { model_path: "models/Qwen3-30B-A3B-Q4_K_M.gguf", file_size_mb: 18500, is_moe: true, is_ternary: false, arch: "qwen3moe", quant: "Q4_K_M" },
+      "ternary-27b": { model_path: "models/BitNet-b1.58-27B-TQ1_0.gguf", file_size_mb: 6400, is_moe: false, is_ternary: true, arch: "bitnet", quant: "TQ1_0" },
+      "dense-32b": { model_path: "models/Qwen2.5-32B-Instruct-Q4_K_M.gguf", file_size_mb: 19800, is_moe: false, is_ternary: false, arch: "qwen2", quant: "Q4_K_M" },
+      "dense-70b": { model_path: "models/Llama-3.3-70B-Instruct-Q4_K_M.gguf", file_size_mb: 40500, is_moe: false, is_ternary: false, arch: "llama", quant: "Q4_K_M" }
+    };
+
+    let clusterdFiles = [];
+    let activeFileIndex = 0;
+    let initialConfigHydrated = false;
+
+    const TUNING_PROFILES = {
+      balanced: {
+        role_override: 'auto',
+        desktop_ram_cap_pct: 100, vram_cap_pct: 90, os_reserve_mb: 1024, android_ram_cap_pct: 50,
+        max_p95_rtt_ms: 15, max_pkt_loss_pct: 2, thermal_threshold: 0.90, min_alloc_mb: 256,
+        ngl: 99, ctx_size: 4096, kv_quant: 'q8_0', cache_reuse: 256, parallel_slots: 0,
+        batch_size: 2048, ubatch_size: 512, threads: 0,
+        cont_batching: true, flash_attn: true, mlock: false, emit_tuning_flags: false,
+        temp: 0.7, top_p: 0.9, top_k: 40, min_p: 0.05, repeat_penalty: 1.1, seed: -1
+      },
+      quality: {
+        role_override: 'auto',
+        desktop_ram_cap_pct: 100, vram_cap_pct: 92, os_reserve_mb: 1024, android_ram_cap_pct: 50,
+        max_p95_rtt_ms: 15, max_pkt_loss_pct: 2, thermal_threshold: 0.90, min_alloc_mb: 256,
+        ngl: 99, ctx_size: 16384, kv_quant: 'f16', cache_reuse: 512, parallel_slots: 1,
+        batch_size: 2048, ubatch_size: 512, threads: 0,
+        cont_batching: true, flash_attn: true, mlock: true, emit_tuning_flags: true,
+        temp: 0.35, top_p: 0.95, top_k: 32, min_p: 0.06, repeat_penalty: 1.08, seed: -1
+      },
+      throughput: {
+        role_override: 'auto',
+        desktop_ram_cap_pct: 100, vram_cap_pct: 98, os_reserve_mb: 1024, android_ram_cap_pct: 50,
+        max_p95_rtt_ms: 10, max_pkt_loss_pct: 1, thermal_threshold: 0.88, min_alloc_mb: 512,
+        ngl: 99, ctx_size: 4096, kv_quant: 'q8_0', cache_reuse: 256, parallel_slots: 4,
+        batch_size: 4096, ubatch_size: 1024, threads: 0,
+        cont_batching: true, flash_attn: true, mlock: true, emit_tuning_flags: true,
+        temp: 0.6, top_p: 0.9, top_k: 40, min_p: 0.05, repeat_penalty: 1.05, seed: -1
+      },
+      edge: {
+        role_override: 'auto',
+        desktop_ram_cap_pct: 85, vram_cap_pct: 80, os_reserve_mb: 1024, android_ram_cap_pct: 40,
+        max_p95_rtt_ms: 25, max_pkt_loss_pct: 2.5, thermal_threshold: 0.85, min_alloc_mb: 128,
+        ngl: 99, ctx_size: 0, kv_quant: 'q4_0', cache_reuse: 128, parallel_slots: 1,
+        batch_size: 1024, ubatch_size: 256, threads: 0,
+        cont_batching: true, flash_attn: true, mlock: false, emit_tuning_flags: true,
+        temp: 0.7, top_p: 0.9, top_k: 40, min_p: 0.05, repeat_penalty: 1.1, seed: -1
+      }
+    };
+
+    function setUiMode(mode) {
+      const adv = document.getElementById('advanced-panel');
+      const tabDef = document.getElementById('tab-default');
+      const tabAdv = document.getElementById('tab-advanced');
+      if (mode === 'advanced') {
+        adv.classList.remove('hidden');
+        tabAdv.classList.add('active');
+        tabDef.classList.remove('active');
+      } else {
+        adv.classList.add('hidden');
+        tabDef.classList.add('active');
+        tabAdv.classList.remove('active');
+      }
+    }
+
+    function toggleExperimentalForkInputs() {
+      const enabled = document.getElementById('adv-exp-enable').checked;
+      const over50 = document.getElementById('adv-allow-android-over50');
+      const a = document.getElementById('adv-async-rpc');
+      const f = document.getElementById('adv-fp8-wire');
+      const ramInput = document.getElementById('adv-ram-cap');
+      const ramLabel = document.getElementById('adv-ram-cap-label');
+
+      over50.disabled = !enabled;
+      a.disabled = !enabled;
+      f.disabled = !enabled;
+      if (!enabled) {
+        over50.checked = false;
+        a.checked = false;
+        f.checked = false;
+      }
+
+      if (enabled && over50.checked) {
+        ramInput.max = '85';
+        ramLabel.textContent = 'Android Physical RAM Cap % (Experimental Max 85%, ignores zram)';
+      } else {
+        ramInput.max = '50';
+        if (Number(ramInput.value) > 50) ramInput.value = '50';
+        ramLabel.textContent = 'Android Physical RAM Cap % (Max 50%, ignores zram)';
+      }
+    }
+
+    let lastLiveNodes = [];
+    let lastStatusPayload = null;
+    let hudCollapsed = false;
+    let pipWindowRef = null;
+
+    function syncAdvancedInputsFromConfig(cfg) {
+      if (!cfg) return;
+      document.getElementById('adv-role-override').value = cfg.role_override ?? 'auto';
+      document.getElementById('adv-desktop-ram-cap').value = cfg.desktop_ram_cap_pct ?? 100;
+      document.getElementById('adv-vram-cap').value = cfg.vram_cap_pct ?? 90;
+      document.getElementById('adv-os-reserve').value = cfg.os_reserve_mb ?? 1024;
+      document.getElementById('adv-ram-cap').value = cfg.android_ram_cap_pct ?? 50;
+      document.getElementById('adv-max-rtt').value = cfg.max_p95_rtt_ms ?? 15;
+      document.getElementById('adv-max-loss').value = cfg.max_pkt_loss_pct ?? 2;
+      document.getElementById('adv-thermal-threshold').value = cfg.thermal_threshold ?? 0.90;
+      document.getElementById('adv-min-alloc').value = cfg.min_alloc_mb ?? 256;
+
+      const tl = cfg.thermal_limits || {};
+      document.getElementById('adv-th-android-warn').value = tl.android_warn_c ?? 42;
+      document.getElementById('adv-th-android-shed').value = tl.android_shed_c ?? 45;
+      document.getElementById('adv-th-android-crit').value = tl.android_crit_c ?? 48;
+      document.getElementById('adv-th-gpu-warn').value = tl.gpu_warn_c ?? 78;
+      document.getElementById('adv-th-gpu-shed').value = tl.gpu_shed_c ?? 83;
+      document.getElementById('adv-th-gpu-crit').value = tl.gpu_crit_c ?? 87;
+      document.getElementById('adv-th-cpu-warn').value = tl.cpu_warn_c ?? 75;
+      document.getElementById('adv-th-cpu-crit').value = tl.cpu_crit_c ?? 88;
+      document.getElementById('adv-th-hysteresis').value = tl.cooldown_hysteresis_c ?? 5;
+      document.getElementById('adv-th-hold').value = tl.cooldown_hold_secs ?? 30;
+
+      document.getElementById('adv-ngl').value = cfg.ngl ?? 99;
+      document.getElementById('adv-ctx').value = cfg.ctx_size ?? 4096;
+      document.getElementById('adv-kv').value = cfg.kv_quant ?? 'q8_0';
+      document.getElementById('adv-cache-reuse').value = cfg.cache_reuse ?? 256;
+      document.getElementById('adv-parallel-slots').value = cfg.parallel_slots ?? 0;
+      document.getElementById('adv-batch').value = cfg.batch_size ?? 2048;
+      document.getElementById('adv-ubatch').value = cfg.ubatch_size ?? 512;
+      document.getElementById('adv-threads').value = cfg.threads ?? 0;
+      document.getElementById('adv-temp').value = cfg.temp ?? 0.7;
+      document.getElementById('adv-top-p').value = cfg.top_p ?? 0.9;
+      document.getElementById('adv-top-k').value = cfg.top_k ?? 40;
+      document.getElementById('adv-min-p').value = cfg.min_p ?? 0.05;
+      document.getElementById('adv-repeat-penalty').value = cfg.repeat_penalty ?? 1.1;
+      document.getElementById('adv-seed').value = cfg.seed ?? -1;
+      document.getElementById('adv-ot').value = cfg.moe_ot_regex ?? '.ffn_.*_exps.=CPU';
+      document.getElementById('adv-draft').value = cfg.draft_model ?? '';
+      document.getElementById('adv-split').value = cfg.manual_tensor_split ?? '';
+      document.getElementById('adv-apikey').value = cfg.api_key ?? '';
+
+      document.getElementById('adv-cont-batching').checked = cfg.cont_batching !== false;
+      document.getElementById('adv-flash-attn').checked = cfg.flash_attn !== false;
+      document.getElementById('adv-mlock').checked = Boolean(cfg.mlock);
+      document.getElementById('adv-cache-c').checked = cfg.rpc_cache_c !== false;
+      document.getElementById('adv-emit-tuning').checked = Boolean(cfg.emit_tuning_flags);
+
+      document.getElementById('adv-backend-pref').value = cfg.backend_preference ?? 'auto';
+      document.getElementById('adv-ternary-mode').checked = Boolean(cfg.ternary_mode);
+      document.getElementById('adv-exp-enable').checked = Boolean(cfg.experimental_fork_enabled);
+      document.getElementById('adv-allow-android-over50').checked = Boolean(cfg.allow_android_over_50);
+      document.getElementById('adv-async-rpc').checked = Boolean(cfg.async_rpc);
+      document.getElementById('adv-fp8-wire').checked = Boolean(cfg.fp8_wire_compress);
+      toggleExperimentalForkInputs();
+      renderNodeOverridesTable(lastLiveNodes, cfg.node_overrides || {});
+    }
+
+    function renderNodeOverridesTable(nodes, overrides) {
+      const tbody = document.getElementById('node-overrides-body');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+      if (!nodes || !nodes.length) {
+        tbody.innerHTML = '<tr><td colspan="7" style="color: var(--text-muted);">No live nodes available.</td></tr>';
+        return;
+      }
+      nodes.forEach(n => {
+        const ov = (overrides && overrides[n.node_id]) || {};
+        const isDroid = (n.os || '').toLowerCase().includes('android');
+        const tr = document.createElement('tr');
+        tr.dataset.nodeId = n.node_id;
+        tr.innerHTML = `
+          <td style="font-weight:600;color:var(--text-bright);">${n.node_id}</td>
+          <td><input type="checkbox" class="ov-enabled" ${ov.disabled ? '' : 'checked'}></td>
+          <td class="num"><input type="number" class="ov-ram" min="10" max="100" style="width:70px;" value="${ov.ram_cap_pct ?? (isDroid ? 50 : 100)}"></td>
+          <td class="num"><input type="number" class="ov-vram" min="10" max="100" style="width:70px;" value="${ov.vram_cap_pct ?? 90}"></td>
+          <td class="num"><input type="number" class="ov-threads" min="1" max="256" style="width:70px;" value="${ov.threads ?? n.perf_cores ?? 4}"></td>
+          <td class="num"><input type="number" class="ov-weight" min="0.1" max="10" step="0.1" style="width:70px;" value="${ov.manual_weight ?? 1.0}"></td>
+          <td class="num"><input type="number" class="ov-maxcpu" min="55" max="105" step="1" style="width:70px;" value="${ov.max_cpu_temp_c ?? 88}"></td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function collectNodeOverridesFromDom() {
+      const overrides = {};
+      document.querySelectorAll('#node-overrides-body tr[data-node-id]').forEach(tr => {
+        const nid = tr.dataset.nodeId;
+        overrides[nid] = {
+          disabled: !tr.querySelector('.ov-enabled').checked,
+          ram_cap_pct: Number(tr.querySelector('.ov-ram').value) || undefined,
+          vram_cap_pct: Number(tr.querySelector('.ov-vram').value) || undefined,
+          threads: Number(tr.querySelector('.ov-threads').value) || undefined,
+          manual_weight: Number(tr.querySelector('.ov-weight').value) || 1.0,
+          max_cpu_temp_c: Number(tr.querySelector('.ov-maxcpu').value) || 88
+        };
+      });
+      return overrides;
+    }
+
+    function applyTuningProfile(profileName) {
+      const p = TUNING_PROFILES[profileName];
+      if (!p) return;
+      syncAdvancedInputsFromConfig({
+        ...p,
+        moe_ot_regex: document.getElementById('adv-ot').value,
+        draft_model: document.getElementById('adv-draft').value,
+        manual_tensor_split: document.getElementById('adv-split').value,
+        api_key: document.getElementById('adv-apikey').value,
+        rpc_cache_c: document.getElementById('adv-cache-c').checked,
+        backend_preference: document.getElementById('adv-backend-pref').value,
+        ternary_mode: document.getElementById('adv-ternary-mode').checked,
+        experimental_fork_enabled: document.getElementById('adv-exp-enable').checked,
+        allow_android_over_50: document.getElementById('adv-allow-android-over50').checked,
+        async_rpc: document.getElementById('adv-async-rpc').checked,
+        fp8_wire_compress: document.getElementById('adv-fp8-wire').checked
+      });
+      document.getElementById('meta-action-status').textContent = `Loaded '${profileName}' tuning preset — click Apply`;
+    }
+
+    function resetTuningDefaults() {
+      syncAdvancedInputsFromConfig({
+        ...TUNING_PROFILES.balanced,
+        moe_ot_regex: '.ffn_.*_exps.=CPU',
+        draft_model: '',
+        manual_tensor_split: '',
+        api_key: '',
+        rpc_cache_c: true,
+        backend_preference: 'auto',
+        ternary_mode: false,
+        experimental_fork_enabled: false,
+        allow_android_over_50: false,
+        async_rpc: false,
+        fp8_wire_compress: false,
+        node_overrides: {}
+      });
+      applyAdvancedConfig();
+    }
+
+    async function applyPreset() {
+      const key = document.getElementById('model-preset').value;
+      const model = MODEL_PRESETS[key];
+      if (!model) return;
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model })
+      });
+      document.getElementById('meta-action-status').textContent = `Loaded ${model.quant} profile`;
+      updateStatus();
+      fetchLogs();
+    }
+
+    async function loadDiscoveredModel(model) {
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model })
+      });
+      document.getElementById('meta-action-status').textContent = `Loaded ${model.model_path}`;
+      updateStatus();
+      fetchLogs();
+    }
+
+    async function scanModels() {
+      try {
+        const res = await fetch('/api/models');
+        if (!res.ok) return;
+        const data = await res.json();
+        const models = Array.isArray(data) ? data : (data.models || []);
+        document.getElementById('meta-action-status').textContent = `Scanned ./models/: ${models.length} GGUF file(s)`;
+        updateStatus();
+      } catch (e) {
+        console.error('Model scan failed', e);
+      }
+    }
+
+    async function resetLearnedHistory() {
+      await fetch('/api/history/reset', { method: 'POST' });
+      document.getElementById('meta-action-status').textContent = 'Reset cluster_history.json learned profiles';
+      updateStatus();
+      fetchLogs();
+    }
+
+    async function applyAdvancedConfig() {
+      const expEnabled = document.getElementById('adv-exp-enable').checked;
+      const allowOver50 = expEnabled && document.getElementById('adv-allow-android-over50').checked;
+      const ctxVal = Number(document.getElementById('adv-ctx').value);
+      const config = {
+        role_override: document.getElementById('adv-role-override').value || 'auto',
+        desktop_ram_cap_pct: Number(document.getElementById('adv-desktop-ram-cap').value) || 100,
+        vram_cap_pct: Number(document.getElementById('adv-vram-cap').value) || 90,
+        os_reserve_mb: Number(document.getElementById('adv-os-reserve').value) || 1024,
+        android_ram_cap_pct: Number(document.getElementById('adv-ram-cap').value) || 50,
+        max_p95_rtt_ms: Number(document.getElementById('adv-max-rtt').value) || 15,
+        max_pkt_loss_pct: Number(document.getElementById('adv-max-loss').value),
+        thermal_threshold: Number(document.getElementById('adv-thermal-threshold').value) || 0.90,
+        min_alloc_mb: Number(document.getElementById('adv-min-alloc').value) || 256,
+
+        thermal_limits: {
+          android_warn_c: Number(document.getElementById('adv-th-android-warn').value) || 42,
+          android_shed_c: Number(document.getElementById('adv-th-android-shed').value) || 45,
+          android_crit_c: Number(document.getElementById('adv-th-android-crit').value) || 48,
+          gpu_warn_c: Number(document.getElementById('adv-th-gpu-warn').value) || 78,
+          gpu_shed_c: Number(document.getElementById('adv-th-gpu-shed').value) || 83,
+          gpu_crit_c: Number(document.getElementById('adv-th-gpu-crit').value) || 87,
+          cpu_warn_c: Number(document.getElementById('adv-th-cpu-warn').value) || 75,
+          cpu_crit_c: Number(document.getElementById('adv-th-cpu-crit').value) || 88,
+          cooldown_hysteresis_c: Number(document.getElementById('adv-th-hysteresis').value) || 5,
+          cooldown_hold_secs: Number(document.getElementById('adv-th-hold').value) || 30
+        },
+        node_overrides: collectNodeOverridesFromDom(),
+
+        ngl: Number(document.getElementById('adv-ngl').value),
+        ctx_size: Number.isFinite(ctxVal) ? ctxVal : 4096,
+        kv_quant: document.getElementById('adv-kv').value,
+        cache_reuse: Number(document.getElementById('adv-cache-reuse').value),
+        parallel_slots: Number(document.getElementById('adv-parallel-slots').value) || 0,
+        batch_size: Number(document.getElementById('adv-batch').value) || 2048,
+        ubatch_size: Number(document.getElementById('adv-ubatch').value) || 512,
+        threads: Number(document.getElementById('adv-threads').value) || 0,
+        temp: Number(document.getElementById('adv-temp').value),
+        top_p: Number(document.getElementById('adv-top-p').value) || 0.9,
+        top_k: Number(document.getElementById('adv-top-k').value),
+        min_p: Number(document.getElementById('adv-min-p').value),
+        repeat_penalty: Number(document.getElementById('adv-repeat-penalty').value) || 1.1,
+        seed: Number(document.getElementById('adv-seed').value),
+        moe_ot_regex: document.getElementById('adv-ot').value.trim() || '.ffn_.*_exps.=CPU',
+        draft_model: document.getElementById('adv-draft').value.trim(),
+        manual_tensor_split: document.getElementById('adv-split').value.trim(),
+        api_key: document.getElementById('adv-apikey').value.trim(),
+
+        cont_batching: document.getElementById('adv-cont-batching').checked,
+        flash_attn: document.getElementById('adv-flash-attn').checked,
+        mlock: document.getElementById('adv-mlock').checked,
+        rpc_cache_c: document.getElementById('adv-cache-c').checked,
+        emit_tuning_flags: document.getElementById('adv-emit-tuning').checked,
+
+        backend_preference: document.getElementById('adv-backend-pref').value || 'auto',
+        ternary_mode: document.getElementById('adv-ternary-mode').checked,
+        experimental_fork_enabled: expEnabled,
+        allow_android_over_50: allowOver50,
+        async_rpc: expEnabled && document.getElementById('adv-async-rpc').checked,
+        fp8_wire_compress: expEnabled && document.getElementById('adv-fp8-wire').checked
+      };
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config })
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        syncAdvancedInputsFromConfig(updated.config);
+      }
+      document.getElementById('meta-action-status').textContent = 'Tuning & thermal policy applied';
+      updateStatus();
+      fetchLogs();
+    }
+
+    async function discoverAndLaunch() {
+      const statusEl = document.getElementById('meta-action-status');
+      statusEl.textContent = 'Probing ADB & TCP handshakes...';
+      await fetch('/api/discover', { method: 'POST' });
+      const res = await fetch('/api/launch', { method: 'POST' });
+      const data = await res.json();
+      statusEl.textContent = data.llama_running ? 'llama-server launched' : 'Command verified';
+      updateStatus();
+      fetchLogs();
+    }
+
+    async function runVirtualTest() {
+      const res = await fetch('/api/virtual-test', { method: 'POST' });
+      const data = await res.json();
+      document.getElementById('meta-action-status').textContent = data.passed ? 'Sandbox suite passed' : 'Sandbox suite failed';
+      renderVirtualSandbox(data);
+      fetchLogs();
+    }
+
+    async function resetLocal() {
+      await fetch('/api/reset', { method: 'POST' });
+      document.getElementById('meta-action-status').textContent = 'Live cluster reset to local host';
+      updateStatus();
+      fetchLogs();
+    }
+
+    function renderVirtualSandbox(sim) {
+      if (!sim || !sim.checks) return;
+      document.getElementById('virtual-sandbox-banner').classList.remove('hidden');
+      document.getElementById('virtual-sandbox-body').classList.remove('hidden');
+
+      const plan = sim.plan || {};
+      const nodes = sim.nodes || [];
+      const passCount = sim.checks.filter(c => c.passed).length;
+      document.getElementById('sim-summary-meta').textContent =
+        `${passCount}/${sim.checks.length} Checks PASS · ${plan.cluster_tier_label || 'Tier A'} · Master=${plan.elected_master_id || 'master-rtx3050'} · Pool ${plan.total_cluster_safe_mb || 0} MB`;
+      document.getElementById('sim-kpi-split').textContent = plan.tensor_split || '-';
+      document.getElementById('sim-kpi-rpc').textContent = plan.rpc_arg || 'Local Only';
+      document.getElementById('sim-cmd-preview').textContent = plan.command_preview || '';
+
+      renderStarTopologySvg(document.getElementById('sim-topology-svg'), nodes, plan);
+
+      const plannedMap = new Map();
+      (plan.active_nodes || []).forEach(n => plannedMap.set(n.node_id, n));
+      (plan.pruned_nodes || []).forEach(n => plannedMap.set(n.node_id, n));
+
+      const tbody = document.getElementById('sim-node-table');
+      tbody.innerHTML = '';
+      nodes.forEach(n => {
+        const p = plannedMap.get(n.node_id) || {};
+        const isPruned = Boolean(p.pruned);
+        const safeTotal = (n.safe_cap_mb || 0) + (n.vram_safe_mb || 0);
+        const allocMb = p.alloc_mb || 0;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>
+            <div style="font-weight: 600; color: var(--text-bright);">${n.node_id}${n.is_master ? ' (Master)' : ''}</div>
+            <div class="tabular" style="font-size: 11px; color: var(--text-muted);">${n.ip}:${n.rpc_port} · ${n.execution_backend}</div>
+          </td>
+          <td class="num tabular">${(n.p95_rtt_ms ?? 0).toFixed(1)}ms / ${(n.pkt_loss_pct ?? 0).toFixed(1)}%</td>
+          <td class="num tabular">${safeTotal} MB</td>
+          <td class="num tabular">${Number(p.score || 0).toFixed(1)}</td>
+          <td class="num">${isPruned ? `<span class="state-err">0 MB (Pruned)</span>` : `<span class="state-ok tabular">${allocMb} MB</span>`}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      const el = document.getElementById('virtual-checks');
+      el.innerHTML = '';
+      sim.checks.forEach(c => {
+        const row = document.createElement('div');
+        row.className = 'check-entry';
+        row.innerHTML = `
+          <div>
+            <div style="font-weight: 600; color: var(--text-bright);">${c.name}</div>
+            <div style="font-size: 12px; color: var(--text-muted);">${c.detail}</div>
+          </div>
+          <span class="tabular ${c.passed ? 'state-ok' : 'state-err'}">${c.passed ? 'PASS' : 'FAIL'}</span>
+        `;
+        el.appendChild(row);
+      });
+    }
+
+    function renderAutoAdaptiveRibbon(data) {
+      const plan = data.plan || {};
+      const cfg = data.config || {};
+      document.getElementById('auto-tier-val').textContent = plan.cluster_tier_label || `Tier ${plan.cluster_tier || 'B'}`;
+      document.getElementById('auto-tier-sub').textContent = plan.tier_2_ssd_streaming
+        ? 'Tier-2 NVMe cyclic mmap streaming enabled'
+        : 'All allocated weights fit inside Safe Pool';
+
+      document.getElementById('auto-master-val').textContent = plan.elected_master_id || 'master-hub';
+      document.getElementById('auto-master-sub').textContent = `Role policy: ${cfg.role_override || 'auto'} · P-core auto-pinned`;
+
+      document.getElementById('auto-backend-val').textContent = plan.active_backend || 'stock llama.cpp v1.0.0 (RPC v9)';
+      document.getElementById('auto-backend-sub').textContent = plan.symmetric_lan_tp_eligible
+        ? 'SYMMETRIC_LAN_TP_ELIGIBLE (2^n homogeneous)'
+        : '1-Hop Star USB > Hotspot > LAN active';
+
+      const ctx = plan.auto_ctx_size || cfg.ctx_size || 4096;
+      const slots = plan.auto_parallel_slots || 1;
+      document.getElementById('auto-ctx-val').textContent = `-c ${ctx} · --parallel ${slots}`;
+      document.getElementById('auto-ctx-sub').textContent = cfg.cont_batching !== false
+        ? `Sarathi --cont-batching · --cache-reuse ${cfg.cache_reuse ?? 256}`
+        : 'Single-stream sequential serving';
+    }
+
+    function renderDecisionsTrace(decisions) {
+      const tbody = document.getElementById('decisions-table-body');
+      const countEl = document.getElementById('decisions-count');
+      tbody.innerHTML = '';
+      const list = Array.isArray(decisions) ? decisions : [];
+      countEl.textContent = `${list.length} mechanism${list.length === 1 ? '' : 's'}`;
+      if (!list.length) {
+        tbody.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted);">No auto-tune trace emitted yet.</td></tr>';
+        return;
+      }
+      list.forEach(d => {
+        const statusCls = d.status === 'ACTIVE' ? 'state-ok' : d.status === 'PRUNED' ? 'state-err' : 'state-warn';
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td style="font-weight: 600; color: var(--text-bright);">${d.mechanism}</td>
+          <td style="color: var(--text-muted);">${d.category}</td>
+          <td class="tabular"><span class="${statusCls}">${d.status}</span></td>
+          <td style="color: var(--text);">${d.reason}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderDiscoveredModels(models, activeModel) {
+      const tbody = document.getElementById('models-table-body');
+      const summary = document.getElementById('active-model-summary');
+      tbody.innerHTML = '';
+
+      if (activeModel) {
+        summary.textContent = `Active: ${activeModel.model_path} (${activeModel.quant || 'GGUF'}, ${activeModel.file_size_mb || 0} MB · ${activeModel.fit_badge || 'Streaming'})`;
+      }
+
+      const list = Array.isArray(models) ? models : [];
+      if (!list.length) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td colspan="5" style="color: var(--text-muted);">
+            0 local <code>.gguf</code> files found in <code>./models/</code> — using selected preset <code>${activeModel?.model_path || 'models/Qwen3-30B-A3B-Q4_K_M.gguf'}</code>
+            (${activeModel?.fit_badge || 'Best Fit'}). Drop <code>*.gguf</code> weights into <code>./models/</code> and click Rescan.
+          </td>
+        `;
+        tbody.appendChild(tr);
+        return;
+      }
+
+      list.forEach(m => {
+        const isCurrent = activeModel && activeModel.model_path === m.model_path;
+        const badgeCls = m.fit_badge === 'Fast' ? 'state-ok' : m.fit_badge === 'Best Fit' ? 'state-warn' : 'state-err';
+        const tr = document.createElement('tr');
+
+        const tdPath = document.createElement('td');
+        tdPath.style.fontWeight = '600';
+        tdPath.style.color = 'var(--text-bright)';
+        tdPath.textContent = m.model_path;
+
+        const tdArch = document.createElement('td');
+        tdArch.className = 'tabular';
+        tdArch.textContent = `${m.arch || 'llama'} / ${m.quant || 'Q4_K_M'}${m.is_moe ? ' (MoE)' : ''}`;
+
+        const tdSize = document.createElement('td');
+        tdSize.className = 'num tabular';
+        tdSize.textContent = `${m.file_size_mb || 0} MB`;
+
+        const tdFit = document.createElement('td');
+        tdFit.innerHTML = `<span class="${badgeCls}">${m.fit_badge || 'Best Fit'}</span>`;
+
+        const tdAct = document.createElement('td');
+        tdAct.className = 'num';
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-secondary btn-sm';
+        btn.textContent = isCurrent ? 'Active' : 'Load Model';
+        btn.disabled = isCurrent;
+        btn.onclick = () => loadDiscoveredModel(m);
+        tdAct.appendChild(btn);
+
+        tr.append(tdPath, tdArch, tdSize, tdFit, tdAct);
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderLearnedProfiles(profiles) {
+      const tbody = document.getElementById('learned-table-body');
+      const countEl = document.getElementById('learned-count');
+      if (!tbody) return;
+      const list = Array.isArray(profiles) ? profiles : [];
+      countEl.textContent = `${list.length} learned profile${list.length === 1 ? '' : 's'}`;
+      if (!list.length) {
+        tbody.innerHTML = '<tr><td colspan="7" style="color: var(--text-muted);">Warm-started from 1.5s hardware profiler; EMA entries persist after completed 50+ token generations.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = '';
+      list.forEach(p => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>
+            <div style="font-weight:600;color:var(--text-bright);">${p.node_id}</div>
+            <div style="font-size:11px;color:var(--text-muted);">${p.silicon}</div>
+          </td>
+          <td class="tabular">${p.model_arch} / ${p.quant_type} · ${p.link_type}</td>
+          <td class="num tabular">${Number(p.learned_score || 0).toFixed(2)}</td>
+          <td class="num tabular">${Number(p.effective_tok_s_per_gb || 0).toFixed(2)}</td>
+          <td class="num tabular">${Number(p.thermal_sustainability || 1).toFixed(2)}</td>
+          <td class="num tabular">${Math.round((p.recommended_load_scale || 1) * 100)}%</td>
+          <td class="num tabular">${p.sessions_observed || 0} / ${p.oom_or_throttle_count || 0}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function applyStatusPayload(data) {
+      if (!data) return;
+      lastStatusPayload = data;
+      const plan = data.plan || {};
+      const nodes = data.nodes || [];
+      lastLiveNodes = nodes;
+
+      document.getElementById('meta-pin').textContent = `${data.version || 'v1.0.0'} · RPC v${data.rpc_version || 9}`;
+      const llamaStatus = document.getElementById('meta-llama-status');
+      if (data.llama_running) {
+        llamaStatus.textContent = `llama-server live (port 8080 · ${(data.cluster_tok_s || 0).toFixed(1)} tok/s)`;
+        llamaStatus.className = 'state-ok';
+      } else {
+        llamaStatus.textContent = 'llama-server offline (port 8080)';
+        llamaStatus.className = 'state-warn';
+      }
+
+      renderAutoAdaptiveRibbon(data);
+      renderDecisionsTrace(plan.decisions || []);
+      renderDiscoveredModels(data.discovered_models || [], data.model);
+      renderLearnedProfiles(data.learned_profiles || []);
+      renderFloatingHud(data);
+
+      document.getElementById('topology-count').textContent = `${nodes.length} Live Node${nodes.length === 1 ? '' : 's'}`;
+      document.getElementById('kpi-pool').textContent = `${plan.total_cluster_safe_mb || 0} MB safe (${plan.total_pool_mb || 0} MB alloc)`;
+      document.getElementById('kpi-needed').textContent = `${plan.needed_mb || 0} MB`;
+      document.getElementById('kpi-split').textContent = plan.tensor_split || '100.0';
+      document.getElementById('kpi-rpc').textContent = plan.rpc_arg || 'Local Only';
+      document.getElementById('cmd-preview').textContent = plan.command_preview || '';
+
+      const mmapWarn = document.getElementById('mmap-warning');
+      if (plan.mmap_stream) {
+        mmapWarn.classList.remove('hidden');
+      } else {
+        mmapWarn.classList.add('hidden');
+      }
+
+      if (data.config) {
+        const cfg = data.config;
+        const androidLabel = (cfg.experimental_fork_enabled && cfg.allow_android_over_50)
+          ? `${cfg.android_ram_cap_pct}% (exp)`
+          : `≤${cfg.android_ram_cap_pct}%`;
+        document.getElementById('ram-policy-sub').textContent =
+          `Android: ${androidLabel} RAM · Linux/Win: ${cfg.desktop_ram_cap_pct ?? 100}% of (MemAvail - ${cfg.os_reserve_mb ?? 1024}MB) · VRAM: ${cfg.vram_cap_pct ?? 90}%`;
+        if (!initialConfigHydrated) {
+          syncAdvancedInputsFromConfig(cfg);
+          initialConfigHydrated = true;
+        }
+      }
+
+      if (data.virtual_sandbox) {
+        renderVirtualSandbox(data.virtual_sandbox);
+      }
+
+      renderStarTopologySvg(document.getElementById('topology-svg'), nodes, plan);
+      renderLiveNodeTable(nodes, plan);
+    }
+
     async function updateStatus() {
       try {
         const res = await fetch('/api/status');
         if (!res.ok) return;
         const data = await res.json();
-        
-        // Update Plan details
-        document.getElementById('plan-rpc').innerText = data.plan?.rpc_arg || 'Standalone (Master Only)';
-        document.getElementById('plan-split').innerText = data.plan?.tensor_split || '1.0';
-        document.getElementById('plan-flags').innerText = (data.plan?.flags || []).join(' ');
-        
-        let totalRam = 0;
-        (data.nodes || []).forEach(n => { totalRam += (n.safe_cap_mb || 0); });
-        document.getElementById('plan-ram').innerText = totalRam + ' MB';
-        document.getElementById('topology-count').innerText = (data.nodes || []).length + ' Nodes';
-
-        renderTopology(data.nodes || []);
-        renderNodeCards(data.nodes || []);
+        applyStatusPayload(data);
       } catch (e) {
-        console.error("Status fetch error", e);
+        console.error('Status error', e);
       }
     }
 
-    function renderTopology(nodes) {
-      const svg = document.getElementById('topology-svg');
+    function renderStarTopologySvg(svg, nodes, plan) {
       svg.innerHTML = '';
       if (!nodes.length) return;
 
+      const ns = 'http://www.w3.org/2000/svg';
+      const prunedSet = new Set((plan.pruned_nodes || []).map(p => p.node_id));
+      const plannedMap = new Map();
+      (plan.active_nodes || []).forEach(n => plannedMap.set(n.node_id, n));
+      (plan.pruned_nodes || []).forEach(n => plannedMap.set(n.node_id, n));
+
       const master = nodes.find(n => n.is_master) || nodes[0];
-      const workers = nodes.filter(n => n !== master);
-
-      const cx = 225, cy = 115;
-
-      // Draw Worker lines and nodes in star layout
-      const radius = 80;
+      const workers = nodes.filter(n => n.node_id !== master.node_id);
+      const cx = 290, cy = 158, radius = 84;
       const step = workers.length > 0 ? (2 * Math.PI) / workers.length : 0;
 
       workers.forEach((w, i) => {
         const angle = i * step - Math.PI / 2;
-        const wx = cx + radius * Math.cos(angle);
-        const wy = cy + radius * Math.sin(angle);
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+        const wx = cx + radius * cosA;
+        const wy = cy + radius * sinA;
+        const isOffline = w.status === 'OFFLINE';
+        const isPruned = prunedSet.has(w.node_id);
+        const pNode = plannedMap.get(w.node_id) || {};
 
-        let strokeColor = '#58a6ff'; // usb_rndis
-        if (w.link_type === 'wifi_hotspot') strokeColor = '#3fb950';
-        else if (w.link_type === 'wifi_lan') strokeColor = '#d29922';
+        let stroke = '#38bdf8';
+        if (isOffline) stroke = '#64748b';
+        else if (isPruned) stroke = '#ef4444';
+        else if (w.link_type === 'wifi_hotspot' || w.link_type === 'usb_rndis') stroke = '#22c55e';
 
-        // Star Line
-        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        const line = document.createElementNS(ns, 'line');
         line.setAttribute('x1', cx);
         line.setAttribute('y1', cy);
         line.setAttribute('x2', wx);
         line.setAttribute('y2', wy);
-        line.setAttribute('stroke', strokeColor);
+        line.setAttribute('stroke', stroke);
         line.setAttribute('stroke-width', '2');
-        line.setAttribute('stroke-dasharray', w.pkt_loss_pct > 0 ? '4' : 'none');
+        if (isPruned || isOffline) line.setAttribute('stroke-dasharray', '5,4');
         svg.appendChild(line);
 
-        // Worker circle
-        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        const circle = document.createElementNS(ns, 'circle');
         circle.setAttribute('cx', wx);
         circle.setAttribute('cy', wy);
-        circle.setAttribute('r', '16');
-        circle.setAttribute('fill', '#161b22');
-        circle.setAttribute('stroke', strokeColor);
+        circle.setAttribute('r', '17');
+        circle.setAttribute('fill', '#121824');
+        circle.setAttribute('stroke', stroke);
         circle.setAttribute('stroke-width', '2');
         svg.appendChild(circle);
 
-        // Worker label
-        const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        txt.setAttribute('x', wx);
-        txt.setAttribute('y', wy + (wy > cy ? 25 : -20));
-        txt.setAttribute('text-anchor', 'middle');
-        txt.setAttribute('fill', '#c9d1d9');
-        txt.textContent = `${w.node_id} (${w.rtt_ms}ms)`;
+        // Quadrant-aware anchor & radial padding to prevent any label collision
+        let anchor = 'middle';
+        let lx = wx;
+        let ly = wy;
+        if (cosA > 0.35) {
+          anchor = 'start';
+          lx = wx + 25;
+          ly = wy - 2;
+        } else if (cosA < -0.35) {
+          anchor = 'end';
+          lx = wx - 25;
+          ly = wy - 2;
+        } else if (sinA < 0) {
+          anchor = 'middle';
+          lx = wx;
+          ly = wy - 36;
+        } else {
+          anchor = 'middle';
+          lx = wx;
+          ly = wy + 34;
+        }
+
+        const txt = document.createElementNS(ns, 'text');
+        txt.setAttribute('x', lx);
+        txt.setAttribute('y', ly);
+        txt.setAttribute('text-anchor', anchor);
+        txt.setAttribute('fill', isOffline ? '#94a3b8' : isPruned ? '#fca5a5' : '#e2e8f0');
+
+        const line1 = document.createElementNS(ns, 'tspan');
+        line1.setAttribute('x', lx);
+        line1.setAttribute('dy', '0');
+        line1.textContent = w.node_id;
+
+        const line2 = document.createElementNS(ns, 'tspan');
+        line2.setAttribute('x', lx);
+        line2.setAttribute('dy', '13');
+        line2.setAttribute('fill', '#94a3b8');
+        if (isOffline) {
+          line2.textContent = 'OFFLINE · 0 MB';
+        } else if (isPruned) {
+          line2.textContent = `${(w.p95_rtt_ms ?? 0).toFixed(1)}ms · Pruned (0L)`;
+        } else {
+          line2.textContent = `${(w.p95_rtt_ms ?? 0).toFixed(1)}ms · ${pNode.alloc_mb || 0} MB`;
+        }
+
+        txt.appendChild(line1);
+        txt.appendChild(line2);
         svg.appendChild(txt);
       });
 
-      // Master circle in center
-      const mCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      const mCircle = document.createElementNS(ns, 'circle');
       mCircle.setAttribute('cx', cx);
       mCircle.setAttribute('cy', cy);
-      mCircle.setAttribute('r', '22');
-      mCircle.setAttribute('fill', '#1f6feb');
-      mCircle.setAttribute('stroke', '#58a6ff');
+      mCircle.setAttribute('r', '25');
+      mCircle.setAttribute('fill', '#1d4ed8');
+      mCircle.setAttribute('stroke', '#60a5fa');
       mCircle.setAttribute('stroke-width', '2');
       svg.appendChild(mCircle);
 
-      const mTxt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      const mTxt = document.createElementNS(ns, 'text');
       mTxt.setAttribute('x', cx);
       mTxt.setAttribute('y', cy + 4);
       mTxt.setAttribute('text-anchor', 'middle');
       mTxt.setAttribute('fill', '#ffffff');
       mTxt.setAttribute('font-weight', 'bold');
-      mTxt.textContent = 'HUB';
+      mTxt.textContent = 'MASTER';
       svg.appendChild(mTxt);
     }
 
-    function renderNodeCards(nodes) {
-      const container = document.getElementById('node-cards');
-      container.innerHTML = '';
+    function thermalColorClass(state) {
+      if (state === 'EMERGENCY_OFFLOAD') return 'state-err';
+      if (state === 'SHED_25' || state === 'WARN') return 'state-warn';
+      return 'state-ok';
+    }
+
+    function renderLiveNodeTable(nodes, plan) {
+      const tbody = document.getElementById('node-table-body');
+      tbody.innerHTML = '';
+
+      const plannedMap = new Map();
+      (plan.active_nodes || []).forEach(n => plannedMap.set(n.node_id, n));
+      (plan.pruned_nodes || []).forEach(n => plannedMap.set(n.node_id, n));
+
       nodes.forEach(n => {
-        const div = document.createElement('div');
-        div.className = 'node-item';
-        const isHot = (n.thermal_headroom || 0) >= 0.85;
-        div.innerHTML = `
-          <div class="node-header">
-            <span>${n.node_id} ${n.is_master ? '<b style="color:var(--accent);">(Master HUB)</b>' : ''}</span>
-            <span class="badge ${isHot ? 'badge-err' : 'badge-ok'}">${n.temp_c || 35}&deg;C | ${(n.thermal_headroom * 100).toFixed(0)}% Thm</span>
-          </div>
-          <div class="node-meta">
-            <span>Silicon: <b>${n.silicon}</b></span>
-            <span>OS: <b>${n.os}</b></span>
-            <span>IP: <b>${n.ip}</b> (${n.link_type})</span>
-            <span>RTT / Loss: <b>${n.rtt_ms}ms / ${n.pkt_loss_pct}%</b></span>
-            <span>Safe Cap: <b>${n.safe_cap_mb} MB</b> (of ${n.ram_total_mb} MB)</span>
-            <span>Compute/BW: <b>${n.compute_tflops}TF / ${n.mem_bw_gbps}GB/s</b></span>
-          </div>
-          <div class="progress-bar">
-            <div class="progress-fill ${isHot ? 'hot' : ''}" style="width: ${(n.thermal_headroom * 100).toFixed(0)}%"></div>
+        const p = plannedMap.get(n.node_id) || {};
+        const isOffline = n.status === 'OFFLINE';
+        const isPruned = Boolean(p.pruned);
+        const allocMb = isOffline ? 0 : (p.alloc_mb || 0);
+        const safeTotal = (n.safe_cap_mb || 0) + (n.vram_safe_mb || 0);
+        const rtt = (n.p95_rtt_ms ?? n.rtt_ms ?? 0).toFixed(2);
+        const loss = (n.pkt_loss_pct ?? 0).toFixed(1);
+        const cpuT = Number(n.cpu_temp_c ?? n.temp_c ?? 40).toFixed(1);
+        const gpuT = Number(n.gpu_temp_c ?? 0);
+        const cpuU = Number(n.cpu_util_pct ?? 0).toFixed(0);
+        const thState = p.thermal_state || 'COOL';
+        const thCls = thermalColorClass(thState);
+
+        let statusHtml = `<span class="state-ok tabular">CONNECTED · ${allocMb} MB</span>`;
+        if (isOffline) {
+          statusHtml = `<span class="state-offline tabular">OFFLINE · 0 MB</span>`;
+        } else if (isPruned) {
+          statusHtml = `<span class="state-err tabular">Pruned (0 MB)</span><div style="font-size:11px;color:var(--text-muted);">${p.prune_reason || ''}</div>`;
+        }
+
+        const safeLabel = n.vram_safe_mb > 0
+          ? `${n.safe_cap_mb} + ${n.vram_safe_mb} MB`
+          : `${safeTotal} MB`;
+        const isaLabel = n.isa ? `${n.isa}${n.perf_cores ? ` · ${n.perf_cores}P` : ''}` : (n.execution_backend || 'Host CPU');
+        const tempLabel = gpuT > 0 ? `${cpuT}°C / ${gpuT.toFixed(0)}°C GPU` : `${cpuT}°C`;
+        const sharePct = `${Number(p.compute_share_pct ?? 0).toFixed(1)}%`;
+        const rateTok = `${Number(p.effective_tok_s ?? 0).toFixed(1)} tok/s`;
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>
+            <div style="font-weight: 600; color: ${isOffline ? 'var(--text-muted)' : 'var(--text-bright)'};">${n.node_id}${n.is_master ? ' (Master)' : ''}</div>
+            <div class="tabular" style="font-size: 11px; color: var(--text-muted);">${n.ip}:${n.rpc_port} · ${n.os}</div>
+          </td>
+          <td>
+            <div style="color: var(--text);">${n.silicon} · <span style="color: var(--text-muted);">${isaLabel}</span></div>
+            <div class="tabular" style="font-size: 11px;"><span class="${thCls}">${tempLabel} (${thState})</span> · <span style="color: var(--text-muted);">CPU ${cpuU}%</span></div>
+          </td>
+          <td class="num tabular">
+            <div>${safeLabel}</div>
+            <div style="font-size: 11px; color: var(--text-muted);">${rtt}ms / ${loss}%</div>
+          </td>
+          <td class="num tabular">
+            <div style="color: var(--text-bright); font-weight: 600;">${sharePct}</div>
+            <div style="font-size: 11px; color: var(--text-muted);">${rateTok}</div>
+          </td>
+          <td class="num">${statusHtml}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function buildHudCardsHtml(data) {
+      const plan = data.plan || {};
+      const nodes = data.nodes || [];
+      const plannedMap = new Map();
+      (plan.active_nodes || []).forEach(n => plannedMap.set(n.node_id, n));
+      (plan.pruned_nodes || []).forEach(n => plannedMap.set(n.node_id, n));
+
+      return nodes.map(n => {
+        const p = plannedMap.get(n.node_id) || {};
+        const allocMb = n.status === 'OFFLINE' ? 0 : (p.alloc_mb || 0);
+        const capMb = (p.safe_cap_mb ?? n.safe_cap_mb ?? 0) + (p.vram_safe_mb ?? n.vram_safe_mb ?? 0);
+        const cpuU = Number(n.cpu_util_pct ?? 0).toFixed(0);
+        const gpuU = Number(n.gpu_util_pct ?? 0).toFixed(0);
+        const cpuT = Number(n.cpu_temp_c ?? n.temp_c ?? 40).toFixed(1);
+        const gpuT = Number(n.gpu_temp_c ?? 0);
+        const thState = p.thermal_state || 'COOL';
+        const thCls = thermalColorClass(thState);
+        const rtt = (n.p95_rtt_ms ?? n.rtt_ms ?? 0).toFixed(1);
+        const loss = (n.pkt_loss_pct ?? 0).toFixed(1);
+        const share = Number(p.compute_share_pct ?? 0).toFixed(1);
+        const effTok = Number(p.effective_tok_s ?? 0).toFixed(1);
+        const cdNote = p.cooldown_remaining_s ? ` (${p.cooldown_remaining_s}s hold)` : '';
+
+        return `
+          <div class="hud-node-card">
+            <div class="hud-node-top">
+              <strong style="color: var(--text-bright);">${n.node_id}${n.is_master ? ' ★' : ''}</strong>
+              <span class="tabular ${thCls}">${thState}${cdNote}</span>
+            </div>
+            <div class="hud-metrics tabular">
+              <span>CPU/GPU: <strong>${cpuU}% / ${gpuU}%</strong></span>
+              <span>Temp: <strong class="${thCls}">${cpuT}°C${gpuT > 0 ? ` / ${gpuT.toFixed(0)}°C` : ''}</strong></span>
+              <span>Mem: <strong>${allocMb}/${capMb} MB</strong></span>
+              <span>Link: <strong>${rtt}ms / ${loss}%</strong></span>
+              <span>Share: <strong>${share}%</strong></span>
+              <span>Rate: <strong>${effTok} tok/s</strong></span>
+            </div>
           </div>
         `;
-        container.appendChild(div);
+      }).join('');
+    }
+
+    function renderFloatingHud(data) {
+      const plan = data.plan || {};
+      const tokEl = document.getElementById('hud-cluster-tok');
+      const tierEl = document.getElementById('hud-tier-badge');
+      const listEl = document.getElementById('hud-nodes-list');
+      if (!tokEl || !listEl) return;
+
+      const clusterTok = Number(data.cluster_tok_s ?? plan.cluster_tok_s ?? 0).toFixed(1);
+      tokEl.textContent = `${clusterTok} tok/s`;
+      tierEl.textContent = `${plan.cluster_tier_label || 'Tier B'} · ${(data.nodes || []).length} node(s)`;
+      const cardsHtml = buildHudCardsHtml(data);
+      listEl.innerHTML = cardsHtml;
+
+      if (pipWindowRef && !pipWindowRef.closed) {
+        const pipRoot = pipWindowRef.document.getElementById('pip-nodes-root');
+        const pipTok = pipWindowRef.document.getElementById('pip-cluster-tok');
+        if (pipTok) pipTok.textContent = `${clusterTok} tok/s`;
+        if (pipRoot) pipRoot.innerHTML = cardsHtml;
+      }
+    }
+
+    function toggleHudCollapse() {
+      hudCollapsed = !hudCollapsed;
+      const body = document.getElementById('hud-body');
+      const btn = document.getElementById('btn-collapse-hud');
+      if (hudCollapsed) {
+        body.classList.add('hidden');
+        btn.textContent = '+';
+      } else {
+        body.classList.remove('hidden');
+        btn.textContent = '_';
+      }
+    }
+
+    async function togglePopoutHud() {
+      const hud = document.getElementById('floating-hud');
+      if (window.documentPictureInPicture && typeof window.documentPictureInPicture.requestWindow === 'function') {
+        try {
+          if (pipWindowRef && !pipWindowRef.closed) {
+            pipWindowRef.close();
+            pipWindowRef = null;
+            return;
+          }
+          const pipWin = await window.documentPictureInPicture.requestWindow({ width: 380, height: 480 });
+          pipWindowRef = pipWin;
+          pipWin.document.head.innerHTML = `<title>Cluster Resource HUD</title><style>
+            body{margin:0;padding:12px;background:#0b0f17;color:#cbd5e1;font-family:sans-serif;font-size:12px;}
+            .tabular{font-family:monospace;font-variant-numeric:tabular-nums;}
+            .hud-node-card{background:#121824;border:1px solid #334155;border-radius:6px;padding:8px 10px;margin-bottom:8px;}
+            .hud-node-top{display:flex;justify-content:space-between;margin-bottom:4px;}
+            .hud-metrics{display:grid;grid-template-columns:1fr 1fr;gap:4px 8px;color:#94a3b8;}
+            .hud-metrics strong{color:#f8fafc;}
+            .state-ok{color:#22c55e;font-weight:600;} .state-warn{color:#f59e0b;font-weight:600;} .state-err{color:#ef4444;font-weight:600;}
+          </style>`;
+          pipWin.document.body.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;border-bottom:1px solid #1e293b;padding-bottom:6px;">
+            <strong style="color:#f8fafc;">Resource Monitor HUD</strong>
+            <span id="pip-cluster-tok" class="tabular" style="color:#93c5fd;">0.0 tok/s</span>
+          </div><div id="pip-nodes-root"></div>`;
+          if (lastStatusPayload) renderFloatingHud(lastStatusPayload);
+          return;
+        } catch {
+          // Fall back cleanly to inline expanded HUD below
+        }
+      }
+      hud.classList.toggle('expanded');
+      if (hudCollapsed) toggleHudCollapse();
+    }
+
+    (function initHudDrag() {
+      const hud = document.getElementById('floating-hud');
+      const handle = document.getElementById('hud-drag-handle');
+      if (!hud || !handle) return;
+      let dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      handle.addEventListener('mousedown', (e) => {
+        if (e.target.closest('button')) return;
+        dragging = true;
+        const rect = hud.getBoundingClientRect();
+        hud.style.right = 'auto';
+        hud.style.bottom = 'auto';
+        hud.style.left = rect.left + 'px';
+        hud.style.top = rect.top + 'px';
+        startX = e.clientX;
+        startY = e.clientY;
+        startLeft = rect.left;
+        startTop = rect.top;
       });
+      window.addEventListener('mousemove', (e) => {
+        if (!dragging) return;
+        const nx = Math.max(8, Math.min(window.innerWidth - 180, startLeft + (e.clientX - startX)));
+        const ny = Math.max(8, Math.min(window.innerHeight - 60, startTop + (e.clientY - startY)));
+        hud.style.left = nx + 'px';
+        hud.style.top = ny + 'px';
+      });
+      window.addEventListener('mouseup', () => { dragging = false; });
+    })();
+
+    async function loadClusterdFiles() {
+      try {
+        const res = await fetch('/api/clusterd-files');
+        if (!res.ok) return;
+        const data = await res.json();
+        clusterdFiles = data.files || [];
+        renderFileTabs();
+      } catch (e) {
+        console.error('Failed to load clusterd files', e);
+      }
+    }
+
+    function renderFileTabs() {
+      const tabs = document.getElementById('rust-file-tabs');
+      const view = document.getElementById('rust-code-view');
+      tabs.innerHTML = '';
+      if (!clusterdFiles.length) {
+        view.textContent = 'No clusterd files available.';
+        return;
+      }
+      clusterdFiles.forEach((f, idx) => {
+        const btn = document.createElement('button');
+        btn.className = `file-tab ${idx === activeFileIndex ? 'active' : ''}`;
+        btn.textContent = f.path;
+        btn.onclick = () => {
+          activeFileIndex = idx;
+          renderFileTabs();
+        };
+        tabs.appendChild(btn);
+      });
+      view.textContent = clusterdFiles[activeFileIndex].content;
+    }
+
+    async function copyText(elementId, btn) {
+      const text = document.getElementById(elementId).textContent || '';
+      try {
+        await navigator.clipboard.writeText(text);
+        const prev = btn.textContent;
+        btn.textContent = 'Copied';
+        setTimeout(() => { btn.textContent = prev; }, 1200);
+      } catch {}
     }
 
     async function fetchLogs() {
       try {
         const res = await fetch('/api/logs');
         if (res.ok) {
-          const txt = await res.text();
-          document.getElementById('log-viewer').innerText = txt;
           const pre = document.getElementById('log-viewer');
+          pre.textContent = await res.text();
           pre.scrollTop = pre.scrollHeight;
         }
-      } catch (e) {}
+      } catch {}
     }
 
     async function sendChat() {
@@ -418,42 +2348,92 @@
       const history = document.getElementById('chat-history');
       const uMsg = document.createElement('div');
       uMsg.className = 'msg user';
-      uMsg.innerText = text;
+      uMsg.textContent = text;
       history.appendChild(uMsg);
 
       const aMsg = document.createElement('div');
       aMsg.className = 'msg assistant';
-      aMsg.innerText = 'Generating across cluster...';
+      aMsg.textContent = 'Forwarding to 127.0.0.1:8080...';
       history.appendChild(aMsg);
       history.scrollTop = history.scrollHeight;
 
+      const stream = document.getElementById('chat-stream').checked;
       try {
         const res = await fetch('/v1/chat/completions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            model: "gguf-cluster",
-            messages: [{ role: "user", content: text }]
+            model: 'gguf-cluster',
+            stream,
+            messages: [{ role: 'user', content: text }]
           })
         });
-        const data = await res.json();
-        if (data.choices && data.choices[0] && data.choices[0].message) {
-          aMsg.innerText = data.choices[0].message.content;
-        } else if (data.error) {
-          aMsg.innerText = `[Cluster Warning]: ${data.error.message || JSON.stringify(data.error)}`;
+
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+          aMsg.className = 'msg error';
+          aMsg.textContent = `HTTP ${res.status}: ${errJson.error || res.statusText}`;
+          history.scrollTop = history.scrollHeight;
+          return;
+        }
+
+        if (stream && res.body) {
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          aMsg.textContent = '';
+          let buffer = '';
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              const payload = line.slice(6).trim();
+              if (payload === '[DONE]') continue;
+              try {
+                const parsed = JSON.parse(payload);
+                const delta = parsed?.choices?.[0]?.delta?.content;
+                if (delta) aMsg.textContent += delta;
+              } catch {}
+            }
+            history.scrollTop = history.scrollHeight;
+          }
         } else {
-          aMsg.innerText = JSON.stringify(data);
+          const data = await res.json();
+          aMsg.textContent = data?.choices?.[0]?.message?.content || JSON.stringify(data);
         }
       } catch (e) {
-        aMsg.innerText = `[Cluster Error]: ${e.message}`;
+        aMsg.className = 'msg error';
+        aMsg.textContent = `Error: ${e.message}`;
       }
       history.scrollTop = history.scrollHeight;
     }
 
-    setInterval(updateStatus, 2000);
+    function startLiveEventStream() {
+      if (typeof EventSource === 'undefined') return;
+      try {
+        const es = new EventSource('/api/events');
+        es.onmessage = (ev) => {
+          try {
+            const payload = JSON.parse(ev.data);
+            document.getElementById('hud-sse-dot').style.background = 'var(--ok)';
+            applyStatusPayload(payload);
+          } catch {}
+        };
+        es.onerror = () => {
+          document.getElementById('hud-sse-dot').style.background = 'var(--warn)';
+        };
+      } catch {}
+    }
+
+    setInterval(updateStatus, 4000);
     setInterval(fetchLogs, 4000);
     updateStatus();
+    startLiveEventStream();
     fetchLogs();
+    loadClusterdFiles();
   </script>
 </body>
 </html>

@@ -1,0 +1,5 @@
+{
+  "name": "Universal 1-Hop Star GGUF Cluster",
+  "description": "Coordinator dashboard, greedy layer allocator, and OpenAI-compatible inference proxy for a heterogeneous 1-hop star GGUF cluster on llama.cpp v1.0.0.",
+  "requestFramePermissions": []
+}

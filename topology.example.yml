@@ -1,8 +1,0 @@
-# Cake Cluster Direct Topology
-# Use this if your Wi-Fi router blocks UDP broadcast / mDNS discovery.
-# Replace 192.168.1.PHONE_IP with your Android phone's actual Wi-Fi IP address.
-
-android-phone:
-  host: "192.168.1.50:10128"
-  layers:
-    - "model.layers.0-11"

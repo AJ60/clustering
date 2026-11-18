@@ -1,0 +1,16 @@
+[package]
+name = "clusterd"
+version = "1.0.0"
+edition = "2021"
+description = "Minimal-overhead Rust supervisor for 1-hop star llama.cpp v1.0.0 (RPC v9) GGUF clusters"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

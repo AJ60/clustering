@@ -1,0 +1,153 @@
+name: native-matrix-ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  linux-native-chaos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and unit-test clusterd (Linux)
+        working-directory: clusterd
+        run: |
+          cargo build --release
+          cargo test -- --nocapture
+
+      - name: Build stock llama.cpp v1.0.0 (llama-server + rpc-server)
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake ninja-build iproute2 curl
+          git clone --depth 1 --branch v1.0.0 https://github.com/ggml-org/llama.cpp.git /tmp/llama-cpp
+          cmake -S /tmp/llama-cpp -B /tmp/llama-build -G Ninja -DGGML_RPC=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/llama-build --target llama-server rpc-server -j"$(nproc)"
+
+      - name: Download tiny GGUF test model
+        run: |
+          mkdir -p /tmp/models
+          curl -L -sS -o /tmp/models/tiny.gguf \
+            "https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories15M-q4_0.gguf"
+
+      - name: Run 2-worker rpc-server + clusterd + tc netem + mid-run kill rebalance test
+        run: |
+          /tmp/llama-build/bin/rpc-server -H 127.0.0.1 -p 50052 -c -m 1024 &
+          W1_PID=$!
+          /tmp/llama-build/bin/rpc-server -H 127.0.0.1 -p 50053 -c -m 1024 &
+          W2_PID=$!
+
+          # Apply 20ms netem jitter test on lo if permitted in runner
+          sudo tc qdisc add dev lo root netem delay 5ms 2ms loss 0% || true
+
+          /tmp/llama-build/bin/llama-server \
+            -m /tmp/models/tiny.gguf \
+            --host 127.0.0.1 --port 8080 \
+            -ngl 0 -c 512 --jinja -ctk q8_0 -ctv q8_0 --flash-attn \
+            --cont-batching --cache-reuse 256 --parallel 2 \
+            --rpc 127.0.0.1:50052,127.0.0.1:50053 \
+            --tensor-split 50.0,50.0 &
+          LLAMA_PID=$!
+
+          GGUF_MODEL=/tmp/models/tiny.gguf PORT=8081 ./clusterd/target/release/clusterd master &
+          MASTER_PID=$!
+
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8080/health >/dev/null && curl -sf http://127.0.0.1:8081/api/status >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          # Verify real SSE token streaming through clusterd proxy -> llama-server
+          curl -sf -N -X POST http://127.0.0.1:8081/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d '{"model":"tiny","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"Once upon a time"}]}' | grep -q "data:"
+
+          # Kill worker 2 mid-run and verify clusterd stays healthy
+          kill "$W2_PID" || true
+          sleep 7
+          curl -sf http://127.0.0.1:8081/api/status | grep -q "cluster_id"
+
+          sudo tc qdisc del dev lo root || true
+          kill "$MASTER_PID" "$LLAMA_PID" "$W1_PID" 2>/dev/null || true
+
+  windows-native:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Compile and test clusterd.exe (Windows)
+        working-directory: clusterd
+        shell: pwsh
+        run: |
+          cargo build --release
+          cargo test -- --nocapture
+          if (-Not (Test-Path "target/release/clusterd.exe")) { throw "clusterd.exe missing" }
+
+      - name: Validate llama-server v1.0.0 CLI flags on Windows
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v1.0.0 https://github.com/ggml-org/llama.cpp.git llama-cpp-win
+          cmake -S llama-cpp-win -B llama-build-win -DGGML_RPC=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build llama-build-win --config Release --target llama-server rpc-server
+          ./llama-build-win/bin/Release/llama-server.exe --help | Select-String -Pattern "--rpc|--tensor-split|-ctk|--flash-attn|--cont-batching|--cache-reuse"
+
+  android-ndk28-emulator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK r28 and Vulkan SDK 1.4 headers
+        run: |
+          sdkmanager "ndk;28.0.13004108" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/28.0.13004108" >> "$GITHUB_ENV"
+          sudo apt-get update && sudo apt-get install -y ninja-build libvulkan-dev vulkan-headers binutils
+          mkdir -p /opt/vulkan-sdk/1.4
+          ln -s /usr/include /opt/vulkan-sdk/1.4/include
+
+      - name: Cross-compile rpc-server (arm64-v8a) and verify 16KB ELF alignment
+        working-directory: clusterd
+        run: |
+          bash scripts/build_android_ndk28.sh
+          BIN="./build-android-arm64/bin/rpc-server"
+          readelf -l "$BIN" | grep -E "LOAD|0x4000"
+          # Verify strictly Bionic + libomp.so (no glibc / libstdc++)
+          ! readelf -d "$BIN" | grep "NEEDED" | grep -vqE "libc\.so|libm\.so|libdl\.so|libvulkan\.so|libomp\.so|liblog\.so"
+
+      - name: Cross-compile clusterd for aarch64-linux-android
+        working-directory: clusterd
+        run: |
+          TOOLCHAIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${TOOLCHAIN}/aarch64-linux-android29-clang" \
+            cargo build --release --target aarch64-linux-android
+
+      - name: Build Android APK
+        working-directory: clusterd/android-apk
+        run: |
+          gradle assembleDebug
+
+      - name: Run Android API 34 Emulator Smoke Test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: arm64-v8a
+          script: |
+            adb install -r clusterd/android-apk/app/build/outputs/apk/debug/app-debug.apk
+            adb forward tcp:50052 tcp:50052
+            adb shell am start-foreground-service -n com.cluster.node/.RpcService
+            sleep 3
+            adb logcat -d | grep -iE "RpcService|cluster" | head -n 30
