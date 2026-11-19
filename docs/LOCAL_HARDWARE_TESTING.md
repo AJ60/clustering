@@ -1,128 +1,60 @@
-# Local Hardware Testing & Publication Runbook
+# ClusterLab — Testing & Verification Runbook
 
-**Project:** ClusterLab v1.0  
+**Project:** ClusterLab v2.0 (React + TypeScript + Vite)  
 **Author:** AJ60
 
-This guide walks through testing ClusterLab on physical Android, Windows, Linux, and ARM64 edge hardware before shipping a release build.
+This guide covers automated verification and manual UI QA for the **1-Hop Star GGUF Cluster** dashboard and the Developer-gated **2D Lab (Dev)** workbench.
 
 ---
 
-## 1. Pre-Flight Automated Verification
+## 1. Automated Pre-Flight Verification
 
-Run these checks locally before flashing devices:
+Run these commands from the project root:
 
 ```bash
-# 1. Android unit & Robolectric tests (API 29 + API 36)
-gradle :app:testDebugUnitTest
+# 1. Install dependencies
+npm install
 
-# 2. Mixed-OS wire protocol, QR codec, UDP discovery & rebalancing proof
-python3 scripts/verify_mixed_cluster.py
+# 2. Strict TypeScript type check (noUnusedLocals + noUnusedParameters)
+npm run lint
 
-# 3. Rust daemon unit tests (Windows or Linux host with Rust installed)
-cd clusterd && cargo test --all-targets
+# 3. Production TypeScript + Vite bundle
+npm run build
+
+# 4. Start local dev server on port 3000
+npm run dev
 ```
 
 Expected results:
-- All Robolectric tests pass on both SDK 29 and SDK 36.
-- `verify_mixed_cluster.py` reports **6/6 PASS**.
-- `cargo test` passes with zero warnings or failures.
+- `npm run lint` exits `0` with zero TypeScript errors.
+- `npm run build` emits `dist/index.html` and hashed CSS/JS assets cleanly.
+- `http://localhost:3000/` returns `HTTP 200 OK` with title `ClusterLab — 1-Hop Star GGUF Cluster`.
 
 ---
 
-## 2. Testing on a Physical Android Phone
+## 2. Default 1-Hop Star GGUF Cluster Checklist (Developer Mode OFF)
 
-### Install the Debug APK via USB
-1. Enable **Developer Options** and **USB Debugging** on the Android device (Android 9 / API 28 or newer).
-2. Connect via USB and build/install:
-   ```bash
-   gradle :app:assembleDebug
-   adb install -r app/build/outputs/apk/debug/app-debug.apk
-   ```
-
-### On-Device Functional Checklist
-- [ ] **First-Launch Coach-Mark Tour:** Verify the 3-step spotlight highlights the Canvas, Gesture Controls, and **Run** button without clipping on your screen aspect ratio. Tap **Skip** or **Run & Start**, force-close the app, relaunch, and confirm the tour does not repeat automatically.
-- [ ] **Interactive Canvas & Quality HUD:** Tap and drag to add/erase points. Confirm the top-left Silhouette & Inertia badge updates immediately and cycles modes (`Both` -> `Silhouette` -> `Inertia`) on tap.
-- [ ] **Session History:** Change `K`, switch to DBSCAN, and load 2–3 presets (at least 11 runs total). Confirm the Session History strip caps at `10/10`, highlights the lowest-inertia run, and jumps back cleanly when tapping an older run without creating duplicate entries.
-- [ ] **PDF Summary Report:** Save a local PDF from the PDF card and test **Open**, **Share**, and **Save to Folder (SAF)**. Confirm the plot snapshot, metrics grid, and `ClusterLab v1.0 (AJ60)` footer render crisply.
-- [ ] **Dark / Light Theme Persistence:** Open Settings, switch to Light Studio mode, close and relaunch the app, and confirm Light mode persists via DataStore.
-- [ ] **Developer Mode Gate:** Confirm advanced CSV tools, step-by-step playback controls, Voronoi/MinPts sliders, and raw node controls stay hidden until **Developer Mode** is toggled ON in Settings.
-- [ ] **User Guide & Tour Replay:** Open the `?` button in the top bar, review the 7-step guide, and tap **Replay Interactive Tour**.
+- [ ] **Clean Default Home View:** Verify the app opens directly to the **1-Hop Star GGUF Cluster** dashboard with no 2D canvas, no bottom tab bar, and no 2D onboarding coach-mark modal.
+- [ ] **Model Presets & Topology Switch:** Switch between `Qwen3-30B-A3B MoE`, `BitNet b1.58 Ternary`, `Qwen2.5-32B Dense`, and `Llama-3.3-70B Dense`, and toggle `This Device` vs `4-Node Cluster Test`. Confirm KPI strip (Cluster Tier, Safe RAM Pool, Layer Allocation, Thermal Guard), Star SVG topology, and table rows update immediately.
+- [ ] **Connect Card:**
+  - Click **Auto-Connect** (or **Auto-Discover** in the top bar) and confirm Master endpoint populates.
+  - Open **Scan QR**, verify the deterministic 21×21 QR matrix renders, and test webcam/manual QR payload pairing.
+  - Click **Start Sharing** and **Stop Sharing**; confirm state updates and allocated worker RAM frees cleanly.
+- [ ] **Health Card:** Verify calibrated compute speed, Safe RAM Cap (`<= 50%`), WebGL/WASM backend label, and battery/thermal headroom display properly, and test **Re-Tune Speed**.
+- [ ] **Troubleshooter Card:** Click **Run Auto-Diagnosis** and verify all 6 checks run and offer working 1-click fixes for any warning/action items.
+- [ ] **Theme Persistence:** Open Settings, switch between **Dark Studio** and **Light Studio**, refresh the page, and confirm the selected theme persists.
 
 ---
 
-## 3. Testing Mixed-OS & Legacy-Hardware Clustering (Pure Ruby + Android)
+## 3. Developer Mode & `2D Lab (Dev)` Checklist
 
-### A. Zero-Config Pure-Ruby Auto-Cluster (Recommended — Zero Compilation)
-1. **First Device (Any Windows, Linux, macOS, or Legacy Laptop with Ruby 2.7+):**
-   ```bash
-   ruby clusterd_ruby/bin/clusterd auto
-   ```
-   Wait 1.5 seconds — with no other Master on the LAN, it automatically promotes to Master, starts UDP `:50050` discovery, and serves the zero-WebGL Web Dashboard at `http://<LAN_IP>:8080`.
-2. **Every Additional Device (PCs, Raspberry Pi, Old Laptops, Termux):**
-   Run the exact same command:
-   ```bash
-   ruby clusterd_ruby/bin/clusterd auto
-   ```
-   Each device auto-detects its RAM/CPU/GPU, applies legacy CPU/RAM guards automatically if needed, discovers the Master on LAN, registers itself, and receives proportional layers immediately.
-3. **Run the Built-in 12-Node Scaling Self-Test:**
-   ```bash
-   ruby clusterd_ruby/bin/clusterd self-test
-   ```
-4. *(Optional)* If you prefer the compiled Rust daemon in `clusterd/`, run `installers\install_windows.cmd` (Windows) or `./installers/install_linux.sh` (Linux).
-
-### B. Pair an Android Phone Over Wi-Fi
-1. Ensure the Android phone and Master PC are on the same local Wi-Fi network (AP client isolation disabled).
-2. Open **ClusterLab** -> **Connect Phone** tab.
-3. Confirm **Auto-Optimized** finishes automatically and locks Memory Cap to `<= 50%` of physical RAM.
-4. Tap **Auto-Connect** (uses UDP `:50050` discovery) or **Scan QR** and scan the QR code on your PC screen.
-5. Verify the phone appears as **Active & Helping** in the Master Web UI.
-
-### C. Pair an Android Phone Over USB Cable (Zero Wi-Fi)
-1. Connect the phone via USB and run:
-   ```bash
-   adb forward tcp:50052 tcp:50052
-   ```
-2. On the phone, enable **Developer Mode** in Settings, switch bind mode to **USB Cable (127.0.0.1)**, and start the worker.
-3. On the Master PC, click **Scan Nodes** or add `127.0.0.1:50052`.
-
-### D. Optional: Add a Secondary PC or Raspberry Pi 400 Worker
-```bash
-# On Linux / Raspberry Pi:
-~/.local/bin/clusterlab-worker --master <MASTER_LAN_IP>:8080
-
-# On Windows:
-Start-ClusterLab-Worker.cmd --master <MASTER_LAN_IP>:8080
-```
-Click **Run Quick Test** in the Master Web Dashboard and confirm tokens stream cleanly across all online nodes.
-
-### E. Optional: Build 16 KB Page-Aligned Native Binaries (Android 15/16)
-If bundling native `rpc-server` binaries into `app/src/main/jniLibs/arm64-v8a/`:
-```bash
-export ANDROID_NDK_HOME=/path/to/android-ndk-r28
-./scripts/build_android_ndk28.sh
-```
-The script verifies `0x4000` (16 KB) ELF `LOAD` segment alignment and Bionic-only linking automatically.
-
----
-
-## 4. Release Build & Google Play Publication Checklist
-
-1. **Generate an Upload Keystore** (keep it outside git—`*.jks` is ignored in `.gitignore`):
-   ```bash
-   keytool -genkeypair -v -keystore my-upload-key.jks \
-     -alias upload -keyalg RSA -keysize 2048 -validity 10000
-   ```
-2. **Set Signing Environment Variables** and build the Play Store App Bundle (`.aab`):
-   ```bash
-   export KEYSTORE_PATH="$(pwd)/my-upload-key.jks"
-   export STORE_PASSWORD="<your-store-password>"
-   export KEY_PASSWORD="<your-key-password>"
-   gradle :app:bundleRelease
-   ```
-   Output: `app/build/outputs/bundle/release/app-release.aab`
-3. **Final Play Console Checks:**
-   - App title is `ClusterLab` (10 characters, <= 30 char limit, no emojis or buzzwords).
-   - Adaptive launcher icon (`mipmap-anydpi-v26`) verified on both circular and squircle launchers.
-   - `RpcService` declares `android:foregroundServiceType="dataSync"` and `android:exported="false"`.
-   - Zero broad storage permissions (`READ_EXTERNAL_STORAGE` / `READ_MEDIA_*` are never requested).
-   - Privacy policy note: All clustering datasets, PDF reports, Room snapshots, and DataStore preferences remain strictly on-device; optional LAN worker traffic stays on the user's local network.
+- [ ] **Unlock Gate:** Open Settings (`⚙`), enable **Developer Mode (2D Lab & Telemetry)**, and confirm:
+  - The `Star Cluster` / `2D Lab (Dev)` mode switcher appears.
+  - Developer Node Controls, Thermal Stress Simulator (`Cool`, `Test SHED_25`, `Test Emergency Offload`, `SHED_LAYERS`), and the Raw Node Event Log appear on the Star Cluster view.
+- [ ] **Thermal Guard Stress Test:** Trigger `Test SHED_25` and `Test Emergency Offload` in Dev controls and verify layer allocation drops (`-25%` or `0` layers on the warming node) and shifts layers cleanly across healthy workers.
+- [ ] **2D Lab Workbench:** Switch to **2D Lab (Dev)** and verify:
+  - K-Means++ Voronoi/trails & DBSCAN `ε`/MinPts clustering animate smoothly.
+  - 10-slot rolling Session History highlights `BEST` inertia and restores snapshots cleanly.
+  - Batch Processing queue runs sequentially and opens the inline Vector PDF 1.4 preview modal.
+  - CSV/JSON import, local CSV storage manager, and cluster annotations work end-to-end.
+- [ ] **Clean Lock-Back:** Open Settings, toggle **Developer Mode** OFF, and confirm the app immediately returns to the 1-Hop Star GGUF Cluster view and hides the `2D Lab (Dev)` tab.

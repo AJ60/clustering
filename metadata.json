@@ -1,6 +1,6 @@
 {
   "name": "ClusterLab",
-  "description": "Interactive K-Means & DBSCAN clustering workbench with live Silhouette/Inertia metrics, 10-run Session History, PDF report export, dark/light comfort themes, and cross-device Windows/Linux/Android worker orchestration. Author: AJ60.",
+  "description": "1-Hop Star GGUF cluster dashboard with model presets, cap-bounded RAM pool allocation, thermal guard, QR pairing, 6-check troubleshooter, and Developer-gated 2D K-Means & DBSCAN Lab. Author: AJ60.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

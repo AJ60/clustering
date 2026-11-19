@@ -1,31 +1,20 @@
-# Gradle & Android Studio
-*.iml
-.gradle
-.kotlin
-/local.properties
-local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-/build
-/app/build
-/.build-outputs
-/captures
-.externalNativeBuild
-.cxx
+# Dependencies & Build Outputs
+node_modules/
+dist/
+dist-ssr/
+*.local
+*.tsbuildinfo
 
-# Secrets & Keystores
+# Environment & Secrets
 .env
-debug.keystore
-*.jks
-*.keystore
-!debug.keystore.base64
+.env.*
+!.env.example
 
-# Rust & Python build caches
-/clusterd/target
-**/__pycache__/
-*.pyc
+# Editor & OS Files
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*.log

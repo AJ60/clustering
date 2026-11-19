@@ -1,49 +1,45 @@
-# ClusterLab — Conversation & Project Snapshot
+# ClusterLab — Project Snapshot
 
 - **Project Name**: `ClusterLab`
-- **Author**: AJ60 (`MIT License`)
-- **Snapshot Date**: `2026-11-19`
+- **Author**: `AJ60` (`MIT License`)
+- **Stack**: React 19 · TypeScript · Vite 6 · Tailwind CSS v4
+- **Updated**: `2026-11-19`
 
 ---
 
-## 1. Conversation Milestones Completed
+## 1. Architecture & Implemented Milestones
 
-1. **Core Android App (`app/`)**:
-   - Interactive 2D Clustering Canvas (Jetpack Compose + Material 3) supporting K-Means (with K-Means++ initialization) and DBSCAN, tap/brush/erase tools, pan/zoom, and benchmark presets (`Two Moons`, `Concentric Rings`, `Gaussian Blobs`, `Anisotropic Clusters`, `Noisy Outliers`).
-   - Live Silhouette & Inertia (WCSS) overlay with tap-to-cycle display modes.
-   - **Smooth K-Means Centroid Transition Animation**: Ease-out iteration transition animation showing convergence trails, departure ghost rings, directional shift arrowheads, Voronoi/spider-line morphing, and an iteration convergence pill.
-   - **Long-Press Cluster Annotations**: Long-pressing a cluster area or pin lets users add, edit, or delete custom text annotations that appear on the canvas, persist in Session History & Batch runs, and render on both plot snapshots and Section 4 of exported PDF reports.
-   - **Batch Processing Queue & Multi-Page PDF Summary Reports**: Allows queuing multiple datasets for sequential clustering and automatically generates a combined multi-page PDF summary report with an executive comparison table, per-run pages, plot snapshots, metrics, and cluster annotations.
-   - **Legacy Hardware & Graphics Survival (Android)**: Added `arm64-v8a`, `armeabi-v7a`, and `x86_64` ABI support; reduced Canvas Voronoi/ring overdraw on legacy GPUs; replaced `BlendMode.Clear` offscreen compositing in `CoachMarkOverlay` with 4-rect surround scrims; added `<= 40%` physical RAM safety capping on `<= 2 GB` devices.
+1. **1-Hop Star GGUF Cluster Dashboard (Default Home Screen)**:
+   - Model preset selector (`Qwen3-30B-A3B MoE`, `BitNet b1.58 Ternary`, `Qwen2.5-32B Dense`, `Llama-3.3-70B Dense`) paired with `This Device` and `4-Node Cluster Test` topology modes.
+   - `starClusterPlanner.ts` enforces cap-bounded safe memory allocation (Android `<= 50%` RAM, Desktop `MemAvailable - 1024 MB`, 90% VRAM), node scoring, proportional layer distribution, and 4-state `ThermalBalancer` hysteresis (`COOL`, `WARN`, `SHED_25`, `EMERGENCY_OFFLOAD`).
+   - Interactive 1-Hop Star SVG topology diagram and per-node layer allocation breakdown table.
 
-2. **Pure-Ruby Zero-Config Auto-Cluster (`clusterd_ruby/`)**:
-   - Standard-library-only Ruby implementation (`clusterlab/protocol.rb`, `hardware_probe.rb`, `worker.rb`, `orchestrator.rb`, `web_ui.rb`, `bin/clusterd`, `install.rb`).
-   - Zero-config `clusterd auto` command that discovers a LAN Master via UDP `:50050` (with HTTP fallback) or promotes to Master if none exists.
-   - Supports 12+ mixed nodes, automatic slow/legacy node pruning/un-pruning, `< 3s` failover rebalancing, legacy CPU/GPU (`-ngl 0`) protection, and a zero-WebGL ES5 Web Dashboard.
+2. **Three Simple Non-Developer Cards**:
+   - **Connect**: Master endpoint auto-detection, deterministic **21×21 CRC-8 QR code** modal & webcam scanner (`CameraQrScannerDialog`), and `Start` / `Stop Sharing`.
+   - **Health**: Calibrated float dot-product speed, Safe RAM Cap, WebGL/WASM backend probe, battery/thermal headroom, and `Re-Tune Speed`.
+   - **Troubleshooter**: 6-check `Run Auto-Diagnosis` engine (`calibration`, `transport`, `reachability`, `sharing`, `battery/thermal`, `free RAM`) with 1-click auto-fixes.
 
-3. **Rust Distributed Orchestrator (`clusterd/`)**:
-   - Fixed Windows FFI and dead-code lints (`MEMORYSTATUSEX`, `IO_COUNTERS`, `JOBOBJECT_*`, `snake_case` `extern "system"` params, re-exported `check_windows_firewall_ports()`), gated BSD `Command` import, and guarded Unix `killpg` shutdown against recycled PIDs.
-   - Eliminated production `.lock().unwrap()`, `.parse().unwrap()`, and `.expect()` panic paths.
-   - Parallelized multi-node health polling using bounded `std::thread::scope` waves (`<= 32` workers per wave), offloaded UDP `:50050` worker registration from the receiver loop, bounded concurrent socket handler threads (`MAX_CONCURRENT_CONNECTIONS = 64`), disambiguated same-host LAN worker IDs (`ip:port`), and preserved `>= 1` layer on the Master at 12+ node scale.
-   - Added zero-config `clusterd auto` mode, `FLAG_LEGACY_HARDWARE` / `FLAG_LEGACY_GRAPHICS` protocol flags, `<= 40%` RAM capping for `<= 2 GB` hardware, `-ngl 0` and software-rendering child env vars, ES5 `XMLHttpRequest` + `escHtml()` XSS-safe dashboard scripting, and `DEFAULT_CLUSTER_SECRET` alignment in `render_pairing_qr_svg`.
+3. **Developer-Gated `2D Lab (Dev)` & Telemetry**:
+   - Toggling **Developer Mode** ON in `SettingsMenuDialog` unlocks the `Star Cluster` / `2D Lab (Dev)` switcher and reveals USB vs LAN bind controls, 32-byte auth token view, `SHED_25` / `EMERGENCY_OFFLOAD` / `SHED_LAYERS` stress-test triggers, and raw node event logs.
+   - Inside `2D Lab (Dev)`: Interactive `[0, 1]` K-Means++ & DBSCAN canvas, 6 benchmark presets, rolling 10-run Session History with `BEST` badge, Sequential Batch Processing, CSV storage manager, interactive 3-step Coach-Mark spotlight tour, and zero-dependency Vector PDF 1.4 report exporter with inline modal preview.
 
 ---
 
-## 2. Project Layout
+## 2. Current Directory Layout
 
-- `app/` — Android Jetpack Compose application (`MainActivity`, ViewModel, Canvas, Batch & PDF exporters, Room DB, DataStore, `RpcService`)
-- `clusterd/` — Rust cross-platform Master/Worker daemon & Web UI crate (`Cargo.toml`, `src/*.rs`)
-- `clusterd_ruby/` — Pure-Ruby standard-library `clusterd` implementation and installer
-- `installers/` — Windows (`install_windows.ps1` / `.cmd`) and Linux (`install_linux.sh`) setup scripts
-- `scripts/` — Mixed-cluster verification harness (`verify_mixed_cluster.py`) and NDK/Termux build scripts
-- `docs/` — Hardware testing notes and session documentation
-- `.github/workflows/` — 3-OS native & emulator CI matrix (`native-matrix-ci.yml`)
+- `src/components/` — UI dashboards, canvas renderer, dialogs, and controls (`StarClusterDashboard.tsx`, `HardenedNodeDashboard.tsx`, `InteractiveClusterCanvas.tsx`, `SettingsMenuDialog.tsx`, `UserGuideDialog.tsx`, etc.)
+- `src/domain/` — Pure TypeScript engines (`starClusterPlanner.ts`, `clusteringEngine.ts`, `datasetGenerators.ts`, `qrCodec.ts`, `pdfGenerator.ts`)
+- `src/service/` — Browser hardware calibration & probe (`hardwareProbe.ts`) and 6-check auto-diagnosis (`nodeClusterService.ts`)
+- `src/hooks/` — React state stores (`useNodeWorkerStore.ts`, `useClusterLabStore.ts`)
+- `src/data/` — Versioned `localStorage` persistence (`storage.ts`)
+- `src/types/` — Strict TypeScript interfaces (`starCluster.ts`, `clustering.ts`)
+- `public/` — App icon and bundled fonts
+- `docs/` — Project snapshot & testing runbook
 
 ---
 
-## 3. Verification Status at Snapshot Time
+## 3. Verification Status
 
-- **Mixed-Cluster Verification (`python3 scripts/verify_mixed_cluster.py`)**: Passed (`7/7`).
-- **Rust Static Delimiter & Panic Audit**: Passed (balanced delimiters across all `.rs` files; zero `.lock().unwrap()` / `.expect()` in production paths).
-- **Android Build (`compile_applet`)**: Succeeded.
-- *Note*: `cargo` / `rustc` is unavailable inside the Android cloud build container; run `cargo test --all-targets` locally or via GitHub Actions (`native-matrix-ci.yml`).
+- `npm run lint` (`tsc --noEmit`): Passes cleanly (`0` errors, strict mode with `noUnusedLocals` & `noUnusedParameters`).
+- `npm run build` (`tsc -b && vite build`): Builds production bundle (`dist/`) cleanly.
+- `npm run dev` (`vite --host 0.0.0.0 --port 3000`): Serves HTTP `200 OK` on port `3000`.
