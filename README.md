@@ -32,12 +32,74 @@ The default interface centers on clean cluster orchestration, Windows/Linux back
 
 ---
 
-## Development
+## Development & Testing
 
 ```bash
+# 1. Install dependencies
 npm install
-npm run dev      # Starts Express + Vite dev server on http://0.0.0.0:3000
-npm run lint     # Runs TypeScript type checking (tsc --noEmit)
-npm run build    # Type-checks (tsc -b) and builds production bundle to dist/
-npm start        # Runs Express production server on http://0.0.0.0:3000
+
+# 2. Start Express + Vite development environment with live HMR
+npm run dev      # http://localhost:3000
+
+# 3. Run static type checking
+npm run lint     # tsc --noEmit
+
+# 4. Run automated test suite (Node.js test runner)
+npm test         # 17 tests covering planners, tuners, catalogs & API
+
+# 5. Build production bundle (client assets + standalone server bundle)
+npm run build    # Compiles client to dist/ and server to dist/server.js
+
+# 6. Run production server
+npm start        # Starts production Express server on port 3000 (or $PORT)
 ```
+
+---
+
+## Deployment & Production
+
+### 1. Docker / Container Deployment
+
+A production-ready, multi-stage `Dockerfile` is included:
+
+```bash
+# Build Docker image
+docker build -t clusterlab:latest .
+
+# Run container (mapping port 3000)
+docker run -d --name clusterlab -p 3000:3000 clusterlab:latest
+
+# Health check
+curl -s http://localhost:3000/health
+```
+
+### 2. Cloud Platforms (Google Cloud Run / Railway / Render / Heroku)
+
+ClusterLab is fully compliant with 12-factor cloud deployment:
+- **Port Binding:** Automatically reads `PORT` (or `PORT_APP`), defaulting to `3000`.
+- **Health Check:** `GET /health` returns JSON `{"status":"ok"}` for container readiness and liveness probes.
+- **Graceful Shutdown:** Intercepts `SIGINT` and `SIGTERM` to cleanly drain active SSE streams and connections.
+- **Non-Root Execution:** The Dockerfile runs as unprivileged user `node` for enterprise security.
+
+### 3. Environment Variables
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `PORT` | HTTP port to bind the server | `3000` |
+| `NODE_ENV` | Environment mode (`development`, `production`, `test`) | `production` |
+| `UPSTREAM_LLAMA_URL` | Optional upstream `llama-server` / `clusterd` OpenAI endpoint | `""` |
+| `VITE_APP_NAME` | Public client application title | `ClusterLab` |
+
+---
+
+## OpenAI-Compatible API Endpoints
+
+ClusterLab exposes standard OpenAI `/v1` endpoints:
+
+- `GET /health` — Service status, active model, and node telemetry
+- `GET /v1/models` — List active model and available GGUF presets with cluster fit metadata
+- `POST /v1/chat/completions` — Streaming (`stream: true`) SSE & JSON chat completions with per-node `x_cluster_trace`
+- `GET /api/cluster/state` — Live telemetry and layer allocation plan
+- `GET /api/hf/models?q=<search>` — Hugging Face Hub GGUF model explorer
+- `GET /api/backends/script?os=windows|linux` — Downloadable tuned hardware runner script
+

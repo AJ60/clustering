@@ -52,7 +52,7 @@ function createDefaultSnapshot(): RuntimeClusterSnapshot {
     clusterMode: 'VIRTUAL_4NODE',
     tuningConfig,
     plan,
-    upstreamBaseUrl: '',
+    upstreamBaseUrl: process.env.UPSTREAM_LLAMA_URL?.trim() ?? '',
     updatedAt: new Date().toISOString(),
   };
 }
@@ -467,6 +467,18 @@ async function createApp() {
     });
   });
 
+  // Structured 404 for unmatched API / v1 endpoints across all environments
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint not found' });
+  });
+  app.use('/v1', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint not found' });
+  });
+
+  if (process.env.NODE_ENV === 'test') {
+    return app;
+  }
+
   const isProd = process.env.NODE_ENV === 'production';
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
@@ -476,9 +488,16 @@ async function createApp() {
     });
     app.use(vite.middlewares);
   } else {
-    const distDir = path.resolve(__dirname, 'dist');
+    // When running compiled dist/server.js, __dirname is the dist directory containing index.html.
+    // When running from repo root, dist is a subdirectory.
+    const distDir = fs.existsSync(path.join(__dirname, 'index.html'))
+      ? __dirname
+      : path.resolve(__dirname, 'dist');
+
     app.use(express.static(distDir));
-    app.get('*', (_req, res) => {
+
+    // SPA fallback: in Express 5 (path-to-regexp v6+), catch-all middleware avoids syntax errors
+    app.use((_req, res) => {
       const indexFile = path.join(distDir, 'index.html');
       if (fs.existsSync(indexFile)) {
         res.sendFile(indexFile);
@@ -488,13 +507,46 @@ async function createApp() {
     });
   }
 
-  const port = Number(process.env.PORT_APP || 3000);
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`ClusterLab server listening on http://0.0.0.0:${port}`);
-  });
+  return app;
 }
 
-createApp().catch((err) => {
-  console.error('Failed to start ClusterLab server:', err);
-  process.exit(1);
-});
+export async function startServer(portToUse?: number) {
+  const app = await createApp();
+  const port = portToUse ?? Number(process.env.PORT || process.env.PORT_APP || 3000);
+  const server = app.listen(port, '0.0.0.0', () => {
+    console.log(`ClusterLab server listening on http://0.0.0.0:${port}`);
+  });
+
+  const shutdown = () => {
+    console.log('Received termination signal. Closing ClusterLab server...');
+    server.close(() => {
+      console.log('ClusterLab server terminated cleanly.');
+      process.exit(0);
+    });
+    setTimeout(() => {
+      console.error('Forced shutdown after timeout.');
+      process.exit(1);
+    }, 5000).unref();
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  return { app, server, port };
+}
+
+export { createApp };
+
+// Only auto-start when executed directly (not when imported in unit tests)
+const isDirectExecution =
+  process.env.NODE_ENV !== 'test' &&
+  (import.meta.url === `file://${process.argv[1]}` ||
+    process.argv[1]?.endsWith('server.ts') ||
+    process.argv[1]?.endsWith('server.js'));
+
+if (isDirectExecution) {
+  startServer().catch((err) => {
+    console.error('Failed to start ClusterLab server:', err);
+    process.exit(1);
+  });
+}

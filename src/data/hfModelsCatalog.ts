@@ -282,8 +282,9 @@ export function inferHfModelMetadata(raw: {
   const paramMatch = repoId.match(/(\d+(?:\.\d+)?)\s*[Bb]/);
   const totalParamsB = paramMatch ? Math.min(405, Math.max(0.5, parseFloat(paramMatch[1]))) : 8;
   const moeActiveMatch = repoId.match(/A(\d+(?:\.\d+)?)[Bb]/i);
-  const isMoE = Boolean(moeActiveMatch) || /moe|mixtral/i.test(repoId);
-  const isTernary = /bitnet|1\.58|ternary/i.test(repoId);
+  const hasMoeTag = (raw.tags ?? []).some((t) => /moe/i.test(t));
+  const isMoE = Boolean(moeActiveMatch) || /moe|mixtral|deepseek-v3/i.test(repoId) || hasMoeTag;
+  const isTernary = /bitnet|1\.58|ternary/i.test(repoId) || (raw.tags ?? []).some((t) => /ternary|bitnet/i.test(t));
 
   const activeParamsB = moeActiveMatch
     ? parseFloat(moeActiveMatch[1])
