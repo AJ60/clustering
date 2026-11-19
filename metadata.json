@@ -1,0 +1,6 @@
+{
+  "name": "ClusterLab",
+  "description": "Interactive K-Means & DBSCAN clustering workbench with live Silhouette/Inertia metrics, 10-run Session History, PDF report export, dark/light comfort themes, and cross-device Windows/Linux/Android worker orchestration. Author: AJ60.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

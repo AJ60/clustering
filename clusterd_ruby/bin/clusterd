@@ -1,0 +1,117 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# ClusterLab Zero-Config Pure-Ruby CLI
+# Author: AJ60 (MIT License)
+#
+# Usage:
+#   ruby clusterd_ruby/bin/clusterd            # Zero-config AUTO mode (joins Master if found, else becomes Master)
+#   ruby clusterd_ruby/bin/clusterd auto       # Same as above
+#   ruby clusterd_ruby/bin/clusterd master     # Start Master Orchestrator + Web Dashboard + UDP :50050
+#   ruby clusterd_ruby/bin/clusterd worker     # Start calibrated Worker Node & auto-join LAN Master
+#   ruby clusterd_ruby/bin/clusterd probe      # Print detected hardware, legacy guards & safe RAM cap
+#   ruby clusterd_ruby/bin/clusterd verify-handshake HOST:PORT [--secret KEY]
+#   ruby clusterd_ruby/bin/clusterd self-test  # Run full 12-node mixed-OS scaling & failover test
+
+require "json"
+require "optparse"
+require_relative "../lib/clusterlab/protocol"
+require_relative "../lib/clusterlab/hardware_probe"
+require_relative "../lib/clusterlab/worker"
+require_relative "../lib/clusterlab/orchestrator"
+
+options = {
+  http_port: ClusterLab::Protocol::DEFAULT_HTTP_PORT,
+  rpc_port: ClusterLab::Protocol::DEFAULT_RPC_PORT,
+  udp_port: ClusterLab::Protocol::DISCOVERY_UDP_PORT,
+  secret: ClusterLab::Protocol::DEFAULT_CLUSTER_SECRET,
+  master: nil,
+  max_mem_mb: nil,
+  threads: nil,
+  force_cpu: false,
+  model_mb: 4000,
+  total_layers: 32
+}
+
+command = ARGV.first && !ARGV.first.start_with?("-") ? ARGV.shift.downcase : "auto"
+
+OptionParser.new do |opts|
+  opts.banner = "Usage: clusterd [auto|master|worker|probe|verify-handshake|self-test] [options]"
+  opts.on("--http-port PORT", Integer, "Master HTTP/Dashboard port (default 8080)") { |v| options[:http_port] = v }
+  opts.on("--port PORT", "--rpc-port PORT", Integer, "Worker RPC TCP port (default 50052)") { |v| options[:rpc_port] = v }
+  opts.on("--udp-port PORT", Integer, "UDP auto-discovery port (default 50050)") { |v| options[:udp_port] = v }
+  opts.on("--secret KEY", String, "Shared cluster secret") { |v| options[:secret] = v }
+  opts.on("--master HOST:PORT", String, "Explicit Master address for worker mode") { |v| options[:master] = v }
+  opts.on("--max-mem-mb MB", Integer, "Optional RAM cap override (clamped <= 50% physical RAM)") { |v| options[:max_mem_mb] = v }
+  opts.on("--threads N", Integer, "Optional CPU thread count override") { |v| options[:threads] = v }
+  opts.on("--model-mb MB", Integer, "Initial model RAM target in MB (default 4000)") { |v| options[:model_mb] = v }
+  opts.on("--layers N", Integer, "Initial model layer count (default 32)") { |v| options[:total_layers] = v }
+  opts.on("--force-cpu", "Force Legacy-Safe CPU mode (disable GPU offload)") { options[:force_cpu] = true }
+end.parse!(ARGV)
+
+def run_master(options)
+  orch = ClusterLab::Orchestrator.new(
+    http_port: options[:http_port],
+    udp_port: options[:udp_port],
+    rpc_port: options[:rpc_port],
+    secret: options[:secret],
+    model_mb: options[:model_mb],
+    total_layers: options[:total_layers],
+    force_cpu: options[:force_cpu]
+  )
+  trap("INT") { orch.stop }
+  trap("TERM") { orch.stop }
+  orch.start(background: false)
+end
+
+def run_worker(options)
+  worker = ClusterLab::WorkerNode.new(
+    rpc_port: options[:rpc_port],
+    secret: options[:secret],
+    master_addr: options[:master],
+    max_mem_mb: options[:max_mem_mb],
+    threads: options[:threads],
+    force_cpu: options[:force_cpu],
+    udp_port: options[:udp_port]
+  )
+  trap("INT") { worker.stop }
+  trap("TERM") { worker.stop }
+  worker.start(background: false)
+end
+
+case command
+when "auto"
+  puts "[ClusterLab Auto] Probing LAN on UDP :#{options[:udp_port]} for an existing Master..."
+  found = ClusterLab::WorkerNode.discover_master(timeout_sec: 1.5, udp_port: options[:udp_port])
+  if found
+    puts "[ClusterLab Auto] Found Master at #{found[:host]}:#{found[:http_port]}! Joining automatically as a calibrated Worker."
+    options[:master] = "#{found[:host]}:#{found[:http_port]}"
+    options[:secret] = found[:secret]
+    run_worker(options)
+  else
+    puts "[ClusterLab Auto] No existing Master found on LAN. Promoting this device to Master Orchestrator..."
+    run_master(options)
+  end
+when "master"
+  run_master(options)
+when "worker"
+  run_worker(options)
+when "probe"
+  probe = ClusterLab::HardwareProbe.detect(
+    max_mem_override_mb: options[:max_mem_mb],
+    threads_override: options[:threads],
+    force_cpu: options[:force_cpu]
+  )
+  puts JSON.pretty_generate(probe.to_h)
+when "verify-handshake"
+  target = ARGV.shift || "127.0.0.1:#{options[:rpc_port]}"
+  host, port = target.split(":", 2)
+  orch = ClusterLab::Orchestrator.new(secret: options[:secret])
+  frame = orch.probe_worker(host, (port || options[:rpc_port]).to_i, timeout_sec: 2.0)
+  puts JSON.pretty_generate(frame)
+when "self-test"
+  load File.expand_path("../test/test_mixed_scaling.rb", __dir__)
+else
+  warn "Unknown command: #{command}. Try: auto, master, worker, probe, verify-handshake, or self-test."
+  exit 1
+end
