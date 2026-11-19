@@ -4,16 +4,34 @@ export type ClusterTierCode = 'S' | 'A' | 'B' | 'C';
 
 export type ClusterMode = 'LOCAL_DEVICE' | 'VIRTUAL_4NODE';
 
-export type ModelPresetId = 'moe-30b' | 'ternary-27b' | 'dense-32b' | 'dense-70b';
+export type ModelPresetId =
+  | 'moe-30b'
+  | 'ternary-27b'
+  | 'dense-32b'
+  | 'dense-70b'
+  | 'custom-hf';
+
+export type ContextLengthOption = 4096 | 8192 | 16384 | 32768;
+export type KvCacheQuantOption = 'f16' | 'q8_0' | 'q4_0';
+export type BackendOsTarget = 'windows' | 'linux';
+
+export type WindowsAccelerator = 'CUDA 12.6' | 'Vulkan 1.3' | 'DirectML' | 'CPU AVX2';
+export type LinuxAccelerator = 'CUDA 12.6' | 'ROCm 6.3' | 'Vulkan 1.3' | 'CPU OpenBLAS';
 
 export interface GgufModelPreset {
-  id: ModelPresetId;
+  id: string;
   name: string;
   quant: string;
   architecture: 'MoE' | 'Ternary' | 'Dense';
   sizeMb: number;
   layers: number;
+  totalParamsB: number;
+  activeParamsB: number;
+  contextLengthDefault: ContextLengthOption;
+  hfRepo: string;
+  hfUrl: string;
   summary: string;
+  tags?: string[];
 }
 
 export const GGUF_MODEL_PRESETS: GgufModelPreset[] = [
@@ -24,7 +42,13 @@ export const GGUF_MODEL_PRESETS: GgufModelPreset[] = [
     architecture: 'MoE',
     sizeMb: 18500,
     layers: 48,
-    summary: '18.5 GB · 48 layers · Sparse mixture-of-experts',
+    totalParamsB: 30.5,
+    activeParamsB: 3.3,
+    contextLengthDefault: 16384,
+    hfRepo: 'Qwen/Qwen3-30B-A3B-GGUF',
+    hfUrl: 'https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF',
+    summary: '18.5 GB · 48 layers · 3.3B active / 30.5B total MoE',
+    tags: ['moe', 'chat', 'fast'],
   },
   {
     id: 'ternary-27b',
@@ -33,25 +57,43 @@ export const GGUF_MODEL_PRESETS: GgufModelPreset[] = [
     architecture: 'Ternary',
     sizeMb: 6400,
     layers: 36,
-    summary: '6.4 GB · 36 layers · Compact 1.58-bit weights',
+    totalParamsB: 27.0,
+    activeParamsB: 27.0,
+    contextLengthDefault: 8192,
+    hfRepo: 'microsoft/BitNet-b1.58-2B-4T-gguf',
+    hfUrl: 'https://huggingface.co/microsoft/BitNet-b1.58-2B-4T-gguf',
+    summary: '6.4 GB · 36 layers · Compact 1.58-bit LUT weights',
+    tags: ['ternary', 'edge', 'cpu'],
   },
   {
     id: 'dense-32b',
-    name: 'Qwen2.5-32B Dense',
+    name: 'Qwen2.5-Coder-32B Dense',
     quant: 'Q4_K_M',
     architecture: 'Dense',
     sizeMb: 19800,
     layers: 64,
-    summary: '19.8 GB · 64 layers · High-precision dense',
+    totalParamsB: 32.5,
+    activeParamsB: 32.5,
+    contextLengthDefault: 16384,
+    hfRepo: 'Qwen/Qwen2.5-Coder-32B-Instruct-GGUF',
+    hfUrl: 'https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct-GGUF',
+    summary: '19.8 GB · 64 layers · Dense coding & tool-use model',
+    tags: ['coding', 'dense', 'tools'],
   },
   {
     id: 'dense-70b',
-    name: 'Llama-3.3-70B Dense',
+    name: 'Llama-3.3-70B-Instruct',
     quant: 'Q4_K_M',
     architecture: 'Dense',
     sizeMb: 40500,
     layers: 80,
-    summary: '40.5 GB · 80 layers · Multi-node cluster model',
+    totalParamsB: 70.6,
+    activeParamsB: 70.6,
+    contextLengthDefault: 8192,
+    hfRepo: 'bartowski/Llama-3.3-70B-Instruct-GGUF',
+    hfUrl: 'https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF',
+    summary: '40.5 GB · 80 layers · Multi-node flagship cluster model',
+    tags: ['dense', 'reasoning', 'multi-node'],
   },
 ];
 
@@ -90,17 +132,22 @@ export interface ThermalStatus {
   cooldownRemainingS: number;
 }
 
+export type NodeOsType = 'windows' | 'linux' | 'android' | 'edge-arm';
+
 export interface StarClusterNode {
   nodeId: string;
   label: string;
   role: 'Master' | 'Worker';
   platform: 'Desktop' | 'Android' | 'Edge ARM';
+  osType: NodeOsType;
+  backendDriver: string;
   linkType: 'Local' | 'USB-C Tunnel' | 'Ethernet 2.5G' | 'Wi-Fi LAN';
   totalRamMb: number;
   availableRamMb: number;
   vramFreeMb: number;
   memBwGbps: number;
   computeTflops: number;
+  physicalCores: number;
   rttMs: number;
   pktLossPct: number;
   tempC: number;
@@ -115,6 +162,14 @@ export interface PlannedStarNode extends StarClusterNode {
   thermalStatus: ThermalStatus;
   allocatedMb: number;
   allocatedLayers: number;
+  layerStart: number;
+  layerEnd: number;
+  activeParamsB: number;
+  totalParamsB: number;
+  kvCacheMb: number;
+  estimatedTokPerSec: number;
+  nglLayers: number;
+  tuningFlags: string[];
   sharePct: number;
   statusNote: string;
 }
@@ -127,9 +182,73 @@ export interface StarClusterPlan {
   masterId: string;
   fitVerdict: FitVerdict;
   totalSafePoolMb: number;
+  totalVramPoolMb: number;
   neededMb: number;
+  kvCacheTotalMb: number;
   coveragePct: number;
   overallThermalState: ThermalState;
+  estimatedClusterTokPerSec: number;
+  activeParamsPerTokenB: number;
+  totalParamsB: number;
   nodes: PlannedStarNode[];
   tensorSplitLabel: string;
+}
+
+export interface BackendTuningConfig {
+  windowsAccelerator: WindowsAccelerator;
+  linuxAccelerator: LinuxAccelerator;
+  contextLength: ContextLengthOption;
+  kvCacheQuant: KvCacheQuantOption;
+  enableFlashAttn: boolean;
+  moeCpuOffload: boolean;
+  windowsNoMmap: boolean;
+  linuxMlock: boolean;
+  linuxNumaInterleave: boolean;
+}
+
+export interface TunedOsBackendProfile {
+  os: BackendOsTarget;
+  title: string;
+  accelerator: string;
+  recommendedThreads: number;
+  gpuOffloadLayers: number;
+  vramSafetyReserveMb: number;
+  ramSafetyReserveMb: number;
+  batchSize: number;
+  ubatchSize: number;
+  kvCacheMb: number;
+  expectedTokPerSec: number;
+  envVars: Array<{ key: string; value: string; reason: string }>;
+  cliFlags: string[];
+  launchCommand: string;
+  scriptFileName: string;
+  scriptContent: string;
+  optimizations: string[];
+}
+
+export interface QuantVariantOption {
+  quant: string;
+  sizeMb: number;
+  bpw: number;
+}
+
+export interface HfCatalogModel {
+  id: string;
+  hfRepo: string;
+  hfUrl: string;
+  name: string;
+  author: string;
+  architecture: 'MoE' | 'Ternary' | 'Dense';
+  totalParamsB: number;
+  activeParamsB: number;
+  layers: number;
+  defaultQuant: string;
+  sizeMb: number;
+  quantOptions: QuantVariantOption[];
+  contextLengthDefault: ContextLengthOption;
+  downloads: number;
+  likes: number;
+  tags: string[];
+  summary: string;
+  source: 'curated' | 'huggingface';
 }

@@ -1,5 +1,6 @@
 import { DeviceTelemetryState } from '../types/clustering';
 import {
+  BackendTuningConfig,
   ClusterMode,
   ClusterTierCode,
   DEFAULT_THERMAL_LIMITS,
@@ -12,6 +13,10 @@ import {
   ThermalState,
   ThermalStatus,
 } from '../types/starCluster';
+import {
+  createDefaultBackendTuningConfig,
+  estimateKvCacheMb,
+} from './backendTuner';
 
 export function computeAndroidSafeCap(
   totalMb: number,
@@ -125,29 +130,49 @@ export function evaluateNodeThermal(
 export function buildStarClusterNodes(
   telemetry: DeviceTelemetryState,
   mode: ClusterMode,
-  simulatedTempOffsetC = 0
+  simulatedTempOffsetC = 0,
+  tuningConfig?: BackendTuningConfig
 ): StarClusterNode[] {
   const isWorkerActive =
     telemetry.workerState === 'RUNNING_USB' ||
     telemetry.workerState === 'RUNNING_WIFI' ||
     telemetry.workerState === 'STOPPED';
 
-  const isAndroidBrowser = /android/i.test(navigator.userAgent);
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+  const isAndroidBrowser = /android/i.test(ua);
+  const isWindowsBrowser = /windows/i.test(ua);
   const localTemp = Math.max(25, telemetry.temperatureCelsius + simulatedTempOffsetC);
+
+  const localOsType = isAndroidBrowser
+    ? 'android'
+    : isWindowsBrowser
+      ? 'windows'
+      : 'linux';
 
   const thisBrowserNode: StarClusterNode = {
     nodeId: 'this-device',
-    label: isAndroidBrowser ? 'This Phone (Worker)' : 'This Device (Local)',
+    label: isAndroidBrowser
+      ? 'This Phone (Worker)'
+      : isWindowsBrowser
+        ? 'This Windows Node'
+        : 'This Linux / Local Node',
     role: mode === 'VIRTUAL_4NODE' ? 'Worker' : 'Master',
     platform: isAndroidBrowser ? 'Android' : 'Desktop',
+    osType: localOsType,
+    backendDriver: isAndroidBrowser
+      ? 'WebGL/NEON'
+      : isWindowsBrowser
+        ? tuningConfig?.windowsAccelerator ?? 'CUDA 12.6'
+        : tuningConfig?.linuxAccelerator ?? 'CUDA 12.6',
     linkType: telemetry.usbLoopbackOnly ? 'USB-C Tunnel' : 'Wi-Fi LAN',
     totalRamMb: telemetry.totalRamMb,
     availableRamMb: telemetry.availableRamMb,
     vramFreeMb: telemetry.webglProbePassed ? Math.round(telemetry.safeCapMb * 0.65) : 0,
-    memBwGbps: telemetry.webglProbePassed ? 38.0 : 19.5,
+    memBwGbps: telemetry.webglProbePassed ? 44.0 : 21.5,
     computeTflops: Number(
-      Math.max(0.6, (telemetry.calibration.performanceScore || 55) * 0.055).toFixed(1)
+      Math.max(0.8, (telemetry.calibration.performanceScore || 55) * 0.06).toFixed(1)
     ),
+    physicalCores: Math.max(2, telemetry.totalCoreCount),
     rttMs: telemetry.usbLoopbackOnly ? 0.8 : 4.2,
     pktLossPct: 0,
     tempC: localTemp,
@@ -168,12 +193,15 @@ export function buildStarClusterNodes(
       label: `Master (${telemetry.pairedMasterAddress.split(' ')[0]})`,
       role: 'Master',
       platform: 'Desktop',
+      osType: 'linux',
+      backendDriver: tuningConfig?.linuxAccelerator ?? 'CUDA 12.6',
       linkType: 'Local',
       totalRamMb: 32768,
       availableRamMb: 24576,
-      vramFreeMb: 8192,
-      memBwGbps: 112.0,
-      computeTflops: 18.4,
+      vramFreeMb: 10240,
+      memBwGbps: 145.0,
+      computeTflops: 21.8,
+      physicalCores: 12,
       rttMs: 0.2,
       pktLossPct: 0,
       tempC: 61.0,
@@ -183,22 +211,44 @@ export function buildStarClusterNodes(
     return [masterHost, { ...thisBrowserNode, role: 'Worker' }];
   }
 
-  // 4-Node Virtual Heterogeneous Star Test (mirrors AJ60/clustering matrix)
+  // 4-Node Heterogeneous Star Cluster (Linux Master + Windows GPU Worker + Local Browser + Edge ARM)
   return [
     {
-      nodeId: 'desktop-hub',
-      label: 'Desktop Master Hub',
+      nodeId: 'linux-hub',
+      label: 'Linux Master Hub',
       role: 'Master',
       platform: 'Desktop',
+      osType: 'linux',
+      backendDriver: tuningConfig?.linuxAccelerator ?? 'CUDA 12.6',
       linkType: 'Local',
       totalRamMb: 32768,
-      availableRamMb: 23500,
-      vramFreeMb: 11200,
-      memBwGbps: 145.0,
-      computeTflops: 22.6,
+      availableRamMb: 24200,
+      vramFreeMb: 12288,
+      memBwGbps: 158.0,
+      computeTflops: 24.4,
+      physicalCores: 16,
       rttMs: 0.2,
       pktLossPct: 0,
-      tempC: 62.0,
+      tempC: 60.5,
+      isConnected: true,
+    },
+    {
+      nodeId: 'windows-worker',
+      label: 'Windows Workstation',
+      role: 'Worker',
+      platform: 'Desktop',
+      osType: 'windows',
+      backendDriver: tuningConfig?.windowsAccelerator ?? 'CUDA 12.6',
+      linkType: 'Ethernet 2.5G',
+      totalRamMb: 32768,
+      availableRamMb: 21500,
+      vramFreeMb: 8192,
+      memBwGbps: 124.0,
+      computeTflops: 18.6,
+      physicalCores: 12,
+      rttMs: 0.6,
+      pktLossPct: 0,
+      tempC: Math.max(48, 58.0 + simulatedTempOffsetC),
       isConnected: true,
     },
     {
@@ -206,38 +256,25 @@ export function buildStarClusterNodes(
       label: isAndroidBrowser ? 'This Phone (Worker)' : 'This Browser Node',
       role: 'Worker',
       linkType: telemetry.usbLoopbackOnly ? 'USB-C Tunnel' : 'Wi-Fi LAN',
-      rttMs: telemetry.usbLoopbackOnly ? 0.7 : 3.9,
-    },
-    {
-      nodeId: 'android-usb',
-      label: 'Pixel Worker (USB-C)',
-      role: 'Worker',
-      platform: 'Android',
-      linkType: 'USB-C Tunnel',
-      totalRamMb: 8192,
-      availableRamMb: 5200,
-      vramFreeMb: 0,
-      memBwGbps: 34.0,
-      computeTflops: 2.1,
-      rttMs: 0.9,
-      pktLossPct: 0,
-      tempC: Math.max(33, 35.5 + simulatedTempOffsetC),
-      isConnected: true,
+      rttMs: telemetry.usbLoopbackOnly ? 0.7 : 3.4,
     },
     {
       nodeId: 'edge-arm',
-      label: 'Raspberry Pi / Edge Node',
+      label: 'Pixel / Edge ARM Helper',
       role: 'Worker',
-      platform: 'Edge ARM',
-      linkType: 'Ethernet 2.5G',
-      totalRamMb: 4096,
-      availableRamMb: 2800,
+      platform: 'Android',
+      osType: 'android',
+      backendDriver: 'NEON / Vulkan',
+      linkType: 'USB-C Tunnel',
+      totalRamMb: 8192,
+      availableRamMb: 5400,
       vramFreeMb: 0,
-      memBwGbps: 17.5,
-      computeTflops: 0.9,
-      rttMs: 1.8,
+      memBwGbps: 36.0,
+      computeTflops: 2.3,
+      physicalCores: 8,
+      rttMs: 0.9,
       pktLossPct: 0,
-      tempC: 49.0,
+      tempC: Math.max(33, 35.5 + simulatedTempOffsetC),
       isConnected: true,
     },
   ];
@@ -246,8 +283,17 @@ export function buildStarClusterNodes(
 export function planStarCluster(
   rawNodes: StarClusterNode[],
   model: GgufModelPreset,
-  limits: ThermalLimits = DEFAULT_THERMAL_LIMITS
+  limits: ThermalLimits = DEFAULT_THERMAL_LIMITS,
+  tuningConfig?: BackendTuningConfig
 ): StarClusterPlan {
+  const effectiveConfig = tuningConfig ?? createDefaultBackendTuningConfig(model);
+  const totalKvCacheMb = estimateKvCacheMb(
+    model.layers,
+    effectiveConfig.contextLength,
+    effectiveConfig.kvCacheQuant,
+    model.totalParamsB
+  );
+
   const evaluated: PlannedStarNode[] = rawNodes.map((n) => {
     const safeRamMb =
       n.platform === 'Android'
@@ -271,6 +317,14 @@ export function planStarCluster(
       thermalStatus,
       allocatedMb: 0,
       allocatedLayers: 0,
+      layerStart: 0,
+      layerEnd: -1,
+      activeParamsB: 0,
+      totalParamsB: 0,
+      kvCacheMb: 0,
+      estimatedTokPerSec: 0,
+      nglLayers: 0,
+      tuningFlags: [],
       sharePct: 0,
       statusNote:
         !n.isConnected
@@ -283,23 +337,26 @@ export function planStarCluster(
 
   const active = evaluated.filter((n) => n.effectiveCapMb > 0);
   const totalSafePoolMb = evaluated.reduce((acc, n) => acc + n.effectiveCapMb, 0);
-  const neededMb = model.sizeMb;
+  const totalVramPoolMb = evaluated.reduce(
+    (acc, n) => acc + (n.effectiveCapMb > 0 ? n.safeVramMb : 0),
+    0
+  );
+  const neededMb = model.sizeMb + totalKvCacheMb;
   const totalScore = active.reduce((acc, n) => acc + n.score, 0);
 
-  // Greedy capacity-aware layer & MB distribution across active star nodes
-  let remainingNeed = Math.min(neededMb, totalSafePoolMb);
+  // Greedy capacity-aware MB distribution across active star nodes
+  let remainingNeed = Math.min(model.sizeMb, totalSafePoolMb);
   const sortedActive = [...active].sort((a, b) => b.score - a.score);
 
   for (const node of sortedActive) {
     if (remainingNeed <= 0 || totalScore <= 0) break;
     const targetWeight = node.score / totalScore;
-    const proportionalMb = Math.round(neededMb * targetWeight);
+    const proportionalMb = Math.round(model.sizeMb * targetWeight);
     const alloc = Math.min(node.effectiveCapMb, Math.max(256, proportionalMb), remainingNeed);
     node.allocatedMb = alloc;
     remainingNeed -= alloc;
   }
 
-  // Fill any residual if headroom exists on active nodes
   if (remainingNeed > 0) {
     for (const node of sortedActive) {
       if (remainingNeed <= 0) break;
@@ -313,13 +370,69 @@ export function planStarCluster(
   }
 
   const totalAllocated = Math.max(1, evaluated.reduce((acc, n) => acc + n.allocatedMb, 0));
+
+  // Assign contiguous layer slices + Active Parameters + KV + Backend tuning per node
+  let assignedLayersSum = 0;
+  const activeWithAlloc = evaluated.filter((n) => n.allocatedMb > 0);
+  activeWithAlloc.forEach((node, idx) => {
+    const ratio = node.allocatedMb / totalAllocated;
+    node.sharePct = Math.round(ratio * 100);
+    if (idx === activeWithAlloc.length - 1) {
+      node.allocatedLayers = Math.max(1, model.layers - assignedLayersSum);
+    } else {
+      node.allocatedLayers = Math.max(1, Math.round(ratio * model.layers));
+      assignedLayersSum += node.allocatedLayers;
+    }
+  });
+
+  // Ensure sum equals model.layers cleanly if rounding slightly overshot
+  if (activeWithAlloc.length > 0) {
+    const sumLayers = activeWithAlloc.reduce((acc, n) => acc + n.allocatedLayers, 0);
+    if (sumLayers !== model.layers) {
+      const largest = [...activeWithAlloc].sort((a, b) => b.allocatedLayers - a.allocatedLayers)[0];
+      largest.allocatedLayers = Math.max(1, largest.allocatedLayers + (model.layers - sumLayers));
+    }
+  }
+
+  let cursorLayer = 0;
   for (const node of evaluated) {
-    if (node.allocatedMb > 0) {
-      node.sharePct = Math.round((node.allocatedMb / totalAllocated) * 100);
-      node.allocatedLayers = Math.max(
-        1,
-        Math.round((node.allocatedMb / totalAllocated) * model.layers)
-      );
+    if (node.allocatedLayers > 0) {
+      node.layerStart = cursorLayer;
+      node.layerEnd = cursorLayer + node.allocatedLayers - 1;
+      cursorLayer += node.allocatedLayers;
+
+      const layerShare = node.allocatedLayers / Math.max(1, model.layers);
+      node.activeParamsB = Number((model.activeParamsB * layerShare).toFixed(2));
+      node.totalParamsB = Number((model.totalParamsB * layerShare).toFixed(2));
+      node.kvCacheMb = Math.max(32, Math.round(totalKvCacheMb * layerShare));
+
+      const mbPerLayer = model.sizeMb / Math.max(1, model.layers);
+      const gpuLayerCap =
+        node.safeVramMb > 0 ? Math.floor(node.safeVramMb / Math.max(1, mbPerLayer)) : 0;
+      node.nglLayers = Math.min(node.allocatedLayers, gpuLayerCap);
+
+      const effectiveBw = node.nglLayers > 0 ? Math.max(node.memBwGbps, 195) : node.memBwGbps;
+      const nodeTok =
+        (effectiveBw / Math.max(0.35, node.activeParamsB * 0.6)) *
+        node.thermalStatus.capacityScale;
+      node.estimatedTokPerSec = Number(Math.max(1.5, Math.min(180, nodeTok)).toFixed(1));
+
+      const flags: string[] = [];
+      if (node.osType === 'windows') {
+        flags.push(effectiveConfig.windowsAccelerator);
+        if (effectiveConfig.windowsNoMmap) flags.push('--no-mmap');
+        flags.push('WDDM Guard -450MB');
+      } else if (node.osType === 'linux') {
+        flags.push(effectiveConfig.linuxAccelerator);
+        if (effectiveConfig.linuxNumaInterleave) flags.push('numactl --interleave');
+        if (effectiveConfig.linuxMlock) flags.push('--mlock');
+      } else if (node.osType === 'android') {
+        flags.push('<=50% Safe RAM');
+        flags.push('USB/NEON');
+      }
+      if (effectiveConfig.enableFlashAttn && node.nglLayers > 0) flags.push('FlashAttn');
+      if (effectiveConfig.moeCpuOffload && model.architecture === 'MoE') flags.push('--cpu-moe');
+      node.tuningFlags = flags;
     }
   }
 
@@ -361,8 +474,14 @@ export function planStarCluster(
     'COOL'
   );
 
+  // Pipeline bottleneck determines overall cluster tok/s
+  const bottleneckTok =
+    activeWithAlloc.length > 0
+      ? Math.min(...activeWithAlloc.map((n) => n.estimatedTokPerSec)) *
+        (activeWithAlloc.length > 1 ? 0.92 : 1.0)
+      : 0;
   const master = evaluated.find((n) => n.role === 'Master') ?? evaluated[0];
-  const splitParts = evaluated.filter((n) => n.allocatedMb > 0).map((n) => `${n.sharePct}%`);
+  const splitParts = activeWithAlloc.map((n) => `${n.sharePct}%`);
 
   return {
     tierCode,
@@ -370,9 +489,14 @@ export function planStarCluster(
     masterId: master?.label ?? 'Local Hub',
     fitVerdict,
     totalSafePoolMb,
+    totalVramPoolMb,
     neededMb,
+    kvCacheTotalMb: totalKvCacheMb,
     coveragePct,
     overallThermalState,
+    estimatedClusterTokPerSec: Number(Math.max(1.2, bottleneckTok).toFixed(1)),
+    activeParamsPerTokenB: model.activeParamsB,
+    totalParamsB: model.totalParamsB,
     nodes: evaluated,
     tensorSplitLabel: splitParts.length > 0 ? splitParts.join(' / ') : '0%',
   };

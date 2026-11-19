@@ -5,29 +5,37 @@ import {
   DiagnosticSeverity,
 } from '../types/clustering';
 import {
+  BackendOsTarget,
+  BackendTuningConfig,
   ClusterMode,
+  ContextLengthOption,
   GGUF_MODEL_PRESETS,
-  ModelPresetId,
+  GgufModelPreset,
+  KvCacheQuantOption,
+  LinuxAccelerator,
   PlannedStarNode,
+  StarClusterPlan,
   ThermalState,
+  WindowsAccelerator,
 } from '../types/starCluster';
-import {
-  buildStarClusterNodes,
-  planStarCluster,
-} from '../domain/starClusterPlanner';
+import { buildTunedOsBackendProfile } from '../domain/backendTuner';
 import { CameraQrScannerDialog } from './HardenedNodeDashboard';
 import {
   Activity,
   AlertTriangle,
   BatteryCharging,
+  Check,
   CheckCircle2,
+  Copy,
   Cpu,
+  Download,
   Flame,
   HardDrive,
   Laptop,
   Play,
   QrCode,
   RefreshCw,
+  Server,
   ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
@@ -41,6 +49,15 @@ import {
 
 interface StarClusterDashboardProps {
   telemetry: DeviceTelemetryState;
+  activeModel: GgufModelPreset;
+  clusterMode: ClusterMode;
+  tuningConfig: BackendTuningConfig;
+  clusterPlan: StarClusterPlan;
+  simulatedTempOffsetC: number;
+  onSelectModel: (model: GgufModelPreset) => void;
+  onChangeClusterMode: (mode: ClusterMode) => void;
+  onUpdateTuningConfig: (patch: Partial<BackendTuningConfig>) => void;
+  onChangeSimulatedTempOffsetC: (offsetC: number) => void;
   onRecalibrate: () => void;
   onStartWorker: () => void;
   onStopWorker: () => void;
@@ -51,6 +68,8 @@ interface StarClusterDashboardProps {
   onSimulateShedLayers: () => void;
   onRunDiagnostics: () => void;
   onApplyAutoFix: (action: AutoFixAction) => void;
+  onOpenModels?: () => void;
+  onOpenChat?: () => void;
   onOpen2DLab?: () => void;
 }
 
@@ -114,6 +133,15 @@ function diagnosticLabel(sev: DiagnosticSeverity) {
 
 export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
   telemetry,
+  activeModel,
+  clusterMode,
+  tuningConfig,
+  clusterPlan,
+  simulatedTempOffsetC,
+  onSelectModel,
+  onChangeClusterMode,
+  onUpdateTuningConfig,
+  onChangeSimulatedTempOffsetC,
   onRecalibrate,
   onStartWorker,
   onStopWorker,
@@ -124,23 +152,19 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
   onSimulateShedLayers,
   onRunDiagnostics,
   onApplyAutoFix,
+  onOpenModels,
+  onOpenChat,
   onOpen2DLab,
 }) => {
-  const [selectedPresetId, setSelectedPresetId] = useState<ModelPresetId>('moe-30b');
-  const [clusterMode, setClusterMode] = useState<ClusterMode>('VIRTUAL_4NODE');
-  const [simulatedTempOffsetC, setSimulatedTempOffsetC] = useState(0);
-  const [selectedNodeId, setSelectedNodeId] = useState<string>('this-device');
+  const [selectedNodeId, setSelectedNodeId] = useState<string>('linux-hub');
+  const [backendOs, setBackendOs] = useState<BackendOsTarget>('windows');
+  const [copiedCmd, setCopiedCmd] = useState(false);
   const [showQrModal, setShowQrModal] = useState(false);
 
-  const selectedModel = useMemo(
-    () => GGUF_MODEL_PRESETS.find((m) => m.id === selectedPresetId) ?? GGUF_MODEL_PRESETS[0],
-    [selectedPresetId]
-  );
-
-  const clusterPlan = useMemo(() => {
-    const rawNodes = buildStarClusterNodes(telemetry, clusterMode, simulatedTempOffsetC);
-    return planStarCluster(rawNodes, selectedModel);
-  }, [telemetry, clusterMode, simulatedTempOffsetC, selectedModel]);
+  const presetOptions = useMemo(() => {
+    const exists = GGUF_MODEL_PRESETS.some((p) => p.id === activeModel.id);
+    return exists ? GGUF_MODEL_PRESETS : [activeModel, ...GGUF_MODEL_PRESETS];
+  }, [activeModel]);
 
   const inspectedNode: PlannedStarNode | undefined = useMemo(() => {
     return (
@@ -149,13 +173,37 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
     );
   }, [clusterPlan.nodes, selectedNodeId]);
 
-  const masterNode = clusterPlan.nodes.find((n) => n.role === 'Master') ?? clusterPlan.nodes[0];
+  const backendProfile = useMemo(
+    () => buildTunedOsBackendProfile(backendOs, activeModel, clusterPlan, tuningConfig),
+    [backendOs, activeModel, clusterPlan, tuningConfig]
+  );
+
+  const masterNode =
+    clusterPlan.nodes.find((n) => n.role === 'Master') ?? clusterPlan.nodes[0];
   const workerNodes = clusterPlan.nodes.filter((n) => n.nodeId !== masterNode?.nodeId);
 
   const isRunning =
     telemetry.workerState === 'RUNNING_USB' || telemetry.workerState === 'RUNNING_WIFI';
   const cal = telemetry.calibration;
   const thermalMeta = thermalLabel(clusterPlan.overallThermalState);
+
+  const handleCopyCommand = () => {
+    void navigator.clipboard?.writeText(backendProfile.launchCommand);
+    setCopiedCmd(true);
+    window.setTimeout(() => setCopiedCmd(false), 1600);
+  };
+
+  const handleDownloadBackendScript = () => {
+    const blob = new Blob([backendProfile.scriptContent], {
+      type: 'text/plain;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = backendProfile.scriptFileName;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="space-y-6 pb-8">
@@ -167,63 +215,92 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
               htmlFor="gguf-model-preset"
               className="text-xs font-semibold text-slate-600 dark:text-slate-400 whitespace-nowrap"
             >
-              Model Preset
+              Active Model
             </label>
             <select
               id="gguf-model-preset"
-              value={selectedPresetId}
-              onChange={(e) => setSelectedPresetId(e.target.value as ModelPresetId)}
+              value={activeModel.id}
+              onChange={(e) => {
+                const chosen = presetOptions.find((m) => m.id === e.target.value);
+                if (chosen) onSelectModel(chosen);
+              }}
               className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#131C31] px-3 py-2 text-xs font-semibold text-slate-900 dark:text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
             >
-              {GGUF_MODEL_PRESETS.map((preset) => (
+              {presetOptions.map((preset) => (
                 <option key={preset.id} value={preset.id}>
-                  {preset.name} ({preset.quant} · {(preset.sizeMb / 1000).toFixed(1)} GB)
+                  {preset.name} ({preset.quant} · {(preset.sizeMb / 1024).toFixed(1)} GB)
                 </option>
               ))}
             </select>
           </div>
 
-          <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-            <span>{selectedModel.architecture}</span>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+            <span>{activeModel.architecture}</span>
             <span aria-hidden="true">·</span>
-            <span className="font-mono-num">{selectedModel.layers} layers</span>
+            <span className="font-mono-num">
+              {activeModel.activeParamsB}B active / {activeModel.totalParamsB}B total
+            </span>
             <span aria-hidden="true">·</span>
-            <span className="font-mono-num">{(selectedModel.sizeMb / 1024).toFixed(1)} GB needed</span>
+            <span className="font-mono-num">{activeModel.layers} layers</span>
+            <span aria-hidden="true">·</span>
+            <span className="font-mono-num">~{clusterPlan.estimatedClusterTokPerSec} tok/s</span>
           </div>
+
+          {onOpenModels && (
+            <button
+              type="button"
+              onClick={onOpenModels}
+              className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap shrink-0"
+            >
+              Browse HF Catalog →
+            </button>
+          )}
         </div>
 
-        {/* Segmented Mode Selector: Live Device vs 4-Node Virtual Test */}
-        <div
-          role="tablist"
-          aria-label="Cluster topology mode"
-          className="inline-flex items-center p-1 rounded-lg bg-slate-100 dark:bg-[#131C31] border border-slate-200 dark:border-slate-800 self-start lg:self-auto"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={clusterMode === 'LOCAL_DEVICE'}
-            onClick={() => setClusterMode('LOCAL_DEVICE')}
-            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-              clusterMode === 'LOCAL_DEVICE'
-                ? 'bg-white dark:bg-[#1E293B] text-slate-900 dark:text-white shadow-xs'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-            }`}
+        {/* Segmented Mode Selector + Chat Shortcut */}
+        <div className="flex flex-wrap items-center gap-2 self-start lg:self-auto">
+          <div
+            role="tablist"
+            aria-label="Cluster topology mode"
+            className="inline-flex items-center p-1 rounded-lg bg-slate-100 dark:bg-[#131C31] border border-slate-200 dark:border-slate-800"
           >
-            This Device
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={clusterMode === 'VIRTUAL_4NODE'}
-            onClick={() => setClusterMode('VIRTUAL_4NODE')}
-            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-              clusterMode === 'VIRTUAL_4NODE'
-                ? 'bg-white dark:bg-[#1E293B] text-slate-900 dark:text-white shadow-xs'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-            }`}
-          >
-            4-Node Cluster Test
-          </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={clusterMode === 'LOCAL_DEVICE'}
+              onClick={() => onChangeClusterMode('LOCAL_DEVICE')}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                clusterMode === 'LOCAL_DEVICE'
+                  ? 'bg-white dark:bg-[#1E293B] text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              This Device
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={clusterMode === 'VIRTUAL_4NODE'}
+              onClick={() => onChangeClusterMode('VIRTUAL_4NODE')}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                clusterMode === 'VIRTUAL_4NODE'
+                  ? 'bg-white dark:bg-[#1E293B] text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              4-Node Cluster
+            </button>
+          </div>
+
+          {onOpenChat && (
+            <button
+              type="button"
+              onClick={onOpenChat}
+              className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#131C31] hover:border-blue-500 px-3 py-1.5 text-xs font-semibold text-slate-800 dark:text-slate-100 whitespace-nowrap shrink-0"
+            >
+              Open Chat & Brain
+            </button>
+          )}
         </div>
       </section>
 
@@ -231,19 +308,22 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
       <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-4 space-y-1">
           <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
-            Cluster Tier
+            Cluster Tier & Active Params
           </div>
           <div className="text-base font-bold text-slate-900 dark:text-slate-100 font-mono-num">
             {clusterPlan.tierLabel}
           </div>
           <div className="text-xs text-slate-500 dark:text-slate-400 font-mono-num">
-            {clusterPlan.nodes.filter((n) => n.effectiveCapMb > 0).length} active node(s) · 1-Hop Star
+            {clusterPlan.activeParamsPerTokenB}B active/tok ·{' '}
+            {clusterPlan.nodes.filter((n) => n.effectiveCapMb > 0).length} node(s)
           </div>
         </div>
 
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-4 space-y-2">
           <div className="flex items-center justify-between text-xs">
-            <span className="font-medium text-slate-500 dark:text-slate-400">Safe RAM Pool</span>
+            <span className="font-medium text-slate-500 dark:text-slate-400">
+              Safe RAM + VRAM Pool
+            </span>
             <span
               className={`font-semibold ${
                 clusterPlan.fitVerdict === 'Fast' || clusterPlan.fitVerdict === 'Best Fit'
@@ -257,7 +337,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
           <div className="text-base font-bold text-slate-900 dark:text-slate-100 font-mono-num">
             {(clusterPlan.totalSafePoolMb / 1024).toFixed(1)} GB{' '}
             <span className="text-xs font-normal text-slate-500 dark:text-slate-400">
-              / {(clusterPlan.neededMb / 1024).toFixed(1)} GB
+              / {(clusterPlan.neededMb / 1024).toFixed(1)} GB (incl. KV)
             </span>
           </div>
           <div className="h-1.5 w-full rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
@@ -272,10 +352,10 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
 
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-4 space-y-1">
           <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
-            Layer Split
+            Layer Split & Throughput
           </div>
           <div className="text-base font-bold text-slate-900 dark:text-slate-100 font-mono-num truncate">
-            {clusterPlan.tensorSplitLabel}
+            {clusterPlan.tensorSplitLabel} · ~{clusterPlan.estimatedClusterTokPerSec} tok/s
           </div>
           <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
             Hub: {clusterPlan.masterId}
@@ -291,7 +371,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
             <span className="truncate">{thermalMeta.text}</span>
           </div>
           <div className="text-xs text-slate-500 dark:text-slate-400 font-mono-num">
-            Android ≤50% RAM cap · Anti-flap 30s
+            WDDM & Android ≤50% caps · Anti-flap 30s
           </div>
         </div>
       </section>
@@ -301,20 +381,20 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="font-display text-base font-bold text-slate-900 dark:text-slate-100">
-              1-Hop Star Topology & Memory Pool
+              1-Hop Star Topology & Node Active Parameters
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Click any node to inspect its safe RAM limit, network latency, and assigned layers.
+              Click any node to inspect its OS backend, active parameter slice, safe RAM/VRAM cap, and layer bounds.
             </p>
           </div>
           <span className="text-xs font-mono-num text-slate-500 dark:text-slate-400">
-            {selectedModel.name} · {clusterPlan.coveragePct}% in RAM
+            {activeModel.name} · {clusterPlan.coveragePct}% pool coverage
           </span>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-center">
           {/* Interactive SVG Hub & Spoke Diagram */}
-          <div className="lg:col-span-6">
+          <div className="lg:col-span-5">
             <svg
               viewBox="0 0 560 250"
               className="w-full h-56 sm:h-60"
@@ -340,7 +420,6 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
 
                 return (
                   <>
-                    {/* Edges */}
                     {workerNodes.map((w, idx) => {
                       const pos = workerPositions[idx] ?? { x: 410, y: 125 };
                       const offloaded =
@@ -366,9 +445,9 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                             strokeOpacity={offloaded ? 0.6 : 0.85}
                           />
                           <rect
-                            x={midX - 38}
+                            x={midX - 40}
                             y={midY - 10}
-                            width={76}
+                            width={80}
                             height={20}
                             rx={4}
                             className="fill-slate-100 dark:fill-[#0B1120] stroke-slate-300 dark:stroke-slate-700"
@@ -386,7 +465,6 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                       );
                     })}
 
-                    {/* Master Hub Node */}
                     {masterNode && (
                       <g
                         onClick={() => setSelectedNodeId(masterNode.nodeId)}
@@ -419,7 +497,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                           textAnchor="middle"
                           className="fill-blue-600 dark:fill-blue-400 text-[10.5px] font-mono-num font-semibold"
                         >
-                          Master · {masterNode.sharePct}% ({masterNode.allocatedLayers}L)
+                          {masterNode.activeParamsB}B act · {masterNode.allocatedLayers}L
                         </text>
                         <text
                           x={hubX - 42}
@@ -427,12 +505,11 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                           textAnchor="middle"
                           className="fill-slate-500 dark:fill-slate-400 text-[10px] font-mono-num"
                         >
-                          {(masterNode.effectiveCapMb / 1024).toFixed(1)} GB safe cap
+                          {masterNode.backendDriver}
                         </text>
                       </g>
                     )}
 
-                    {/* Worker Nodes */}
                     {workerNodes.map((w, idx) => {
                       const pos = workerPositions[idx] ?? { x: 410, y: 125 };
                       const isSelected = selectedNodeId === w.nodeId;
@@ -445,7 +522,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                           <rect
                             x={pos.x - 10}
                             y={pos.y - 26}
-                            width={145}
+                            width={148}
                             height={52}
                             rx={10}
                             className={`transition-colors ${
@@ -456,7 +533,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                             strokeWidth={isSelected ? 2 : 1.2}
                           />
                           <text
-                            x={pos.x + 62}
+                            x={pos.x + 64}
                             y={pos.y - 5}
                             textAnchor="middle"
                             className="fill-slate-900 dark:fill-slate-100 text-[11.5px] font-bold"
@@ -464,12 +541,12 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                             {w.label.slice(0, 20)}
                           </text>
                           <text
-                            x={pos.x + 62}
+                            x={pos.x + 64}
                             y={pos.y + 12}
                             textAnchor="middle"
                             className="fill-slate-500 dark:fill-slate-400 text-[10px] font-mono-num"
                           >
-                            {w.allocatedLayers}L · {(w.effectiveCapMb / 1024).toFixed(1)} GB · {w.tempC.toFixed(0)}°C
+                            {w.activeParamsB}B act · {w.allocatedLayers}L · {w.tempC.toFixed(0)}°C
                           </text>
                         </g>
                       );
@@ -481,13 +558,13 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
           </div>
 
           {/* Cap-Bounded Node Allocation Table */}
-          <div className="lg:col-span-6 overflow-x-auto">
+          <div className="lg:col-span-7 overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 dark:border-slate-800 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                  <th className="py-2 pr-3">Node</th>
-                  <th className="py-2 pr-3">Link</th>
+                  <th className="py-2 pr-3">Node & OS Backend</th>
                   <th className="py-2 pr-3 text-right">Safe Cap</th>
+                  <th className="py-2 pr-3 text-right">Active Params</th>
                   <th className="py-2 pr-3 text-right">Layers</th>
                   <th className="py-2 text-right">Thermal</th>
                 </tr>
@@ -510,18 +587,20 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                         <div className="font-semibold text-slate-900 dark:text-slate-100">
                           {node.label}
                         </div>
-                        <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                          {node.role} · {node.platform}
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-num">
+                          {node.osType.toUpperCase()} · {node.backendDriver} · {node.linkType}
                         </div>
-                      </td>
-                      <td className="py-2.5 pr-3 text-slate-600 dark:text-slate-300 font-mono-num whitespace-nowrap">
-                        {node.linkType}
                       </td>
                       <td className="py-2.5 pr-3 text-right font-mono-num text-slate-800 dark:text-slate-200 whitespace-nowrap">
                         {(node.effectiveCapMb / 1024).toFixed(1)} GB
                       </td>
+                      <td className="py-2.5 pr-3 text-right font-mono-num font-semibold text-blue-600 dark:text-blue-400 whitespace-nowrap">
+                        {node.activeParamsB}B
+                      </td>
                       <td className="py-2.5 pr-3 text-right font-mono-num font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap">
-                        {node.allocatedLayers} ({node.sharePct}%)
+                        {node.allocatedLayers > 0
+                          ? `L${node.layerStart}–${node.layerEnd} (${node.sharePct}%)`
+                          : '0L'}
                       </td>
                       <td className="py-2.5 text-right whitespace-nowrap">
                         <span className={`inline-flex items-center gap-1 font-mono-num font-semibold ${tMeta.colorClass}`}>
@@ -542,7 +621,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                   {inspectedNode.thermalStatus.reason}
                 </span>
                 <span className="font-mono-num">
-                  Score {inspectedNode.score} · RTT {inspectedNode.rttMs.toFixed(1)} ms
+                  Score {inspectedNode.score} · ~{inspectedNode.estimatedTokPerSec} tok/s
                 </span>
               </div>
             )}
@@ -550,7 +629,236 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
         </div>
       </section>
 
-      {/* 4. Three Simple User Cards: Connect · Health · Troubleshooter */}
+      {/* 4. Windows & Linux Tuned Backend Profiles */}
+      <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-5 space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <Server className="w-4 h-4 text-blue-500" />
+              Windows & Linux Native Backends (Auto-Tuned for {activeModel.name})
+            </h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Architecture-tuned GPU/CPU threads, WDDM / MemAvailable memory guards, KV cache quantization, and downloadable launch scripts.
+            </p>
+          </div>
+
+          <div className="inline-flex items-center p-1 rounded-lg bg-slate-100 dark:bg-[#0B1120] border border-slate-200 dark:border-slate-800 self-start">
+            <button
+              type="button"
+              onClick={() => setBackendOs('windows')}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold whitespace-nowrap shrink-0 transition-colors ${
+                backendOs === 'windows'
+                  ? 'bg-white dark:bg-[#1E293B] text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              Windows 10/11
+            </button>
+            <button
+              type="button"
+              onClick={() => setBackendOs('linux')}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold whitespace-nowrap shrink-0 transition-colors ${
+                backendOs === 'linux'
+                  ? 'bg-white dark:bg-[#1E293B] text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              Linux Kernel / NUMA
+            </button>
+          </div>
+        </div>
+
+        {/* Tuning Knobs Row */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="space-y-1">
+            <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+              {backendOs === 'windows' ? 'Windows Accelerator' : 'Linux Accelerator'}
+            </label>
+            {backendOs === 'windows' ? (
+              <select
+                value={tuningConfig.windowsAccelerator}
+                onChange={(e) =>
+                  onUpdateTuningConfig({
+                    windowsAccelerator: e.target.value as WindowsAccelerator,
+                  })
+                }
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B1120] px-2.5 py-1.5 text-xs font-semibold text-slate-900 dark:text-slate-100"
+              >
+                <option value="CUDA 12.6">CUDA 12.6 (RTX / cuBLAS)</option>
+                <option value="Vulkan 1.3">Vulkan 1.3 (AMD / Intel / RTX)</option>
+                <option value="DirectML">DirectML (Windows iGPU)</option>
+                <option value="CPU AVX2">CPU AVX2 / BitNet LUT</option>
+              </select>
+            ) : (
+              <select
+                value={tuningConfig.linuxAccelerator}
+                onChange={(e) =>
+                  onUpdateTuningConfig({
+                    linuxAccelerator: e.target.value as LinuxAccelerator,
+                  })
+                }
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B1120] px-2.5 py-1.5 text-xs font-semibold text-slate-900 dark:text-slate-100"
+              >
+                <option value="CUDA 12.6">CUDA 12.6 (NVIDIA + NVCC)</option>
+                <option value="ROCm 6.3">ROCm 6.3 (AMD HIP)</option>
+                <option value="Vulkan 1.3">Vulkan 1.3 (Mesa RADV / ANV)</option>
+                <option value="CPU OpenBLAS">CPU OpenBLAS + AVX-512</option>
+              </select>
+            )}
+          </div>
+
+          <div className="space-y-1">
+            <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+              Context Window
+            </label>
+            <select
+              value={tuningConfig.contextLength}
+              onChange={(e) =>
+                onUpdateTuningConfig({
+                  contextLength: Number(e.target.value) as ContextLengthOption,
+                })
+              }
+              className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B1120] px-2.5 py-1.5 text-xs font-mono-num font-semibold text-slate-900 dark:text-slate-100"
+            >
+              <option value={4096}>4,096 tokens</option>
+              <option value={8192}>8,192 tokens</option>
+              <option value={16384}>16,384 tokens</option>
+              <option value={32768}>32,768 tokens</option>
+            </select>
+          </div>
+
+          <div className="space-y-1">
+            <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+              KV Cache Precision
+            </label>
+            <select
+              value={tuningConfig.kvCacheQuant}
+              onChange={(e) =>
+                onUpdateTuningConfig({
+                  kvCacheQuant: e.target.value as KvCacheQuantOption,
+                })
+              }
+              className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B1120] px-2.5 py-1.5 text-xs font-mono-num font-semibold text-slate-900 dark:text-slate-100"
+            >
+              <option value="f16">F16 (Full Precision)</option>
+              <option value="q8_0">Q8_0 (50% RAM Saved)</option>
+              <option value="q4_0">Q4_0 (Max Context Fit)</option>
+            </select>
+          </div>
+
+          <div className="flex flex-col justify-end gap-1.5 text-xs">
+            <label className="inline-flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-200">
+              <input
+                type="checkbox"
+                checked={tuningConfig.enableFlashAttn}
+                onChange={(e) =>
+                  onUpdateTuningConfig({ enableFlashAttn: e.target.checked })
+                }
+                className="accent-blue-600"
+              />
+              <span>FlashAttention (`--flash-attn`)</span>
+            </label>
+            {activeModel.architecture === 'MoE' ? (
+              <label className="inline-flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={tuningConfig.moeCpuOffload}
+                  onChange={(e) =>
+                    onUpdateTuningConfig({ moeCpuOffload: e.target.checked })
+                  }
+                  className="accent-blue-600"
+                />
+                <span>CPU MoE Experts (`--cpu-moe`)</span>
+              </label>
+            ) : backendOs === 'windows' ? (
+              <label className="inline-flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={tuningConfig.windowsNoMmap}
+                  onChange={(e) =>
+                    onUpdateTuningConfig({ windowsNoMmap: e.target.checked })
+                  }
+                  className="accent-blue-600"
+                />
+                <span>Lock weights in RAM (`--no-mmap`)</span>
+              </label>
+            ) : (
+              <label className="inline-flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={tuningConfig.linuxNumaInterleave}
+                  onChange={(e) =>
+                    onUpdateTuningConfig({ linuxNumaInterleave: e.target.checked })
+                  }
+                  className="accent-blue-600"
+                />
+                <span>NUMA Interleave (`numactl`)</span>
+              </label>
+            )}
+          </div>
+        </div>
+
+        {/* Tuned Telemetry Summary & Script Actions */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start pt-2 border-t border-slate-200 dark:border-slate-800">
+          <div className="lg:col-span-5 space-y-2">
+            <div className="grid grid-cols-2 gap-2 text-xs font-mono-num">
+              <div className="rounded-lg bg-slate-50 dark:bg-[#0B1120] p-2.5 border border-slate-200 dark:border-slate-800">
+                <div className="text-[11px] text-slate-500">GPU Layers (-ngl)</div>
+                <div className="font-bold text-slate-900 dark:text-slate-100">
+                  {backendProfile.gpuOffloadLayers} / {activeModel.layers}L
+                </div>
+              </div>
+              <div className="rounded-lg bg-slate-50 dark:bg-[#0B1120] p-2.5 border border-slate-200 dark:border-slate-800">
+                <div className="text-[11px] text-slate-500">Est. Speed · Threads</div>
+                <div className="font-bold text-slate-900 dark:text-slate-100">
+                  ~{backendProfile.expectedTokPerSec} tok/s · {backendProfile.recommendedThreads}T
+                </div>
+              </div>
+            </div>
+
+            <ul className="space-y-1 text-xs text-slate-600 dark:text-slate-300">
+              {backendProfile.optimizations.map((note) => (
+                <li key={note} className="flex items-start gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 mt-0.5 shrink-0" />
+                  <span>{note}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="lg:col-span-7 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-semibold text-slate-700 dark:text-slate-200">
+                Tuned {backendProfile.title} Launch Command
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleCopyCommand}
+                  className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline"
+                >
+                  {copiedCmd ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedCmd ? 'Copied' : 'Copy Command'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadBackendScript}
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-blue-500"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>{backendProfile.scriptFileName}</span>
+                </button>
+              </div>
+            </div>
+
+            <pre className="rounded-lg bg-slate-950 border border-slate-800 p-3 text-[11px] font-mono-num text-emerald-400 overflow-x-auto max-h-40">
+              {backendProfile.launchCommand}
+            </pre>
+          </div>
+        </div>
+      </section>
+
+      {/* 5. Three Simple User Cards: Connect · Health · Troubleshooter */}
       <section className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
         {/* Card 1: Connect */}
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-5 flex flex-col justify-between gap-4">
@@ -601,7 +909,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
             <button
               type="button"
               onClick={() => setShowQrModal(true)}
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#1E293B] px-3 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 hover:border-blue-500 whitespace-nowrap shrink-0"
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-700 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-blue-500 whitespace-nowrap shrink-0"
             >
               <QrCode className="w-3.5 h-3.5 text-blue-500" />
               Scan QR
@@ -611,7 +919,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
               <button
                 type="button"
                 onClick={onStopWorker}
-                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-300 px-3 py-2 text-xs font-semibold hover:bg-red-500/20 whitespace-nowrap shrink-0"
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-300 px-3 py-2 text-xs font-semibold whitespace-nowrap shrink-0"
               >
                 <Square className="w-3.5 h-3.5" />
                 Stop Sharing
@@ -620,7 +928,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
               <button
                 type="button"
                 onClick={onStartWorker}
-                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#1E293B] text-slate-800 dark:text-slate-100 px-3 py-2 text-xs font-semibold hover:border-emerald-500 whitespace-nowrap shrink-0"
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-700 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-emerald-500 whitespace-nowrap shrink-0"
               >
                 <Play className="w-3.5 h-3.5 text-emerald-500" />
                 Start Sharing
@@ -634,75 +942,73 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-2">
               <h2 className="font-display text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                <Cpu className="w-4 h-4 text-emerald-500" />
+                <ShieldCheck className="w-4 h-4 text-emerald-500" />
                 Device Health
               </h2>
-              <span className="text-xs font-semibold text-blue-600 dark:text-blue-400">
-                {cal.tierLabel}
+              <span className="text-xs font-mono-num text-slate-500 dark:text-slate-400">
+                {cal.isCalibrated ? `${cal.performanceScore}/100` : 'Checking'}
               </span>
             </div>
 
-            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-              {cal.summarySentence}
-            </p>
+            <div className="grid grid-cols-2 gap-2.5 text-xs">
+              <div className="space-y-0.5">
+                <div className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                  <HardDrive className="w-3 h-3" /> Safe RAM Cap
+                </div>
+                <div className="font-bold font-mono-num text-slate-900 dark:text-slate-100">
+                  {telemetry.safeCapMb} MB
+                </div>
+              </div>
 
-            <dl className="grid grid-cols-2 gap-x-4 gap-y-2.5 pt-1 text-xs">
-              <div>
-                <dt className="text-slate-500 dark:text-slate-400">Safe RAM Cap</dt>
-                <dd className="font-mono-num font-bold text-slate-900 dark:text-slate-100">
-                  {cal.recommendedSafeRamMb} MB{' '}
-                  <span className="font-normal text-slate-500">/ {telemetry.totalRamMb}</span>
-                </dd>
-              </div>
-              <div>
-                <dt className="text-slate-500 dark:text-slate-400">Compute Engine</dt>
-                <dd className="font-semibold text-slate-900 dark:text-slate-100 truncate">
+              <div className="space-y-0.5">
+                <div className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                  <Cpu className="w-3 h-3" /> Engine
+                </div>
+                <div className="font-bold text-slate-900 dark:text-slate-100 truncate">
                   {cal.recommendedBackendLabel}
-                </dd>
+                </div>
               </div>
-              <div>
-                <dt className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                  <BatteryCharging className="w-3.5 h-3.5 text-emerald-500" />
-                  Battery & Heat
-                </dt>
-                <dd className="font-mono-num font-bold text-slate-900 dark:text-slate-100">
-                  {telemetry.batteryPercent}% · {(telemetry.temperatureCelsius + simulatedTempOffsetC).toFixed(1)}°C
-                </dd>
+
+              <div className="space-y-0.5">
+                <div className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                  <BatteryCharging className="w-3 h-3" /> Battery / Temp
+                </div>
+                <div className="font-bold font-mono-num text-slate-900 dark:text-slate-100">
+                  {telemetry.batteryPercent}% · {(telemetry.temperatureCelsius + simulatedTempOffsetC).toFixed(0)}°C
+                </div>
               </div>
-              <div>
-                <dt className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                  <HardDrive className="w-3.5 h-3.5 text-blue-500" />
-                  Speed & Threads
-                </dt>
-                <dd className="font-mono-num font-bold text-slate-900 dark:text-slate-100">
-                  {cal.performanceScore}/100 · {cal.recommendedThreads} threads
-                </dd>
+
+              <div className="space-y-0.5">
+                <div className="text-slate-500 dark:text-slate-400">Tier</div>
+                <div className="font-bold text-slate-900 dark:text-slate-100 truncate">
+                  {cal.tierLabel}
+                </div>
               </div>
-            </dl>
+            </div>
           </div>
 
           <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
-            <span className="text-xs text-slate-500 dark:text-slate-400 font-mono-num">
-              Capacity: {cal.estimatedLayerCapacity} layers
+            <span className="text-xs text-slate-500 dark:text-slate-400 truncate">
+              {cal.summarySentence}
             </span>
             <button
               type="button"
               onClick={onRecalibrate}
               disabled={cal.isCalibrating}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#1E293B] px-3 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 hover:border-blue-500 whitespace-nowrap shrink-0"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-blue-500 whitespace-nowrap shrink-0"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${cal.isCalibrating ? 'animate-spin' : ''}`} />
-              {cal.isCalibrating ? 'Tuning...' : 'Re-Tune Speed'}
+              Re-Tune Speed
             </button>
           </div>
         </div>
 
         {/* Card 3: Troubleshooter */}
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-5 flex flex-col justify-between gap-4">
-          <div className="space-y-3">
+          <div className="space-y-2.5">
             <div className="flex items-center justify-between gap-2">
               <h2 className="font-display text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-teal-500" />
+                <Wrench className="w-4 h-4 text-blue-500" />
                 Troubleshooter
               </h2>
               {telemetry.diagnosticReport && (
@@ -713,49 +1019,51 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
             </div>
 
             {telemetry.diagnosticReport ? (
-              <div className="space-y-2">
-                <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
-                  {telemetry.diagnosticReport.headline}
-                </div>
-                <div className="max-h-52 overflow-y-auto divide-y divide-slate-200 dark:divide-slate-800/80 pr-1">
-                  {telemetry.diagnosticReport.checks.map((chk) => (
-                    <div key={chk.id} className="py-2 first:pt-0 space-y-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
-                          {chk.title}
-                        </span>
-                        {diagnosticLabel(chk.severity)}
+              <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                {telemetry.diagnosticReport.checks.map((chk) => (
+                  <div
+                    key={chk.id}
+                    className="flex items-center justify-between gap-2 py-1 border-b border-slate-100 dark:border-slate-800/70 last:border-0 text-xs"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-semibold text-slate-800 dark:text-slate-100 truncate">
+                        {chk.title}
                       </div>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
                         {chk.statusText}
-                      </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {diagnosticLabel(chk.severity)}
                       {chk.fixAction && (
                         <button
                           type="button"
                           onClick={() => onApplyAutoFix(chk.fixAction!)}
-                          className="inline-flex items-center gap-1 rounded-md bg-blue-600/12 text-blue-600 dark:text-blue-400 px-2.5 py-1 text-[11px] font-semibold hover:bg-blue-600/20"
+                          className="rounded-md bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 text-[11px] font-semibold whitespace-nowrap"
                         >
-                          <Wrench className="w-3 h-3" />
-                          1-Click Fix
+                          Fix
                         </button>
                       )}
                     </div>
-                  ))}
-                </div>
+                  </div>
+                ))}
               </div>
             ) : (
               <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-                Verify calibration, USB/Wi-Fi connectivity, desktop master reachability, battery/thermal comfort, and free memory headroom with automatic 1-click fixes.
+                Run a 6-point check on memory limits, network link, battery temperature, and cluster reachability with 1-click fixes.
               </p>
             )}
           </div>
 
-          <div className="flex justify-end pt-2 border-t border-slate-200 dark:border-slate-800">
+          <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+            <span className="text-xs text-slate-500 dark:text-slate-400 truncate">
+              {telemetry.diagnosticReport?.headline ?? '6 automated readiness checks'}
+            </span>
             <button
               type="button"
               onClick={onRunDiagnostics}
               disabled={telemetry.isDiagnosing}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 hover:opacity-90 text-white px-3.5 py-2 text-xs font-semibold whitespace-nowrap shrink-0"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 hover:bg-slate-800 dark:hover:bg-blue-500 text-white px-3 py-1.5 text-xs font-semibold whitespace-nowrap shrink-0"
             >
               <Activity className={`w-3.5 h-3.5 ${telemetry.isDiagnosing ? 'animate-pulse' : ''}`} />
               {telemetry.isDiagnosing ? 'Checking...' : 'Run Auto-Diagnosis'}
@@ -764,7 +1072,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
         </div>
       </section>
 
-      {/* 5. Developer Settings Section (Only visible when Developer Mode is ON) */}
+      {/* 6. Developer Settings Section (Only visible when Developer Mode is ON) */}
       {telemetry.developerModeEnabled && (
         <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-5 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -786,7 +1094,6 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* Transport Bind Switch */}
             <div className="space-y-2">
               <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                 Transport Bind ({telemetry.bindAddress})
@@ -819,7 +1126,6 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
               </div>
             </div>
 
-            {/* Keyed Auth Secret & 32-Byte Token */}
             <div className="space-y-1.5">
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
                 Cluster Secret & 32-Byte Auth Token
@@ -835,7 +1141,6 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
               </div>
             </div>
 
-            {/* ThermalBalancer & SHED_LAYERS Stress Tests */}
             <div className="space-y-2">
               <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                 Thermal & Memory Stress Guard
@@ -843,21 +1148,21 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
               <div className="flex flex-wrap gap-1.5">
                 <button
                   type="button"
-                  onClick={() => setSimulatedTempOffsetC(0)}
+                  onClick={() => onChangeSimulatedTempOffsetC(0)}
                   className="rounded-lg border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:border-emerald-500"
                 >
                   Cool (Nominal)
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSimulatedTempOffsetC(15)}
+                  onClick={() => onChangeSimulatedTempOffsetC(25)}
                   className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold text-amber-700 dark:text-amber-300"
                 >
                   Test SHED_25
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSimulatedTempOffsetC(19)}
+                  onClick={() => onChangeSimulatedTempOffsetC(30)}
                   className="rounded-lg border border-red-500/40 bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold text-red-700 dark:text-red-300"
                 >
                   Test Emergency Offload

@@ -1,71 +1,34 @@
-# ClusterLab — 1-Hop Star GGUF Cluster (React + TypeScript + Vite)
+# ClusterLab — 1-Hop Star GGUF Cluster (React + TypeScript + Express + Vite)
 
-ClusterLab is a simplified **1-Hop Star GGUF Cluster** coordinator and device-pairing dashboard built with React 19, TypeScript, Vite, and Tailwind CSS v4, aligned with the `AJ60/clustering` planner & thermal guard model.
+ClusterLab is a simplified **1-Hop Star GGUF Cluster** coordinator, Hugging Face GGUF browser, live OpenAI-compatible inference server, and node-brain inspector built with React 19, TypeScript, Express, Vite, and Tailwind CSS v4.
 
-The default home screen focuses on cluster readiness and simplicity. Advanced 2D machine learning visualization (**2D K-Means & DBSCAN Lab**) and raw telemetry controls are cleanly tucked behind **Developer Mode**.
+The default interface centers on clean cluster orchestration, Windows/Linux backend tuning, model compatibility cards, chat + active-parameter inspection, and 1-step agent harness setup. Advanced 2D machine learning visualization (**2D K-Means & DBSCAN Lab**) remains gated behind **Developer Mode**.
 
 ---
 
 ## Core Features
 
-### 1. 1-Hop Star GGUF Cluster Dashboard (Default Home View)
-- **Model Presets & Topology Mode:**
-  - Built-in quantized GGUF presets: `Qwen3-30B-A3B MoE` (Q4_K_M, 18.5 GB, 48L), `BitNet b1.58 Ternary` (TQ1_0, 6.4 GB, 36L), `Qwen2.5-32B Dense` (Q4_K_M, 19.8 GB, 64L), and `Llama-3.3-70B Dense` (Q4_K_M, 40.5 GB, 80L).
-  - Switch seamlessly between **This Device** and **4-Node Cluster Test** (Master + Edge/Desktop/Mobile workers).
-- **Safe RAM Pool & Cap-Bounded Layer Allocation:**
-  - Enforces hard platform safety caps: Android `<= 50%` physical RAM (`computeAndroidSafeCap`), Desktop `MemAvailable - 1024 MB` (`computeDesktopSafeCap`), and `90%` VRAM (`computeVramSafeCap`).
-  - Scores each node, evaluates overall fit verdict (`Fast`, `Best Fit`, `Streaming`), renders an interactive **1-Hop Star SVG Topology**, and provides a clickable layer-allocation table.
-- **Thermal Guard (`ThermalBalancer`):**
-  - Tracks 4 thermal states (`COOL`, `WARN`, `SHED_25`, `EMERGENCY_OFFLOAD`) with anti-flapping hysteresis (`30s` minimum hold / `5.0°C` margin).
+### 1. 1-Hop Star GGUF Cluster & Tuned Windows / Linux Backends (`Cluster`)
+- **Model-Aware Backend Tuning (`src/domain/backendTuner.ts`):**
+  - **Windows 10/11:** Supports `CUDA 12.6`, `Vulkan 1.3`, `DirectML`, and `CPU AVX2 / BitNet LUT`; reserves WDDM compositor VRAM (`-450 MB` safety floor on `<= 8 GB` GPUs), sets `HIGH_PRIORITY_CLASS`, configures `OMP_WAIT_POLICY=PASSIVE` & `GGML_CUDA_NO_PINNED`, provisions Windows Firewall rules (`:8080`, `:50052`, UDP `:50050`), and exports `run-cluster-win.ps1`.
+  - **Linux Kernel / NUMA:** Supports `CUDA 12.6`, `ROCm 6.3`, `Vulkan 1.3`, and `CPU OpenBLAS`; enforces `MemAvailable - 1024 MB`, disables silent PCIe unified-memory thrashing (`GGML_CUDA_ENABLE_UNIFIED_MEMORY=0`), configures Transparent HugePages (`madvise`), `--mlock`, `numactl --interleave=all`, and exports `run-cluster-linux.sh`.
+  - **Architecture-Adaptive Flags:** Enables `-ot ".ffn_.*_exps.=CPU"` (`--cpu-moe`) for sparse MoE models, `q8_0`/`q4_0` KV cache quantization, `--flash-attn on`, contiguous `--tensor-split`, and `--n-gpu-layers`.
+- **1-Hop Star Topology & Three Operational Cards:** Interactive Star SVG + node table alongside **Connect Device** (Auto-Connect, 21×21 CRC-8 QR pairing, Start/Stop Sharing), **Device Health**, and **Troubleshooter** (6-check Auto-Diagnosis with 1-click fixes).
 
-### 2. Three Simple Operational Cards (Connect, Health, Troubleshooter)
-- **Connect:** Auto-discover Master (`Auto-Connect` / `Auto-Discover`), pair via deterministic **21×21 CRC-8 QR code** or camera scanner (`getUserMedia`), and `Start` / `Stop Sharing` with immediate RAM release.
-- **Health:** Displays calibrated compute speed, Safe RAM Cap, WebGL/WASM backend probe, battery/thermal headroom, and `Re-Tune Speed`.
-- **Troubleshooter:** Runs the 6-check `Run Auto-Diagnosis` suite (calibration, transport bind, master reachability, sharing state, battery/thermal headroom, free RAM) with 1-click auto-fixes.
+### 2. Models & Hugging Face GGUF Browser (`Models`)
+- Syncs live with Hugging Face Hub (`GET /api/hf/models` -> `https://huggingface.co/api/models?filter=gguf`) with curated offline fallback (`src/data/hfModelsCatalog.ts`).
+- Ranks and scores every model card against your active nodes' Safe RAM + VRAM pool (`Fast`, `Best Fit`, `Streaming`, `Too Large`), shows `activeParamsB / totalParamsB` and estimated `tok/s`, supports quantization selection (`IQ4_XS`, `Q4_K_M`, `Q5_K_M`, `Q8_0`, `TQ1_0`), and loads models directly into the Cluster & Chat views.
 
-### 3. Developer Mode & 2D Clustering Lab (`2D Lab (Dev)`)
-Enabling **Developer Mode** in Settings unlocks:
-- **2D Lab (Dev) Workbench:**
-  - Interactive `[0, 1]` 2D canvas with K-Means (K-Means++, Voronoi cells, animated convergence trails, spider lines) and DBSCAN (`ε` / `MinPts`, BFS waves, Core/Border/Noise markers).
-  - 6 benchmark presets (Two Moons, Gaussian Blobs, Concentric Rings, Anisotropic Streaks, Twin Spirals, Dense + Outliers), long-press/right-click cluster annotations, 10-run Session History with `BEST` inertia badge, Sequential Batch Queue, CSV/JSON Storage Manager, and Vector PDF 1.4 export + preview.
-- **Developer Node & Thermal Controls:** USB vs Wi-Fi LAN bind switch, cluster secret & 32-byte auth token inspection, interactive `SHED_25` / `EMERGENCY_OFFLOAD` / `SHED_LAYERS` stress-test buttons, and raw node event log.
+### 3. Chat Window & Cluster Brain Inspector (`Chat & Brain`)
+- Streaming SSE chat UI wired to `POST /v1/chat/completions` (supporting optional live forwarding to any local `llama-server` / `clusterd` OpenAI URL).
+- Side-by-side **Cluster Brain & Active Parameters** panel showing active parameters per token (e.g., `3.3B active / 30.5B total`), KV cache size, per-node layer spans (`L0–L23`), active parameter distribution, GPU vs CPU layers, thermal guard state, and live tuning flags.
 
----
+### 4. OpenAI-Compatible Endpoints & 1-Step Harness Connect (`API & Harness`)
+- Full-stack Express server (`server.ts`) exposing `GET /health`, `GET /v1/models`, `POST /v1/chat/completions` (JSON + SSE `chat.completion.chunk`), `GET/POST /api/cluster/state`, `GET /api/hf/models`, and `GET /api/backends/script`.
+- **1-Step Connect** commands and downloadable configs for **Hermes Agent**, **OpenCode**, **Claude Code Bridge**, **Codex CLI**, **Cline / Roo Code**, **Continue.dev**, **Aider**, and **Python OpenAI SDK / cURL**, plus a live `/v1` endpoint tester.
 
-## Project Structure
-
-```text
-src/
-├── components/
-│   ├── StarClusterDashboard.tsx     # Main 1-Hop Star GGUF dashboard & Connect/Health/Troubleshooter cards
-│   ├── HardenedNodeDashboard.tsx    # Shared QR matrix/camera scanner modal & worker controls
-│   ├── InteractiveClusterCanvas.tsx # Dev-gated 2D K-Means & DBSCAN canvas
-│   ├── ControlAndMetricsPanels.tsx  # Dev-gated hyperparameters, presets & breakdown metrics
-│   ├── SessionHistorySection.tsx    # 10-run rolling session history strip & modal
-│   ├── BatchProcessingSection.tsx   # Multi-dataset batch runner & executive PDF export
-│   ├── PdfReportSection.tsx         # Single/batch vector PDF preview & manager
-│   ├── LocalCsvStorageSection.tsx   # Dev-gated CSV storage manager
-│   ├── SettingsMenuDialog.tsx       # Dark/Light theme & Developer Mode gate
-│   ├── UserGuideDialog.tsx          # 6-step interactive quick guide
-│   └── CoachMarkOverlay.tsx         # Dev-gated 2D Lab 3-step spotlight walkthrough
-├── domain/
-│   ├── starClusterPlanner.ts        # Safe RAM caps, node scoring, layer allocation, thermal guard
-│   ├── clusteringEngine.ts          # K-Means++ & DBSCAN iterative engines + Silhouette/WCSS
-│   ├── datasetGenerators.ts         # 6 benchmark presets & CSV/JSON parser
-│   ├── qrCodec.ts                   # Deterministic 21×21 CRC-8 pairing QR matrix & auth hash
-│   └── pdfGenerator.ts              # Zero-dependency Vector PDF 1.4 generator
-├── hooks/
-│   ├── useNodeWorkerStore.ts        # Hardware calibration, diagnostics, sharing & telemetry store
-│   └── useClusterLabStore.ts        # 2D Lab, session history, batch queue & settings store
-├── service/
-│   ├── hardwareProbe.ts             # Browser dot-product benchmark, RAM/WebGL/Battery probes
-│   └── nodeClusterService.ts        # 6-check auto-diagnosis engine & auto-fix handlers
-├── data/
-│   └── storage.ts                   # Versioned localStorage state persistence
-└── types/
-    ├── starCluster.ts               # GGUF presets, thermal states, star topology & plan types
-    └── clustering.ts                # 2D clustering, worker telemetry & studio state types
-```
+### 5. Developer Mode (`2D Lab (Dev)`)
+- Toggling **Developer Mode** ON in Settings unlocks the interactive 2D K-Means++ & DBSCAN clustering workbench (10-run Session History, Batch Queue, CSV Manager, Vector PDF 1.4 export) plus thermal/memory stress simulators and raw node logs.
 
 ---
 
@@ -73,8 +36,8 @@ src/
 
 ```bash
 npm install
-npm run dev      # Starts Vite dev server on http://0.0.0.0:3000
+npm run dev      # Starts Express + Vite dev server on http://0.0.0.0:3000
 npm run lint     # Runs TypeScript type checking (tsc --noEmit)
 npm run build    # Type-checks (tsc -b) and builds production bundle to dist/
-npm run preview  # Previews production bundle on http://0.0.0.0:3000
+npm start        # Runs Express production server on http://0.0.0.0:3000
 ```

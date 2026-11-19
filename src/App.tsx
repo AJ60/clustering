@@ -1,8 +1,22 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ClusterAnnotation } from './types/clustering';
+import {
+  BackendTuningConfig,
+  ClusterMode,
+  GGUF_MODEL_PRESETS,
+  GgufModelPreset,
+} from './types/starCluster';
+import { createDefaultBackendTuningConfig } from './domain/backendTuner';
+import {
+  buildStarClusterNodes,
+  planStarCluster,
+} from './domain/starClusterPlanner';
 import { useClusterLabStore } from './hooks/useClusterLabStore';
 import { useNodeWorkerStore } from './hooks/useNodeWorkerStore';
 import { StarClusterDashboard } from './components/StarClusterDashboard';
+import { ModelsHubPage } from './components/ModelsHubPage';
+import { ChatAndBrainPage } from './components/ChatAndBrainPage';
+import { ApiHarnessConnectPage } from './components/ApiHarnessConnectPage';
 import { InteractiveClusterCanvas } from './components/InteractiveClusterCanvas';
 import {
   AlgorithmAndHyperparametersCard,
@@ -39,6 +53,7 @@ import { InteractiveCoachMarkOverlay } from './components/CoachMarkOverlay';
 import {
   BookOpen,
   BookmarkPlus,
+  Brain,
   ClipboardPaste,
   Download,
   FileText,
@@ -46,6 +61,8 @@ import {
   History,
   Layers,
   Network,
+  Package,
+  PlugZap,
   ScatterChart,
   Settings,
   Upload,
@@ -53,12 +70,21 @@ import {
   X,
 } from 'lucide-react';
 
-type AppTab = 'STAR' | 'LAB';
+type AppTab = 'STAR' | 'MODELS' | 'CHAT' | 'API' | 'LAB';
 
 export function App() {
   const studio = useClusterLabStore();
   const node = useNodeWorkerStore(studio.state.developerModeEnabled);
   const [activeTab, setActiveTab] = useState<AppTab>('STAR');
+
+  // Shared Cluster Model, Mode & Windows/Linux Backend Tuning State
+  const [activeModel, setActiveModel] = useState<GgufModelPreset>(GGUF_MODEL_PRESETS[0]);
+  const [clusterMode, setClusterMode] = useState<ClusterMode>('VIRTUAL_4NODE');
+  const [tuningConfig, setTuningConfig] = useState<BackendTuningConfig>(() =>
+    createDefaultBackendTuningConfig(GGUF_MODEL_PRESETS[0])
+  );
+  const [simulatedTempOffsetC, setSimulatedTempOffsetC] = useState(0);
+  const [upstreamBaseUrl, setUpstreamBaseUrl] = useState('');
 
   // Dialog States
   const [showSettings, setShowSettings] = useState(false);
@@ -87,18 +113,66 @@ export function App() {
   const { state, currentFrame } = studio;
   const isDevLabActive = state.developerModeEnabled && activeTab === 'LAB';
 
-  // Ensure turning Developer Mode OFF immediately exits the 2D Lab back to Star Cluster
+  const clusterPlan = useMemo(() => {
+    const rawNodes = buildStarClusterNodes(
+      node.telemetry,
+      clusterMode,
+      simulatedTempOffsetC,
+      tuningConfig
+    );
+    return planStarCluster(rawNodes, activeModel, undefined, tuningConfig);
+  }, [node.telemetry, clusterMode, simulatedTempOffsetC, tuningConfig, activeModel]);
+
+  // Sync active model, plan & backend tuning to Express /api/cluster/state
   useEffect(() => {
-    if (!state.developerModeEnabled && activeTab !== 'STAR') {
+    const controller = new AbortController();
+    fetch('/api/cluster/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        activeModel,
+        clusterMode,
+        tuningConfig,
+        plan: clusterPlan,
+        upstreamBaseUrl,
+      }),
+      signal: controller.signal,
+    }).catch(() => {
+      // Non-blocking sync when running static preview
+    });
+    return () => controller.abort();
+  }, [activeModel, clusterMode, tuningConfig, clusterPlan, upstreamBaseUrl]);
+
+  // Ensure turning Developer Mode OFF immediately exits 2D Lab back to Star Cluster
+  useEffect(() => {
+    if (!state.developerModeEnabled && activeTab === 'LAB') {
       setActiveTab('STAR');
     }
   }, [state.developerModeEnabled, activeTab]);
 
   const handleToggleDeveloperMode = (enabled: boolean) => {
     studio.toggleDeveloperMode(enabled);
-    if (!enabled) {
+    if (!enabled && activeTab === 'LAB') {
       setActiveTab('STAR');
     }
+  };
+
+  const handleSelectModel = (model: GgufModelPreset) => {
+    setActiveModel(model);
+    const recommended = createDefaultBackendTuningConfig(model);
+    setTuningConfig((prev) => ({
+      ...prev,
+      contextLength: recommended.contextLength,
+      kvCacheQuant: recommended.kvCacheQuant,
+      enableFlashAttn: recommended.enableFlashAttn,
+      moeCpuOffload: recommended.moeCpuOffload,
+      windowsNoMmap: recommended.windowsNoMmap,
+      linuxMlock: recommended.linuxMlock,
+    }));
+  };
+
+  const handleUpdateTuningConfig = (patch: Partial<BackendTuningConfig>) => {
+    setTuningConfig((prev) => ({ ...prev, ...patch }));
   };
 
   const handleTopFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -114,13 +188,28 @@ export function App() {
     e.target.value = '';
   };
 
+  const navItems: Array<{ id: AppTab; label: string; devOnly?: boolean }> = [
+    { id: 'STAR', label: 'Cluster' },
+    { id: 'MODELS', label: 'Models' },
+    { id: 'CHAT', label: 'Chat & Brain' },
+    { id: 'API', label: 'API & Harness' },
+    { id: 'LAB', label: '2D Lab (Dev)', devOnly: true },
+  ];
+  const visibleNavItems = navItems.filter(
+    (item) => !item.devOnly || state.developerModeEnabled
+  );
+
   return (
     <div className="min-h-screen flex flex-col bg-[#F8FAFC] dark:bg-[#0B1120] text-[#0F172A] dark:text-[#F1F5F9] transition-colors">
       {/* Top Studio App Bar — Clean 3-Zone Contract */}
       <header className="sticky top-0 z-30 border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#0B1120]/95 backdrop-blur-md">
-        <div className="max-w-[1440px] mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-4">
-          {/* Left Zone: Brand Wordmark */}
-          <div className="flex items-center gap-2.5 min-w-0 shrink-0">
+        <div className="max-w-[1440px] mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-8">
+          {/* Zone 1: Brand Wordmark */}
+          <button
+            type="button"
+            onClick={() => setActiveTab('STAR')}
+            className="flex items-center gap-2.5 min-w-0 shrink-0 text-left"
+          >
             <img
               src="/clusterlab-icon.jpg"
               alt="ClusterLab"
@@ -129,40 +218,33 @@ export function App() {
             <span className="font-display text-base font-bold tracking-tight whitespace-nowrap">
               ClusterLab
             </span>
-          </div>
+          </button>
 
-          {/* Center Zone: Clean Mode Links (only shown when Developer Mode unlocks 2D Lab) */}
-          {state.developerModeEnabled && (
-            <nav
-              aria-label="Workspace switcher"
-              className="hidden sm:flex items-center gap-1"
-            >
-              <button
-                type="button"
-                onClick={() => setActiveTab('STAR')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
-                  activeTab === 'STAR'
-                    ? 'bg-slate-100 dark:bg-[#131C31] text-blue-600 dark:text-blue-400'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-                }`}
-              >
-                Star Cluster
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('LAB')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
-                  activeTab === 'LAB'
-                    ? 'bg-slate-100 dark:bg-[#131C31] text-blue-600 dark:text-blue-400'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-                }`}
-              >
-                2D Lab (Dev)
-              </button>
-            </nav>
-          )}
+          {/* Zone 2: Clean Single-Line Nav Links */}
+          <nav
+            aria-label="Primary navigation"
+            className="hidden md:flex items-center gap-6"
+          >
+            {visibleNavItems.map((item) => {
+              const isActive = activeTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setActiveTab(item.id)}
+                  className={`py-1 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 border-b-2 ${
+                    isActive
+                      ? 'text-blue-600 dark:text-blue-400 border-blue-600 dark:border-blue-400'
+                      : 'text-slate-600 dark:text-slate-400 border-transparent hover:text-slate-900 dark:hover:text-slate-100'
+                  }`}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </nav>
 
-          {/* Right Zone: Concise Actions + Primary CTA */}
+          {/* Zone 3: Primary Action & Utility Icons */}
           <div className="flex items-center gap-1.5 shrink-0">
             {isDevLabActive ? (
               <>
@@ -273,11 +355,7 @@ export function App() {
       </header>
 
       {/* Main Content */}
-      <main
-        className={`flex-1 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-5 ${
-          state.developerModeEnabled ? 'pb-20 sm:pb-8' : 'pb-8'
-        }`}
-      >
+      <main className="flex-1 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-5 pb-20 md:pb-8">
         {isDevLabActive && state.statusBanner && (
           <div className="mb-4 rounded-xl border border-blue-500/40 bg-blue-500/10 px-4 py-2.5 flex items-center justify-between gap-3 text-xs text-blue-700 dark:text-blue-200">
             <span>{state.statusBanner}</span>
@@ -291,24 +369,29 @@ export function App() {
           </div>
         )}
 
-        {!isDevLabActive ? (
-          <StarClusterDashboard
-            telemetry={node.telemetry}
-            onRecalibrate={node.recalibrate}
-            onStartWorker={node.startWorker}
-            onStopWorker={node.stopWorkerAndFreeRam}
-            onAutoDetectMaster={node.autoDetectMaster}
-            onPairQrPayload={node.pairQrPayload}
-            onToggleBindMode={node.toggleBindMode}
-            onUpdateSecret={node.updateClusterSecret}
-            onSimulateShedLayers={node.simulateLowMemoryShedLayers}
-            onRunDiagnostics={node.runDiagnostics}
-            onApplyAutoFix={node.applyAutoFix}
-            onOpen2DLab={
-              state.developerModeEnabled ? () => setActiveTab('LAB') : undefined
-            }
+        {activeTab === 'MODELS' ? (
+          <ModelsHubPage
+            clusterPlan={clusterPlan}
+            activeModel={activeModel}
+            onSelectModel={handleSelectModel}
+            onOpenChat={() => setActiveTab('CHAT')}
           />
-        ) : (
+        ) : activeTab === 'CHAT' ? (
+          <ChatAndBrainPage
+            activeModel={activeModel}
+            clusterPlan={clusterPlan}
+            tuningConfig={tuningConfig}
+            upstreamBaseUrl={upstreamBaseUrl}
+            onChangeUpstreamBaseUrl={setUpstreamBaseUrl}
+            onOpenModels={() => setActiveTab('MODELS')}
+          />
+        ) : activeTab === 'API' ? (
+          <ApiHarnessConnectPage
+            activeModel={activeModel}
+            clusterPlan={clusterPlan}
+            clusterSecret={node.telemetry.clusterSecret}
+          />
+        ) : isDevLabActive ? (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
             {/* Left Column: Canvas + Toolbar + Session History + Batch Queue */}
             <div className="lg:col-span-7 space-y-4">
@@ -425,41 +508,108 @@ export function App() {
               />
             </div>
           </div>
+        ) : (
+          <StarClusterDashboard
+            telemetry={node.telemetry}
+            activeModel={activeModel}
+            clusterMode={clusterMode}
+            tuningConfig={tuningConfig}
+            clusterPlan={clusterPlan}
+            simulatedTempOffsetC={simulatedTempOffsetC}
+            onSelectModel={handleSelectModel}
+            onChangeClusterMode={setClusterMode}
+            onUpdateTuningConfig={handleUpdateTuningConfig}
+            onChangeSimulatedTempOffsetC={setSimulatedTempOffsetC}
+            onRecalibrate={node.recalibrate}
+            onStartWorker={node.startWorker}
+            onStopWorker={node.stopWorkerAndFreeRam}
+            onAutoDetectMaster={node.autoDetectMaster}
+            onPairQrPayload={node.pairQrPayload}
+            onToggleBindMode={node.toggleBindMode}
+            onUpdateSecret={node.updateClusterSecret}
+            onSimulateShedLayers={node.simulateLowMemoryShedLayers}
+            onRunDiagnostics={node.runDiagnostics}
+            onApplyAutoFix={node.applyAutoFix}
+            onOpenModels={() => setActiveTab('MODELS')}
+            onOpenChat={() => setActiveTab('CHAT')}
+            onOpen2DLab={
+              state.developerModeEnabled ? () => setActiveTab('LAB') : undefined
+            }
+          />
         )}
       </main>
 
-      {/* Bottom Mode Switcher — Strictly gated behind Developer Mode on small screens */}
-      {state.developerModeEnabled && (
-        <nav className="sm:hidden fixed bottom-0 inset-x-0 z-30 border-t border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#0B1120]/95 backdrop-blur-md">
-          <div className="max-w-md mx-auto grid grid-cols-2 h-14">
-            <button
-              type="button"
-              onClick={() => setActiveTab('STAR')}
-              className={`flex flex-col items-center justify-center gap-0.5 text-xs font-semibold transition-colors ${
-                activeTab === 'STAR'
-                  ? 'text-blue-600 dark:text-blue-400'
-                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-              }`}
-            >
-              <Network className="w-4 h-4" />
-              <span>Star Cluster</span>
-            </button>
-
+      {/* Mobile Navigation Bar */}
+      <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 border-t border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#0B1120]/95 backdrop-blur-md">
+        <div
+          className={`mx-auto grid h-14 ${
+            state.developerModeEnabled ? 'grid-cols-5' : 'grid-cols-4'
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => setActiveTab('STAR')}
+            className={`flex flex-col items-center justify-center gap-0.5 text-[11px] font-semibold ${
+              activeTab === 'STAR'
+                ? 'text-blue-600 dark:text-blue-400'
+                : 'text-slate-500 dark:text-slate-400'
+            }`}
+          >
+            <Network className="w-4 h-4" />
+            <span>Cluster</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('MODELS')}
+            className={`flex flex-col items-center justify-center gap-0.5 text-[11px] font-semibold ${
+              activeTab === 'MODELS'
+                ? 'text-blue-600 dark:text-blue-400'
+                : 'text-slate-500 dark:text-slate-400'
+            }`}
+          >
+            <Package className="w-4 h-4" />
+            <span>Models</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('CHAT')}
+            className={`flex flex-col items-center justify-center gap-0.5 text-[11px] font-semibold ${
+              activeTab === 'CHAT'
+                ? 'text-blue-600 dark:text-blue-400'
+                : 'text-slate-500 dark:text-slate-400'
+            }`}
+          >
+            <Brain className="w-4 h-4" />
+            <span>Chat</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('API')}
+            className={`flex flex-col items-center justify-center gap-0.5 text-[11px] font-semibold ${
+              activeTab === 'API'
+                ? 'text-blue-600 dark:text-blue-400'
+                : 'text-slate-500 dark:text-slate-400'
+            }`}
+          >
+            <PlugZap className="w-4 h-4" />
+            <span>API</span>
+          </button>
+          {state.developerModeEnabled && (
             <button
               type="button"
               onClick={() => setActiveTab('LAB')}
-              className={`flex flex-col items-center justify-center gap-0.5 text-xs font-semibold transition-colors ${
+              className={`flex flex-col items-center justify-center gap-0.5 text-[11px] font-semibold ${
                 activeTab === 'LAB'
                   ? 'text-blue-600 dark:text-blue-400'
-                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+                  : 'text-slate-500 dark:text-slate-400'
               }`}
             >
               <ScatterChart className="w-4 h-4" />
-              <span>2D Lab (Dev)</span>
+              <span>2D Lab</span>
             </button>
-          </div>
-        </nav>
-      )}
+          )}
+        </div>
+      </nav>
 
       {/* Dialogs & Overlays */}
       {showSettings && (

@@ -10,33 +10,33 @@ interface UserGuideDialogProps {
 const GUIDE_SECTIONS = [
   {
     step: '01',
-    title: '1-Hop Star GGUF Cluster & Model Presets',
-    body: 'Choose a quantized GGUF preset (Qwen3-30B-A3B MoE, BitNet b1.58 Ternary, Qwen2.5-32B Dense, or Llama-3.3-70B) and switch between This Device and 4-Node Cluster Test to inspect hub-and-spoke worker distribution.',
+    title: '1-Hop Star GGUF Cluster & Windows / Linux Backends',
+    body: 'Choose a GGUF preset or Hugging Face model and toggle between This Device and 4-Node Cluster. Tune Windows (CUDA/Vulkan/DirectML, WDDM -450 MB guard) and Linux (CUDA/ROCm/OpenBLAS, numactl, MemAvailable - 1024 MB cap) backends and download tuned .ps1 / .sh scripts.',
   },
   {
     step: '02',
-    title: 'Safe RAM Pool & Cap-Bounded Layer Allocation',
-    body: 'Enforces hard safety caps (<=50% physical RAM on Android, MemAvailable - 1 GB on Desktop, 90% VRAM) and assigns transformer layers proportionally by node compute score.',
+    title: 'Models Page & Hugging Face GGUF Browser',
+    body: 'Search live Hugging Face GGUF repositories, inspect model cards scored automatically against your active RAM + VRAM pool (Fast, Best Fit, Streaming), switch quantization levels, and load directly into the cluster.',
   },
   {
     step: '03',
-    title: 'Connect Device & 21×21 QR Pairing',
-    body: 'Use Auto-Connect to locate your Master hub, pair via 21×21 QR code or token, and Start or Stop Sharing at any time with instant memory cleanup.',
+    title: 'Chat Window & Active Parameters Brain Inspector',
+    body: 'Chat directly over POST /v1/chat/completions with SSE streaming while inspecting active parameters per token (e.g., 3.3B active / 30.5B total for MoE), per-node layer spans, KV cache footprint, and thermal state.',
   },
   {
     step: '04',
-    title: 'Device Health & Thermal Guard',
-    body: 'Tracks compute speed calibration, Safe RAM Cap, battery & thermal headroom, and 4 automatic thermal guard states (COOL, WARN, SHED_25, EMERGENCY_OFFLOAD) with anti-flapping hysteresis.',
+    title: 'OpenAI-Compatible Endpoints & 1-Step Harness Connect',
+    body: 'Copy or download ready-to-run configs and 1-step terminal commands for Hermes, OpenCode, Claude Code Bridge, Codex CLI, Cline, Continue.dev, Aider, or Python SDK—plus test /v1/models and /v1/chat/completions live.',
   },
   {
     step: '05',
-    title: '6-Check Auto-Diagnosis Troubleshooter',
-    body: 'Runs local network, battery, thermal, memory, and cluster-secret checks with 1-click auto-fixes whenever a warning or failure appears.',
+    title: 'Connect, Health & 6-Check Troubleshooter',
+    body: 'Auto-discover your Master hub, pair with 21×21 CRC-8 QR codes, monitor Safe RAM Caps (<=50% Android, MemAvailable - 1 GB Desktop), and run the 6-check Auto-Diagnosis troubleshooter.',
   },
   {
     step: '06',
     title: 'Developer Mode & 2D Clustering Lab (Dev)',
-    body: 'Turn on Developer Mode in Settings to unlock the 2D Lab (Dev) tab (interactive K-Means & DBSCAN canvas, Batch queue, CSV manager, Vector PDF reports) along with thermal stress simulators and raw node logs.',
+    body: 'Enable Developer Mode in Settings to unlock the 2D Lab (Dev) workbench (interactive K-Means & DBSCAN canvas, Batch queue, CSV manager, Vector PDF reports) along with thermal stress simulators and raw node logs.',
   },
 ];
 
@@ -56,7 +56,7 @@ export const UserGuideDialog: React.FC<UserGuideDialogProps> = ({
                 ClusterLab Quick Guide
               </h3>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                1-Hop Star GGUF Cluster dashboard, health guard, and Developer 2D Lab.
+                1-Hop Star GGUF Cluster, Windows/Linux tuning, Hugging Face Models, Chat & Brain, and OpenAI Harnesses.
               </p>
             </div>
           </div>
