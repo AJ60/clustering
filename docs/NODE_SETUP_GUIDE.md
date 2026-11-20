@@ -103,7 +103,7 @@ Android devices can join the cluster via **two complementary methods**:
 
 ---
 
-### Option B: Native High-Performance Termux Worker (Highest Tok/s)
+### Option B: Native High-Performance Termux Worker (CLI Worker)
 
 This method compiles and runs the stock native `rpc-server` directly on Android's ARM64 CPU cores with zero root required.
 
@@ -120,6 +120,27 @@ cd llm-mix-cluster
 chmod +x ./scripts/setup_termux_android.sh
 ./scripts/setup_termux_android.sh
 ```
+
+---
+
+### Option C: Standalone Native Android APK (Android Studio Project in `android/`)
+
+The repository contains a complete, production-ready **Jetpack Compose Android application** located in the [android/](file:///c:/Users/alojy/OneDrive/Desktop/Clustering/android/) folder.
+
+#### Key Features of the Native Android App:
+- **Foreground Worker Service (`RpcService.kt`)**: Launches `librpc_server_exec.so` inside a `FOREGROUND_SERVICE_DATA_SYNC` lifecycle, holding a `PARTIAL_WAKE_LOCK` and Wi-Fi multicast lock so Android's OS never pauses execution while the screen is off or in background.
+- **Hardware Acceleration Support**: Supports Vulkan 1.3 Compute (`VK_KHR_16bit_storage`), `ARMv8.2-A + dotprod` (`i8mm`), and baseline NEON fallbacks.
+- **16 KB ELF Page Alignment**: Fully compatible with Android 15 & Android 16 (API 28..36).
+- **Built-in Camera QR Scanner**: Point the phone camera at the PC screen's 21×21 QR code for instantaneous pairing.
+- **LMK & Thermal Watchdog**: Auto-sheds layers if device temperature approaches $45^\circ\text{C}$ or if memory exceeds $50\%$ physical RAM.
+
+#### How to Build the APK in Android Studio:
+1. Open **Android Studio** (Ladybug or newer).
+2. Choose **Open Project** and select the `android/` directory in this repository.
+3. Allow Gradle to sync.
+4. Connect your Android device or select an emulator.
+5. Click **Run 'app'** (`Shift + F10`) or **Build -> Build Bundle(s) / APK(s) -> Build APK(s)**.
+6. The compiled APK will be output to `android/app/build/outputs/apk/debug/app-debug.apk`.
 
 #### What the Termux Setup Does:
 - **16 KB ELF Page Alignment**: Compiles with `-Wl,-z,max-page-size=16384` for full compatibility with Android 15 and Android 16 (API 35/36).
