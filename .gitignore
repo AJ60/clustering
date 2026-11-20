@@ -28,3 +28,11 @@ exo-repo/
 llama-b11429/
 logs/
 
+# Android Build Outputs
+android/**/build/
+android/**/.gradle/
+android/local.properties
+*.apk
+*.aab
+
+
