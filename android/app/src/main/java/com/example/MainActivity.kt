@@ -8,7 +8,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.data.ClusterLabDatabase
@@ -16,6 +18,7 @@ import com.example.data.DatasetRepository
 import com.example.data.ThemePreferencesRepository
 import com.example.ui.ClusteringStudioScreen
 import com.example.ui.ClusteringViewModel
+import com.example.ui.silica.SilicaAppScreen
 import com.example.ui.theme.ClusterLabTheme
 
 class MainActivity : ComponentActivity() {
@@ -34,6 +37,7 @@ class MainActivity : ComponentActivity() {
                 factory = ClusteringViewModel.Factory(repository, themePreferences)
             )
             val uiState by clusteringViewModel.uiState.collectAsStateWithLifecycle()
+            var showLegacy2DLab by remember { mutableStateOf(false) }
 
             LaunchedEffect(uiState.isDarkTheme) {
                 if (uiState.isDarkTheme) {
@@ -50,7 +54,13 @@ class MainActivity : ComponentActivity() {
             }
 
             ClusterLabTheme(darkTheme = uiState.isDarkTheme) {
-                ClusteringStudioScreen(viewModel = clusteringViewModel)
+                if (showLegacy2DLab) {
+                    ClusteringStudioScreen(viewModel = clusteringViewModel)
+                } else {
+                    SilicaAppScreen(
+                        onOpenLegacy2DLab = { showLegacy2DLab = true }
+                    )
+                }
             }
         }
     }
