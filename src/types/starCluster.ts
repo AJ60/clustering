@@ -5,6 +5,7 @@ export type ClusterTierCode = 'S' | 'A' | 'B' | 'C';
 export type ClusterMode = 'LOCAL_DEVICE' | 'VIRTUAL_4NODE';
 
 export type ModelPresetId =
+  | 'small-1.5b'
   | 'moe-30b'
   | 'ternary-27b'
   | 'dense-32b'
@@ -35,6 +36,21 @@ export interface GgufModelPreset {
 }
 
 export const GGUF_MODEL_PRESETS: GgufModelPreset[] = [
+  {
+    id: 'small-1.5b',
+    name: 'Qwen2.5-1.5B-Instruct',
+    quant: 'Q4_K_M',
+    architecture: 'Dense',
+    sizeMb: 1150,
+    layers: 28,
+    totalParamsB: 1.54,
+    activeParamsB: 1.54,
+    contextLengthDefault: 8192,
+    hfRepo: 'Qwen/Qwen2.5-1.5B-Instruct-GGUF',
+    hfUrl: 'https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF',
+    summary: '1.15 GB · 28 layers · Ultra-lightweight edge & multi-device test model',
+    tags: ['small', 'fast', 'edge', 'testing'],
+  },
   {
     id: 'moe-30b',
     name: 'Qwen3-30B-A3B MoE',
