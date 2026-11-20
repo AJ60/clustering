@@ -120,7 +120,7 @@ fun ClusteringStudioScreen(
     var showBatchDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showUserGuideDialog by remember { mutableStateOf(false) }
-    var showHardenedRpcDashboard by remember { mutableStateOf(false) }
+    var showHardenedRpcDashboard by remember { mutableStateOf(true) }
     var pendingAnnotationTarget by remember { mutableStateOf<PendingAnnotationTarget?>(null) }
     var localCsvFiles by remember { mutableStateOf<List<LocalCsvFileInfo>>(emptyList()) }
     var localPdfReports by remember { mutableStateOf<List<LocalPdfReportInfo>>(emptyList()) }
@@ -459,10 +459,10 @@ fun ClusteringStudioScreen(
                     icon = {
                         Icon(
                             imageVector = Icons.Outlined.Devices,
-                            contentDescription = "Connect Phone to Cluster"
+                            contentDescription = "Edge Node"
                         )
                     },
-                    label = { Text("Connect Phone") },
+                    label = { Text("Edge Node") },
                     modifier = Modifier.testTag("nav_tab_connect_node")
                 )
             }
@@ -478,10 +478,8 @@ fun ClusteringStudioScreen(
 
             Column(modifier = Modifier.fillMaxSize()) {
                 if (showHardenedRpcDashboard) {
-                    com.example.ui.components.HardenedNodeDashboard(
-                        modifier = Modifier.fillMaxSize(),
-                        developerModeEnabled = isDevMode,
-                        onToggleDeveloperMode = viewModel::setDeveloperMode
+                    SimpleClusterNodeScreen(
+                        onNavigateToSimple2DLab = { showHardenedRpcDashboard = false }
                     )
                     return@Column
                 }
@@ -638,13 +636,6 @@ fun ClusteringStudioScreen(
                                 developerModeEnabled = isDevMode
                             )
 
-                            SessionHistoryStripCard(
-                                history = uiState.sessionHistory,
-                                activeRunId = uiState.activeHistoryRunId,
-                                onRestoreRun = viewModel::restoreSessionRun,
-                                onOpenFullHistory = { showSessionHistoryDialog = true }
-                            )
-
                             PresetDatasetSelectorCard(
                                 selectedPreset = uiState.selectedPreset,
                                 sampleCount = uiState.sampleCount,
@@ -655,48 +646,57 @@ fun ClusteringStudioScreen(
                                 developerModeEnabled = isDevMode
                             )
 
-                            PdfReportExportCard(
-                                datasetTitle = uiState.datasetTitle,
-                                algorithmName = uiState.algorithm.displayName,
-                                pointCount = displayPoints.size,
-                                clusterCount = clusterCount,
-                                silhouetteScore = silhouetteScore,
-                                savedPdfCount = localPdfReports.size,
-                                onQuickSaveLocalPdf = {
-                                    val saved = PdfReportGenerator.savePdfReportToLocalDevice(
-                                        context = context,
-                                        input = buildPdfReportInput(),
-                                        desiredName = uiState.datasetTitle
-                                    )
-                                    localPdfReports = PdfReportGenerator.listLocalPdfReports(context)
-                                    viewModel.postStatusBanner(
-                                        "Saved PDF report '${saved.fileName}' (${saved.formattedSize}) to local device storage."
-                                    )
-                                },
-                                onOpenPdfManager = { showPdfManagerDialog = true },
-                                onExportPdfToFolder = {
-                                    exportPdfLauncher.launch(
-                                        PdfReportGenerator.sanitizePdfFileName(uiState.datasetTitle)
-                                    )
-                                }
-                            )
+                            if (isDevMode) {
+                                SessionHistoryStripCard(
+                                    history = uiState.sessionHistory,
+                                    activeRunId = uiState.activeHistoryRunId,
+                                    onRestoreRun = viewModel::restoreSessionRun,
+                                    onOpenFullHistory = { showSessionHistoryDialog = true }
+                                )
 
-                            BatchProcessingQuickCard(
-                                batchState = uiState.batchState,
-                                onQueueCurrentCanvas = viewModel::enqueueCurrentCanvasForBatch,
-                                onOpenBatchDialog = { showBatchDialog = true },
-                                onOpenCombinedPdf = { fileName ->
-                                    val opened = PdfReportGenerator.openLocalPdfReport(context, fileName)
-                                    if (!opened) {
+                                PdfReportExportCard(
+                                    datasetTitle = uiState.datasetTitle,
+                                    algorithmName = uiState.algorithm.displayName,
+                                    pointCount = displayPoints.size,
+                                    clusterCount = clusterCount,
+                                    silhouetteScore = silhouetteScore,
+                                    savedPdfCount = localPdfReports.size,
+                                    onQuickSaveLocalPdf = {
+                                        val saved = PdfReportGenerator.savePdfReportToLocalDevice(
+                                            context = context,
+                                            input = buildPdfReportInput(),
+                                            desiredName = uiState.datasetTitle
+                                        )
+                                        localPdfReports = PdfReportGenerator.listLocalPdfReports(context)
                                         viewModel.postStatusBanner(
-                                            "No PDF viewer app found to open '$fileName'. Use Share or Save instead."
+                                            "Saved PDF report '${saved.fileName}' (${saved.formattedSize}) to local device storage."
+                                        )
+                                    },
+                                    onOpenPdfManager = { showPdfManagerDialog = true },
+                                    onExportPdfToFolder = {
+                                        exportPdfLauncher.launch(
+                                            PdfReportGenerator.sanitizePdfFileName(uiState.datasetTitle)
                                         )
                                     }
-                                },
-                                onShareCombinedPdf = { fileName ->
-                                    PdfReportGenerator.shareLocalPdfReport(context, fileName)
-                                }
-                            )
+                                )
+
+                                BatchProcessingQuickCard(
+                                    batchState = uiState.batchState,
+                                    onQueueCurrentCanvas = viewModel::enqueueCurrentCanvasForBatch,
+                                    onOpenBatchDialog = { showBatchDialog = true },
+                                    onOpenCombinedPdf = { fileName ->
+                                        val opened = PdfReportGenerator.openLocalPdfReport(context, fileName)
+                                        if (!opened) {
+                                            viewModel.postStatusBanner(
+                                                "No PDF viewer app found to open '$fileName'. Use Share or Save instead."
+                                            )
+                                        }
+                                    },
+                                    onShareCombinedPdf = { fileName ->
+                                        PdfReportGenerator.shareLocalPdfReport(context, fileName)
+                                    }
+                                )
+                            }
 
                             if (isDevMode) {
                                 MetricsInspectorCard(
@@ -841,13 +841,6 @@ fun ClusteringStudioScreen(
                             developerModeEnabled = isDevMode
                         )
 
-                        SessionHistoryStripCard(
-                            history = uiState.sessionHistory,
-                            activeRunId = uiState.activeHistoryRunId,
-                            onRestoreRun = viewModel::restoreSessionRun,
-                            onOpenFullHistory = { showSessionHistoryDialog = true }
-                        )
-
                         PresetDatasetSelectorCard(
                             selectedPreset = uiState.selectedPreset,
                             sampleCount = uiState.sampleCount,
@@ -858,48 +851,57 @@ fun ClusteringStudioScreen(
                             developerModeEnabled = isDevMode
                         )
 
-                        PdfReportExportCard(
-                            datasetTitle = uiState.datasetTitle,
-                            algorithmName = uiState.algorithm.displayName,
-                            pointCount = displayPoints.size,
-                            clusterCount = clusterCount,
-                            silhouetteScore = silhouetteScore,
-                            savedPdfCount = localPdfReports.size,
-                            onQuickSaveLocalPdf = {
-                                val saved = PdfReportGenerator.savePdfReportToLocalDevice(
-                                    context = context,
-                                    input = buildPdfReportInput(),
-                                    desiredName = uiState.datasetTitle
-                                )
-                                localPdfReports = PdfReportGenerator.listLocalPdfReports(context)
-                                viewModel.postStatusBanner(
-                                    "Saved PDF report '${saved.fileName}' (${saved.formattedSize}) to local device storage."
-                                )
-                            },
-                            onOpenPdfManager = { showPdfManagerDialog = true },
-                            onExportPdfToFolder = {
-                                exportPdfLauncher.launch(
-                                    PdfReportGenerator.sanitizePdfFileName(uiState.datasetTitle)
-                                )
-                            }
-                        )
+                        if (isDevMode) {
+                            SessionHistoryStripCard(
+                                history = uiState.sessionHistory,
+                                activeRunId = uiState.activeHistoryRunId,
+                                onRestoreRun = viewModel::restoreSessionRun,
+                                onOpenFullHistory = { showSessionHistoryDialog = true }
+                            )
 
-                        BatchProcessingQuickCard(
-                            batchState = uiState.batchState,
-                            onQueueCurrentCanvas = viewModel::enqueueCurrentCanvasForBatch,
-                            onOpenBatchDialog = { showBatchDialog = true },
-                            onOpenCombinedPdf = { fileName ->
-                                val opened = PdfReportGenerator.openLocalPdfReport(context, fileName)
-                                if (!opened) {
+                            PdfReportExportCard(
+                                datasetTitle = uiState.datasetTitle,
+                                algorithmName = uiState.algorithm.displayName,
+                                pointCount = displayPoints.size,
+                                clusterCount = clusterCount,
+                                silhouetteScore = silhouetteScore,
+                                savedPdfCount = localPdfReports.size,
+                                onQuickSaveLocalPdf = {
+                                    val saved = PdfReportGenerator.savePdfReportToLocalDevice(
+                                        context = context,
+                                        input = buildPdfReportInput(),
+                                        desiredName = uiState.datasetTitle
+                                    )
+                                    localPdfReports = PdfReportGenerator.listLocalPdfReports(context)
                                     viewModel.postStatusBanner(
-                                        "No PDF viewer app found to open '$fileName'. Use Share or Save instead."
+                                        "Saved PDF report '${saved.fileName}' (${saved.formattedSize}) to local device storage."
+                                    )
+                                },
+                                onOpenPdfManager = { showPdfManagerDialog = true },
+                                onExportPdfToFolder = {
+                                    exportPdfLauncher.launch(
+                                        PdfReportGenerator.sanitizePdfFileName(uiState.datasetTitle)
                                     )
                                 }
-                            },
-                            onShareCombinedPdf = { fileName ->
-                                PdfReportGenerator.shareLocalPdfReport(context, fileName)
-                            }
-                        )
+                            )
+
+                            BatchProcessingQuickCard(
+                                batchState = uiState.batchState,
+                                onQueueCurrentCanvas = viewModel::enqueueCurrentCanvasForBatch,
+                                onOpenBatchDialog = { showBatchDialog = true },
+                                onOpenCombinedPdf = { fileName ->
+                                    val opened = PdfReportGenerator.openLocalPdfReport(context, fileName)
+                                    if (!opened) {
+                                        viewModel.postStatusBanner(
+                                            "No PDF viewer app found to open '$fileName'. Use Share or Save instead."
+                                        )
+                                    }
+                                },
+                                onShareCombinedPdf = { fileName ->
+                                    PdfReportGenerator.shareLocalPdfReport(context, fileName)
+                                }
+                            )
+                        }
 
                         if (isDevMode) {
                             MetricsInspectorCard(

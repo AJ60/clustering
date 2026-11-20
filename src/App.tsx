@@ -482,30 +482,34 @@ export function App() {
                 onUpdateNoiseLevel={studio.updateNoiseLevel}
               />
 
-              <PdfReportExportCard
-                reportsCount={state.localPdfReports.length}
-                lastFileName={state.lastExportedPdfFileName}
-                lastSizeLabel={state.lastExportedPdfSizeLabel}
-                annotationsCount={state.annotations.length}
-                hasPoints={state.rawPoints.length > 0}
-                onGeneratePdf={() => studio.generateAndSaveSinglePdf(true)}
-                onOpenManager={() => setShowPdfManager(true)}
-              />
-
               <MetricsInspectorCard
                 algorithm={state.algorithm}
                 frame={currentFrame}
               />
 
-              <LocalCsvStorageCard
-                datasetTitle={state.datasetTitle}
-                pointCount={state.rawPoints.length}
-                csvFiles={state.localCsvFiles}
-                onSaveCsvLocally={studio.saveCsvLocally}
-                onExportCsvDownload={studio.exportCurrentCsvDownload}
-                onImportUploadedText={studio.importPastedText}
-                onOpenManager={() => setShowCsvManager(true)}
-              />
+              {state.developerModeEnabled && (
+                <>
+                  <PdfReportExportCard
+                    reportsCount={state.localPdfReports.length}
+                    lastFileName={state.lastExportedPdfFileName}
+                    lastSizeLabel={state.lastExportedPdfSizeLabel}
+                    annotationsCount={state.annotations.length}
+                    hasPoints={state.rawPoints.length > 0}
+                    onGeneratePdf={() => studio.generateAndSaveSinglePdf(true)}
+                    onOpenManager={() => setShowPdfManager(true)}
+                  />
+
+                  <LocalCsvStorageCard
+                    datasetTitle={state.datasetTitle}
+                    pointCount={state.rawPoints.length}
+                    csvFiles={state.localCsvFiles}
+                    onSaveCsvLocally={studio.saveCsvLocally}
+                    onExportCsvDownload={studio.exportCurrentCsvDownload}
+                    onImportUploadedText={studio.importPastedText}
+                    onOpenManager={() => setShowCsvManager(true)}
+                  />
+                </>
+              )}
             </div>
           </div>
         ) : (
