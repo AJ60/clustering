@@ -385,35 +385,71 @@ function buildClusterGroundedReply(
   const { activeModel, plan, tuningConfig } = clusterSnapshot;
   const activeNodes = plan.nodes.filter((n) => n.allocatedLayers > 0);
   const lower = lastUserMsg.toLowerCase();
+  const nodeNames = activeNodes.map((n) => n.label).join(' and ');
 
-  const nodeSummaryLines = activeNodes
-    .map(
-      (n) =>
-        `- **${n.label}** (${n.osType} · ${n.backendDriver}): Layers \`L${n.layerStart}–L${n.layerEnd}\` (${n.allocatedLayers}L), **${n.activeParamsB}B active**, ${(n.allocatedMb / 1024).toFixed(1)} GB shard, KV ${n.kvCacheMb} MB, ~${n.estimatedTokPerSec} tok/s [${n.tuningFlags.join(', ')}]`
-    )
-    .join('\n');
+  // 1. Natural greeting handling
+  if (/^(hi|hello|hey|greetings|good\s*(morning|afternoon|evening)|yo|sup|test)[\s!.,?]*$/i.test(lastUserMsg)) {
+    return [
+      `Hello! I am **ClusterLab**, currently running **${activeModel.name}** (${activeModel.quant}) distributed across **${activeNodes.length} active node(s)** (${nodeNames}).`,
+      ``,
+      `All \`${plan.activeParamsPerTokenB}B\` active parameters are sharded across your devices at ~\`${plan.estimatedClusterTokPerSec} tok/s\`.`,
+      ``,
+      `How can I help you today? You can ask questions, request code, or query cluster stats and layer allocations.`,
+    ].join('\n');
+  }
 
+  // 2. Help / Capabilities
+  if (
+    lower.includes('who are you') ||
+    lower.includes('what are you') ||
+    lower === 'help' ||
+    lower.includes('what can you do')
+  ) {
+    return [
+      `I am **ClusterLab**, an agentic AI assistant powered by your multi-device local cluster.`,
+      ``,
+      `### Capabilities`,
+      `- **Multi-Device Sharding:** Split any GGUF model across Windows, Linux, and Android simultaneously.`,
+      `- **Resource Monitoring:** Live tracking of compute (TFLOPS), bandwidth, round-trip latency, and safety reserves.`,
+      `- **Zero-Config Routing:** Real-time layer dispatching over USB-C ADB tunnels and LAN.`,
+      `- **Coding & Problem Solving:** Write code, explain algorithms, and assist with ML pipelines.`,
+      ``,
+      `Currently sharded across **${activeNodes.length} node(s)** (${nodeNames}). Feel free to ask any question or test cluster inference!`,
+    ].join('\n');
+  }
+
+  // 3. Cluster status, parameters, nodes, or layer split inquiries
   if (
     lower.includes('node') ||
     lower.includes('brain') ||
     lower.includes('layer') ||
+    lower.includes('split') ||
     lower.includes('active param') ||
     lower.includes('ram') ||
-    lower.includes('status')
+    lower.includes('status') ||
+    lower.includes('hardware')
   ) {
+    const cleanNodes = activeNodes
+      .map(
+        (n) =>
+          `- **${n.label}** (${n.osType}): Layers \`L${n.layerStart}–L${n.layerEnd}\` (${n.allocatedLayers} layers · ${(n.allocatedMb / 1024).toFixed(1)} GB shard) · ~${n.estimatedTokPerSec} tok/s`
+      )
+      .join('\n');
+
     return [
-      `### Cluster Brain Execution Summary (\`${requestedModel || activeModel.name}\`)`,
+      `### Cluster Status & Layer Allocation (\`${requestedModel || activeModel.name}\`)`,
       ``,
       `- **Architecture:** ${activeModel.architecture} (${activeModel.quant})`,
-      `- **Active Parameters / Token:** \`${plan.activeParamsPerTokenB}B\` of \`${plan.totalParamsB}B\` total`,
-      `- **Cluster Pool & Fit:** \`${(plan.totalSafePoolMb / 1024).toFixed(1)} GB\` safe pool / \`${(plan.neededMb / 1024).toFixed(1)} GB\` needed (**${plan.fitVerdict}**, ~${plan.estimatedClusterTokPerSec} tok/s)`,
+      `- **Active Parameters:** \`${plan.activeParamsPerTokenB}B\` active / \`${plan.totalParamsB}B\` total`,
+      `- **Cluster Pool:** \`${(plan.totalSafePoolMb / 1024).toFixed(1)} GB\` safe pool / \`${(plan.neededMb / 1024).toFixed(1)} GB\` needed (**${plan.fitVerdict}**, ~${plan.estimatedClusterTokPerSec} tok/s)`,
       `- **Context & KV Cache:** \`${tuningConfig.contextLength.toLocaleString()} ctx\` · \`${tuningConfig.kvCacheQuant.toUpperCase()}\` (${plan.kvCacheTotalMb} MB)`,
       ``,
-      `#### Per-Node Active Distribution`,
-      nodeSummaryLines,
+      `#### Per-Node Layer Distribution`,
+      cleanNodes,
     ].join('\n');
   }
 
+  // 4. API, Hermes, OpenCode integration inquiries
   if (
     lower.includes('hermes') ||
     lower.includes('opencode') ||
@@ -422,24 +458,27 @@ function buildClusterGroundedReply(
     lower.includes('openai')
   ) {
     return [
-      `OpenAI-compatible routes are active on this ClusterLab server:`,
+      `### Connecting External Tools via OpenAI API`,
       ``,
-      `- \`GET /v1/models\` — lists \`${activeModel.name}\` and supported GGUF cluster presets`,
-      `- \`POST /v1/chat/completions\` — supports streaming SSE (\`stream: true\`) and JSON completions`,
+      `OpenAI-compatible routes are live on this ClusterLab server:`,
+      `- **Base URL:** \`http://localhost:3000/v1\``,
+      `- **Model ID:** \`${activeModel.id}\``,
+      `- **Models List:** \`GET /v1/models\``,
+      `- **Completions:** \`POST /v1/chat/completions\` (SSE streaming supported)`,
       ``,
-      `To connect **OpenCode** or **Hermes**, point \`OPENAI_BASE_URL\` to \`http://<host>:3000/v1\` (or your native \`llama-server\` LAN port \`8080/v1\`) with model ID \`${activeModel.id}\`.`,
+      `To connect **OpenCode**, **Hermes**, or Cursor, point \`OPENAI_BASE_URL\` to \`http://<host-ip>:3000/v1\` with model \`${activeModel.id}\`.`,
     ].join('\n');
   }
 
+  // 5. General intelligent response
   return [
-    `Processed across **${activeNodes.length} active star node(s)** running **${activeModel.name}** (${activeModel.quant}, \`${plan.activeParamsPerTokenB}B\` active params/token, ~\`${plan.estimatedClusterTokPerSec} tok/s\`).`,
+    `I received your request: "${lastUserMsg}".`,
     ``,
-    `> **Prompt received:** ${lastUserMsg || '(empty prompt)'}`,
+    `I am currently running on **${activeModel.name}** (${activeModel.quant}, ${activeModel.architecture}), sharded across **${activeNodes.length} active node(s)** (${nodeNames}).`,
     ``,
-    `**Execution Pipeline:**`,
-    nodeSummaryLines,
+    `If you have connected an upstream \`llama-server\` (e.g., port 8080), completions will flow directly from the physical neural network weights. When running standalone in ClusterLab, all node pipelines, KV caches, and latency bounds are monitored in real time.`,
     ``,
-    `*Tip: To forward completions directly to a live native \`llama-server\` binary on your Windows or Linux host, enter its \`/v1\` URL in the Chat & Brain Upstream box or launch the tuned script from the Cluster dashboard.*`,
+    `How else can I assist with your cluster or code?`,
   ].join('\n');
 }
 

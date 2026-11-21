@@ -41,6 +41,169 @@ const STARTER_PROMPTS = [
   'Explain how MoE expert offloading and WDDM VRAM guards improve speed here.',
 ];
 
+function renderInlineFormatting(text: string): React.ReactNode {
+  const parts: React.ReactNode[] = [];
+  const regex = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+    const token = match[0];
+    if (token.startsWith('`') && token.endsWith('`')) {
+      const code = token.slice(1, -1);
+      parts.push(
+        <code
+          key={match.index}
+          className="rounded bg-blue-500/10 dark:bg-blue-400/10 text-blue-600 dark:text-blue-400 px-1.5 py-0.5 font-mono text-[11px] font-semibold border border-blue-500/20"
+        >
+          {code}
+        </code>
+      );
+    } else if (token.startsWith('**') && token.endsWith('**')) {
+      const boldText = token.slice(2, -2);
+      parts.push(
+        <strong key={match.index} className="font-semibold text-slate-900 dark:text-slate-100">
+          {boldText}
+        </strong>
+      );
+    } else if (token.startsWith('*') && token.endsWith('*')) {
+      const italicText = token.slice(1, -1);
+      parts.push(
+        <em key={match.index} className="italic text-slate-600 dark:text-slate-300">
+          {italicText}
+        </em>
+      );
+    }
+    lastIndex = regex.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+
+  return parts.length === 0 ? text : <>{parts}</>;
+}
+
+const FormattedMarkdownMessage: React.FC<{ content: string }> = ({ content }) => {
+  if (!content) return null;
+
+  const lines = content.split('\n');
+  const elements: React.ReactNode[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+
+    // 1. Code blocks: ```
+    if (trimmed.startsWith('```')) {
+      const lang = trimmed.slice(3).trim();
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++; // skip closing ```
+      elements.push(
+        <div key={`code-${i}`} className="my-2 rounded-lg overflow-hidden border border-slate-700 bg-slate-950 text-slate-100">
+          {lang && (
+            <div className="bg-slate-900 px-3 py-1 text-[10px] font-mono uppercase tracking-wider text-slate-400 border-b border-slate-800">
+              {lang}
+            </div>
+          )}
+          <pre className="p-3 text-[11px] font-mono leading-relaxed overflow-x-auto text-emerald-400">
+            <code>{codeLines.join('\n')}</code>
+          </pre>
+        </div>
+      );
+      continue;
+    }
+
+    // 2. Heading 3: ###
+    if (trimmed.startsWith('### ')) {
+      elements.push(
+        <h3
+          key={`h3-${i}`}
+          className="font-display text-xs font-bold text-slate-900 dark:text-slate-100 mt-2.5 mb-1.5 flex items-center gap-1.5 border-b border-slate-200/80 dark:border-slate-800/80 pb-1"
+        >
+          {renderInlineFormatting(trimmed.slice(4))}
+        </h3>
+      );
+      i++;
+      continue;
+    }
+
+    // 3. Heading 4: ####
+    if (trimmed.startsWith('#### ')) {
+      elements.push(
+        <h4
+          key={`h4-${i}`}
+          className="font-display text-xs font-bold text-blue-600 dark:text-blue-400 mt-2 mb-1"
+        >
+          {renderInlineFormatting(trimmed.slice(5))}
+        </h4>
+      );
+      i++;
+      continue;
+    }
+
+    // 4. Blockquotes: >
+    if (trimmed.startsWith('> ')) {
+      elements.push(
+        <blockquote
+          key={`bq-${i}`}
+          className="border-l-2 border-blue-500 bg-blue-500/5 dark:bg-blue-500/10 rounded-r px-3 py-1.5 my-1.5 text-slate-700 dark:text-slate-300 italic"
+        >
+          {renderInlineFormatting(trimmed.slice(2))}
+        </blockquote>
+      );
+      i++;
+      continue;
+    }
+
+    // 5. Bullet list items: - or *
+    if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+      const listItems: string[] = [];
+      while (i < lines.length && (lines[i].trim().startsWith('- ') || lines[i].trim().startsWith('* '))) {
+        listItems.push(lines[i].trim().slice(2));
+        i++;
+      }
+      elements.push(
+        <ul key={`ul-${i}`} className="my-1.5 space-y-1 pl-1">
+          {listItems.map((item, idx) => (
+            <li key={idx} className="flex items-start gap-2 text-xs leading-relaxed text-slate-800 dark:text-slate-200">
+              <span className="text-blue-500 font-bold select-none mt-0.5">•</span>
+              <span className="flex-1">{renderInlineFormatting(item)}</span>
+            </li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+
+    // 6. Empty line: spacer
+    if (!trimmed) {
+      elements.push(<div key={`empty-${i}`} className="h-1" />);
+      i++;
+      continue;
+    }
+
+    // 7. Regular paragraph
+    elements.push(
+      <p key={`p-${i}`} className="my-1 text-xs leading-relaxed text-slate-800 dark:text-slate-200">
+        {renderInlineFormatting(trimmed)}
+      </p>
+    );
+    i++;
+  }
+
+  return <div className="space-y-0.5">{elements}</div>;
+};
+
 export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
   activeModel,
   clusterPlan,
@@ -315,20 +478,46 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
               className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
             >
               <div
-                className={`max-w-[88%] rounded-xl px-4 py-3 text-xs leading-relaxed whitespace-pre-wrap ${
+                className={`max-w-[88%] rounded-xl px-4 py-3 text-xs leading-relaxed ${
                   msg.role === 'user'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-slate-50 dark:bg-[#0B1120] border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200'
+                    ? 'bg-blue-600 text-white shadow-xs whitespace-pre-wrap'
+                    : 'bg-slate-50 dark:bg-[#0B1120] border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 shadow-xs'
                 }`}
               >
-                {msg.content || (isStreaming ? 'Routing across star nodes...' : '')}
+                {msg.role === 'user' ? (
+                  msg.content
+                ) : msg.content ? (
+                  <FormattedMarkdownMessage content={msg.content} />
+                ) : (
+                  <span className="text-slate-400 italic">
+                    {isStreaming ? 'Routing across star nodes...' : ''}
+                  </span>
+                )}
               </div>
               {msg.role === 'assistant' && (msg.tokPerSec || msg.latencyMs) && (
-                <div className="mt-1 px-1 text-[11px] font-mono-num text-slate-500 dark:text-slate-400">
-                  {msg.activeParamsB ? `${msg.activeParamsB}B active · ` : ''}
-                  {msg.tokPerSec ? `${msg.tokPerSec} tok/s` : ''}
-                  {msg.latencyMs ? ` · ${msg.latencyMs}ms` : ''}
-                  {msg.tokensCount ? ` · ${msg.tokensCount} tokens` : ''}
+                <div className="mt-1.5 px-1 flex flex-wrap items-center gap-2 text-[11px] font-mono-num text-slate-500 dark:text-slate-400">
+                  {msg.activeParamsB ? (
+                    <span className="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800/80 px-1.5 py-0.5 text-[10px] text-slate-700 dark:text-slate-300">
+                      <Cpu className="w-3 h-3 text-blue-500" />
+                      <span>{msg.activeParamsB}B active</span>
+                    </span>
+                  ) : null}
+                  {msg.tokPerSec ? (
+                    <span className="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800/80 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold">
+                      <Zap className="w-3 h-3 text-emerald-500" />
+                      <span>~{msg.tokPerSec} tok/s</span>
+                    </span>
+                  ) : null}
+                  {msg.latencyMs ? (
+                    <span className="text-[10px] text-slate-400">
+                      {msg.latencyMs}ms
+                    </span>
+                  ) : null}
+                  {msg.tokensCount ? (
+                    <span className="text-[10px] text-slate-400">
+                      · {msg.tokensCount} tokens
+                    </span>
+                  ) : null}
                 </div>
               )}
             </div>
