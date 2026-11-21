@@ -79,7 +79,7 @@ function renderInlineFormatting(text: string): React.ReactNode {
       parts.push(
         <code
           key={match.index}
-          className="rounded bg-slate-200/90 dark:bg-slate-800 text-slate-800 dark:text-slate-200 px-1.5 py-0.5 font-mono text-[11px] font-medium"
+          className="rounded bg-slate-200/90 dark:bg-slate-800/90 border border-slate-300/80 dark:border-slate-700/80 text-slate-900 dark:text-slate-100 px-1.5 py-0.5 font-mono text-[11px] font-medium"
         >
           {code}
         </code>
@@ -94,7 +94,7 @@ function renderInlineFormatting(text: string): React.ReactNode {
     } else if (token.startsWith('*') && token.endsWith('*')) {
       const italicText = token.slice(1, -1);
       parts.push(
-        <em key={match.index} className="italic text-slate-600 dark:text-slate-300">
+        <em key={match.index} className="italic text-slate-700 dark:text-slate-300">
           {italicText}
         </em>
       );
@@ -131,7 +131,7 @@ const FormattedMarkdownMessage: React.FC<{ content: string }> = ({ content }) =>
       }
       i++; // skip closing ```
       elements.push(
-        <div key={`code-${i}`} className="my-2 rounded-lg overflow-hidden border border-slate-700 bg-slate-950 text-slate-100">
+        <div key={`code-${i}`} className="my-2 rounded-lg overflow-hidden border border-slate-300 dark:border-slate-700 bg-slate-950 text-slate-100">
           {lang && (
             <div className="bg-slate-900 px-3 py-1 text-[10px] font-mono uppercase tracking-wider text-slate-400 border-b border-slate-800">
               {lang}
@@ -145,12 +145,19 @@ const FormattedMarkdownMessage: React.FC<{ content: string }> = ({ content }) =>
       continue;
     }
 
+    // Horizontal rule: --- or ***
+    if (/^(\-{3,}|\*{3,})$/.test(trimmed)) {
+      elements.push(<hr key={`hr-${i}`} className="my-2.5 border-t border-slate-300 dark:border-slate-800" />);
+      i++;
+      continue;
+    }
+
     // 2. Heading 3: ###
     if (trimmed.startsWith('### ')) {
       elements.push(
         <h3
           key={`h3-${i}`}
-          className="font-display text-xs font-bold text-slate-900 dark:text-slate-100 mt-2.5 mb-1.5 flex items-center gap-1.5 border-b border-slate-200/80 dark:border-slate-800/80 pb-1"
+          className="font-display text-xs font-bold text-slate-900 dark:text-slate-100 mt-2.5 mb-1.5 flex items-center gap-1.5 border-b border-slate-300/80 dark:border-slate-800/80 pb-1"
         >
           {renderInlineFormatting(trimmed.slice(4))}
         </h3>
@@ -164,7 +171,7 @@ const FormattedMarkdownMessage: React.FC<{ content: string }> = ({ content }) =>
       elements.push(
         <h4
           key={`h4-${i}`}
-          className="font-display text-xs font-bold text-amber-500 dark:text-amber-400 mt-2.5 mb-1"
+          className="font-display text-xs font-bold text-amber-700 dark:text-amber-400 mt-2.5 mb-1"
         >
           {renderInlineFormatting(trimmed.slice(5))}
         </h4>
@@ -178,7 +185,7 @@ const FormattedMarkdownMessage: React.FC<{ content: string }> = ({ content }) =>
       elements.push(
         <blockquote
           key={`bq-${i}`}
-          className="border-l-2 border-amber-500 bg-amber-500/5 dark:bg-amber-500/10 rounded-r px-3 py-1.5 my-1.5 text-slate-700 dark:text-slate-300 italic"
+          className="border-l-2 border-amber-500 bg-amber-500/10 dark:bg-amber-500/10 rounded-r px-3 py-1.5 my-1.5 text-slate-800 dark:text-slate-200 italic"
         >
           {renderInlineFormatting(trimmed.slice(2))}
         </blockquote>
@@ -204,7 +211,7 @@ const FormattedMarkdownMessage: React.FC<{ content: string }> = ({ content }) =>
         <ul key={`ul-${i}`} className="my-1.5 space-y-1.5 pl-1">
           {listItems.map((item, idx) => (
             <li key={idx} className="flex items-start gap-2 text-xs leading-relaxed text-slate-800 dark:text-slate-200">
-              <span className="text-amber-500 dark:text-amber-400 font-semibold font-mono text-[11px] select-none mt-0.5 shrink-0">
+              <span className="text-amber-700 dark:text-amber-400 font-semibold font-mono text-[11px] select-none mt-0.5 shrink-0">
                 {item.marker}
               </span>
               <span className="flex-1">{renderInlineFormatting(item.text)}</span>
@@ -511,8 +518,8 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
               <div
                 className={`max-w-[88%] rounded-xl px-4 py-3 text-xs leading-relaxed ${
                   msg.role === 'user'
-                    ? 'bg-amber-500 text-black font-semibold shadow-xs whitespace-pre-wrap'
-                    : 'bg-[#0B1120] border border-slate-800 text-slate-100 shadow-xs'
+                    ? 'bg-amber-500 text-slate-950 font-semibold shadow-xs whitespace-pre-wrap'
+                    : 'bg-slate-100 dark:bg-[#0B1120] border border-slate-200/90 dark:border-slate-800 text-slate-900 dark:text-slate-100 shadow-xs'
                 }`}
               >
                 {msg.role === 'user' ? (
@@ -520,7 +527,7 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
                 ) : msg.content ? (
                   <FormattedMarkdownMessage content={msg.content} />
                 ) : (
-                  <span className="text-slate-400 italic">
+                  <span className="text-slate-500 dark:text-slate-400 italic">
                     {isStreaming ? 'Routing across star nodes...' : ''}
                   </span>
                 )}
@@ -528,13 +535,13 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
               {msg.role === 'assistant' && (msg.tokPerSec || msg.latencyMs) && (
                 <div className="mt-1.5 px-1 flex flex-wrap items-center gap-2 text-[11px] font-mono-num text-slate-500 dark:text-slate-400">
                   {msg.activeParamsB ? (
-                    <span className="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800/80 px-1.5 py-0.5 text-[10px] text-slate-700 dark:text-slate-300">
+                    <span className="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800/80 border border-slate-200/80 dark:border-slate-700/80 px-1.5 py-0.5 text-[10px] text-slate-700 dark:text-slate-300">
                       <Cpu className="w-3 h-3 text-blue-500" />
                       <span>{msg.activeParamsB}B active</span>
                     </span>
                   ) : null}
                   {msg.tokPerSec ? (
-                    <span className="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800/80 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold">
+                    <span className="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800/80 border border-slate-200/80 dark:border-slate-700/80 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold">
                       <Zap className="w-3 h-3 text-emerald-500" />
                       <span>~{msg.tokPerSec} tok/s</span>
                     </span>
