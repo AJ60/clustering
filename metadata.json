@@ -1,6 +1,6 @@
 {
-  "name": "ClusterLab",
-  "description": "1-Hop Star GGUF cluster dashboard with model presets, cap-bounded RAM pool allocation, thermal guard, QR pairing, 6-check troubleshooter, and Developer-gated 2D K-Means & DBSCAN Lab. Author: AJ60.",
+  "name": "Silica Cluster",
+  "description": "Decentralized mobile AI cluster console for Android with hardware-probed RPC engine controls, auto-discovery, live LAN/USB shard topology, first-run tensor caching, and streaming OpenAI-compatible local LLM chat.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
