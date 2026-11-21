@@ -66,7 +66,6 @@ import {
   ScatterChart,
   Settings,
   Upload,
-  Wifi,
   X,
 } from 'lucide-react';
 
@@ -83,7 +82,6 @@ export function App() {
   const [tuningConfig, setTuningConfig] = useState<BackendTuningConfig>(() =>
     createDefaultBackendTuningConfig(GGUF_MODEL_PRESETS[0])
   );
-  const [simulatedTempOffsetC, setSimulatedTempOffsetC] = useState(0);
   const [upstreamBaseUrl, setUpstreamBaseUrl] = useState('');
 
   // Dialog States
@@ -117,11 +115,11 @@ export function App() {
     const rawNodes = buildStarClusterNodes(
       node.telemetry,
       clusterMode,
-      simulatedTempOffsetC,
+      0,
       tuningConfig
     );
     return planStarCluster(rawNodes, activeModel, undefined, tuningConfig);
-  }, [node.telemetry, clusterMode, simulatedTempOffsetC, tuningConfig, activeModel]);
+  }, [node.telemetry, clusterMode, tuningConfig, activeModel]);
 
   // Sync active model, plan & backend tuning to Express /api/cluster/state
   useEffect(() => {
@@ -324,14 +322,10 @@ export function App() {
                 </button>
               </>
             ) : (
-              <button
-                type="button"
-                onClick={node.autoDetectMaster}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 text-xs font-semibold whitespace-nowrap shrink-0 transition-colors"
-              >
-                <Wifi className="w-3.5 h-3.5" />
-                <span>Auto-Discover</span>
-              </button>
+              <div className="inline-flex items-center gap-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span>Master: Port 3000</span>
+              </div>
             )}
 
             <button
@@ -519,21 +513,10 @@ export function App() {
             clusterMode={clusterMode}
             tuningConfig={tuningConfig}
             clusterPlan={clusterPlan}
-            simulatedTempOffsetC={simulatedTempOffsetC}
             onSelectModel={handleSelectModel}
             onChangeClusterMode={setClusterMode}
             onUpdateTuningConfig={handleUpdateTuningConfig}
-            onChangeSimulatedTempOffsetC={setSimulatedTempOffsetC}
-            onRecalibrate={node.recalibrate}
-            onStartWorker={node.startWorker}
-            onStopWorker={node.stopWorkerAndFreeRam}
-            onAutoDetectMaster={node.autoDetectMaster}
-            onPairQrPayload={node.pairQrPayload}
-            onToggleBindMode={node.toggleBindMode}
             onUpdateSecret={node.updateClusterSecret}
-            onSimulateShedLayers={node.simulateLowMemoryShedLayers}
-            onRunDiagnostics={node.runDiagnostics}
-            onApplyAutoFix={node.applyAutoFix}
             onOpenModels={() => setActiveTab('MODELS')}
             onOpenChat={() => setActiveTab('CHAT')}
             onOpen2DLab={

@@ -1,8 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import {
-  AutoFixAction,
   DeviceTelemetryState,
-  DiagnosticSeverity,
 } from '../types/clustering';
 import {
   BackendOsTarget,
@@ -19,32 +17,25 @@ import {
   WindowsAccelerator,
 } from '../types/starCluster';
 import { buildTunedOsBackendProfile } from '../domain/backendTuner';
-import { CameraQrScannerDialog } from './HardenedNodeDashboard';
 import {
   Activity,
   AlertTriangle,
-  BatteryCharging,
+  ArrowRight,
   Check,
   CheckCircle2,
   Copy,
-  Cpu,
   Download,
   Flame,
-  HardDrive,
-  Laptop,
-  Play,
-  QrCode,
+  Radio,
   RefreshCw,
   Server,
   ShieldAlert,
-  ShieldCheck,
   SlidersHorizontal,
   Snowflake,
-  Square,
   Terminal,
   Usb,
   Wifi,
-  Wrench,
+  Zap,
 } from 'lucide-react';
 
 interface StarClusterDashboardProps {
@@ -53,21 +44,10 @@ interface StarClusterDashboardProps {
   clusterMode: ClusterMode;
   tuningConfig: BackendTuningConfig;
   clusterPlan: StarClusterPlan;
-  simulatedTempOffsetC: number;
   onSelectModel: (model: GgufModelPreset) => void;
   onChangeClusterMode: (mode: ClusterMode) => void;
   onUpdateTuningConfig: (patch: Partial<BackendTuningConfig>) => void;
-  onChangeSimulatedTempOffsetC: (offsetC: number) => void;
-  onRecalibrate: () => void;
-  onStartWorker: () => void;
-  onStopWorker: () => void;
-  onAutoDetectMaster: () => void;
-  onPairQrPayload: (raw: string) => boolean;
-  onToggleBindMode: (usbOnly: boolean) => void;
   onUpdateSecret: (secret: string) => void;
-  onSimulateShedLayers: () => void;
-  onRunDiagnostics: () => void;
-  onApplyAutoFix: (action: AutoFixAction) => void;
   onOpenModels?: () => void;
   onOpenChat?: () => void;
   onOpen2DLab?: () => void;
@@ -106,52 +86,16 @@ function thermalLabel(state: ThermalState): {
   }
 }
 
-function diagnosticLabel(sev: DiagnosticSeverity) {
-  if (sev === 'OK') {
-    return (
-      <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400 whitespace-nowrap shrink-0">
-        <CheckCircle2 className="w-3.5 h-3.5" />
-        Passed
-      </span>
-    );
-  }
-  if (sev === 'WARNING') {
-    return (
-      <span className="inline-flex items-center gap-1 text-xs font-semibold text-amber-600 dark:text-amber-400 whitespace-nowrap shrink-0">
-        <AlertTriangle className="w-3.5 h-3.5" />
-        Tip
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-1 text-xs font-semibold text-red-600 dark:text-red-400 whitespace-nowrap shrink-0">
-      <ShieldAlert className="w-3.5 h-3.5" />
-      Action Needed
-    </span>
-  );
-}
-
 export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
   telemetry,
   activeModel,
   clusterMode,
   tuningConfig,
   clusterPlan,
-  simulatedTempOffsetC,
   onSelectModel,
   onChangeClusterMode,
   onUpdateTuningConfig,
-  onChangeSimulatedTempOffsetC,
-  onRecalibrate,
-  onStartWorker,
-  onStopWorker,
-  onAutoDetectMaster,
-  onPairQrPayload,
-  onToggleBindMode,
   onUpdateSecret,
-  onSimulateShedLayers,
-  onRunDiagnostics,
-  onApplyAutoFix,
   onOpenModels,
   onOpenChat,
   onOpen2DLab,
@@ -159,7 +103,14 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
   const [selectedNodeId, setSelectedNodeId] = useState<string>('linux-hub');
   const [backendOs, setBackendOs] = useState<BackendOsTarget>('windows');
   const [copiedCmd, setCopiedCmd] = useState(false);
-  const [showQrModal, setShowQrModal] = useState(false);
+  const [copiedAdb, setCopiedAdb] = useState(false);
+  const [healthStatus, setHealthStatus] = useState<{
+    tested: boolean;
+    loading: boolean;
+    ok: boolean;
+    latencyMs?: number;
+    model?: string;
+  }>({ tested: false, loading: false, ok: false });
 
   const presetOptions = useMemo(() => {
     const exists = GGUF_MODEL_PRESETS.some((p) => p.id === activeModel.id);
@@ -182,9 +133,6 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
     clusterPlan.nodes.find((n) => n.role === 'Master') ?? clusterPlan.nodes[0];
   const workerNodes = clusterPlan.nodes.filter((n) => n.nodeId !== masterNode?.nodeId);
 
-  const isRunning =
-    telemetry.workerState === 'RUNNING_USB' || telemetry.workerState === 'RUNNING_WIFI';
-  const cal = telemetry.calibration;
   const thermalMeta = thermalLabel(clusterPlan.overallThermalState);
 
   const handleCopyCommand = () => {
@@ -203,6 +151,36 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
     a.download = backendProfile.scriptFileName;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleCopyAdb = () => {
+    const cmd = 'adb reverse tcp:3000 tcp:3000; adb forward tcp:50052 tcp:50052';
+    void navigator.clipboard?.writeText(cmd);
+    setCopiedAdb(true);
+    window.setTimeout(() => setCopiedAdb(false), 1600);
+  };
+
+  const handleVerifyHealth = async () => {
+    setHealthStatus({ tested: false, loading: true, ok: false });
+    const t0 = performance.now();
+    try {
+      const res = await fetch('/health');
+      const t1 = performance.now();
+      if (res.ok) {
+        const data = await res.json();
+        setHealthStatus({
+          tested: true,
+          loading: false,
+          ok: true,
+          latencyMs: Math.round(t1 - t0),
+          model: data.activeModel ?? activeModel.name,
+        });
+      } else {
+        setHealthStatus({ tested: true, loading: false, ok: false, latencyMs: Math.round(t1 - t0) });
+      }
+    } catch {
+      setHealthStatus({ tested: true, loading: false, ok: false });
+    }
   };
 
   return (
@@ -858,228 +836,174 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
         </div>
       </section>
 
-      {/* 5. Three Simple User Cards: Connect · Health · Troubleshooter */}
+      {/* 5. Master Hub & Fleet Gateway (Clean Master Node Setup) */}
       <section className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
-        {/* Card 1: Connect */}
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-5 flex flex-col justify-between gap-4">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="font-display text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                <Laptop className="w-4 h-4 text-blue-500" />
-                Connect Device
-              </h2>
-              <span
-                className={`text-xs font-semibold ${
-                  isRunning
-                    ? 'text-emerald-600 dark:text-emerald-400'
-                    : telemetry.workerState === 'SHEDDING_MEMORY'
-                      ? 'text-red-600 dark:text-red-400'
-                      : 'text-slate-500 dark:text-slate-400'
-                }`}
-              >
-                {isRunning
-                  ? 'Active Worker'
-                  : telemetry.workerState === 'SHEDDING_MEMORY'
-                    ? 'Memory Paused'
-                    : 'Ready to Pair'}
-              </span>
-            </div>
-
-            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-              Join your desktop master hub safely over USB cable or Wi-Fi. Memory usage is hard-capped at{' '}
-              <span className="font-mono-num font-semibold">{telemetry.safeCapMb} MB</span>.
-            </p>
-
-            <div className="pt-1 text-xs text-slate-500 dark:text-slate-400 font-mono-num truncate">
-              Link: {telemetry.pairedMasterAddress}
-            </div>
-          </div>
-
-          <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
-            <button
-              type="button"
-              onClick={onAutoDetectMaster}
-              disabled={telemetry.isScanningMaster}
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-3.5 py-2 text-xs font-semibold whitespace-nowrap shrink-0"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${telemetry.isScanningMaster ? 'animate-spin' : ''}`} />
-              {telemetry.isScanningMaster ? 'Scanning...' : 'Auto-Connect'}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setShowQrModal(true)}
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-700 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-blue-500 whitespace-nowrap shrink-0"
-            >
-              <QrCode className="w-3.5 h-3.5 text-blue-500" />
-              Scan QR
-            </button>
-
-            {isRunning ? (
-              <button
-                type="button"
-                onClick={onStopWorker}
-                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-300 px-3 py-2 text-xs font-semibold whitespace-nowrap shrink-0"
-              >
-                <Square className="w-3.5 h-3.5" />
-                Stop Sharing
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={onStartWorker}
-                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-700 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-emerald-500 whitespace-nowrap shrink-0"
-              >
-                <Play className="w-3.5 h-3.5 text-emerald-500" />
-                Start Sharing
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Card 2: Health */}
+        {/* Card 1: Master Engine Status */}
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-5 flex flex-col justify-between gap-4">
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-2">
               <h2 className="font-display text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-emerald-500" />
-                Device Health
+                <Server className="w-4 h-4 text-blue-500" />
+                Master Node Hub
               </h2>
-              <span className="text-xs font-mono-num text-slate-500 dark:text-slate-400">
-                {cal.isCalibrated ? `${cal.performanceScore}/100` : 'Checking'}
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                Online
               </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-2.5 text-xs">
-              <div className="space-y-0.5">
-                <div className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                  <HardDrive className="w-3 h-3" /> Safe RAM Cap
-                </div>
+            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+              Operating as the central cluster coordinator and OpenAI-compatible server.
+            </p>
+
+            <div className="grid grid-cols-2 gap-2 text-xs pt-1">
+              <div className="rounded-lg bg-slate-50 dark:bg-[#0B1120] p-2 border border-slate-200 dark:border-slate-800">
+                <div className="text-[11px] text-slate-500">Service Port</div>
                 <div className="font-bold font-mono-num text-slate-900 dark:text-slate-100">
-                  {telemetry.safeCapMb} MB
+                  0.0.0.0:3000
                 </div>
               </div>
-
-              <div className="space-y-0.5">
-                <div className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                  <Cpu className="w-3 h-3" /> Engine
-                </div>
-                <div className="font-bold text-slate-900 dark:text-slate-100 truncate">
-                  {cal.recommendedBackendLabel}
-                </div>
-              </div>
-
-              <div className="space-y-0.5">
-                <div className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                  <BatteryCharging className="w-3 h-3" /> Battery / Temp
-                </div>
+              <div className="rounded-lg bg-slate-50 dark:bg-[#0B1120] p-2 border border-slate-200 dark:border-slate-800">
+                <div className="text-[11px] text-slate-500">Master Capacity</div>
                 <div className="font-bold font-mono-num text-slate-900 dark:text-slate-100">
-                  {telemetry.batteryPercent}% · {(telemetry.temperatureCelsius + simulatedTempOffsetC).toFixed(0)}°C
-                </div>
-              </div>
-
-              <div className="space-y-0.5">
-                <div className="text-slate-500 dark:text-slate-400">Tier</div>
-                <div className="font-bold text-slate-900 dark:text-slate-100 truncate">
-                  {cal.tierLabel}
+                  {masterNode ? (masterNode.effectiveCapMb / 1024).toFixed(1) : '0'} GB
                 </div>
               </div>
             </div>
+
+            <div className="text-xs text-slate-500 dark:text-slate-400 font-mono-num">
+              Allocated: {masterNode?.allocatedLayers ?? 0} layers ({masterNode?.activeParamsB ?? 0}B active)
+            </div>
           </div>
 
-          <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
-            <span className="text-xs text-slate-500 dark:text-slate-400 truncate">
-              {cal.summarySentence}
-            </span>
-            <button
-              type="button"
-              onClick={onRecalibrate}
-              disabled={cal.isCalibrating}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-blue-500 whitespace-nowrap shrink-0"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${cal.isCalibrating ? 'animate-spin' : ''}`} />
-              Re-Tune Speed
-            </button>
+          <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
+            {onOpenChat && (
+              <button
+                type="button"
+                onClick={onOpenChat}
+                className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white px-3.5 py-2 text-xs font-semibold transition-colors"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                <span>Open Cluster Inference Chat</span>
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Card 3: Troubleshooter */}
+        {/* Card 2: Worker Node Gateway & ADB Forwarding */}
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-5 flex flex-col justify-between gap-4">
-          <div className="space-y-2.5">
+          <div className="space-y-3">
             <div className="flex items-center justify-between gap-2">
               <h2 className="font-display text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                <Wrench className="w-4 h-4 text-blue-500" />
-                Troubleshooter
+                <Radio className="w-4 h-4 text-emerald-500" />
+                Worker Node Fleet
               </h2>
-              {telemetry.diagnosticReport && (
-                <span className="text-xs font-mono-num text-slate-500 dark:text-slate-400">
-                  {telemetry.diagnosticReport.ranAtLabel}
+              <span className="text-xs font-semibold text-slate-600 dark:text-slate-400 font-mono-num">
+                {workerNodes.length} Worker(s) Active
+              </span>
+            </div>
+
+            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+              Accepting worker RPC joins over TCP <span className="font-mono font-semibold">50052</span> and UDP discovery on <span className="font-mono font-semibold">50050</span>.
+            </p>
+
+            <div className="space-y-1.5 rounded-lg bg-slate-50 dark:bg-[#0B1120] p-2.5 border border-slate-200 dark:border-slate-800 text-xs">
+              <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                <span className="flex items-center gap-1">
+                  <Usb className="w-3 h-3 text-blue-500" />
+                  Android USB Reverse Tunnel
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCopyAdb}
+                  className="text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1"
+                >
+                  {copiedAdb ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+                  <span>{copiedAdb ? 'Copied' : 'Copy'}</span>
+                </button>
+              </div>
+              <code className="block font-mono-num text-[11px] text-slate-800 dark:text-slate-200 select-all truncate">
+                adb reverse tcp:3000 tcp:3000
+              </code>
+            </div>
+
+            <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+              <Wifi className="w-3.5 h-3.5 text-slate-400" />
+              <span>Wi-Fi / LAN Workers auto-shard based on ping RTT & thermal capacity.</span>
+            </div>
+          </div>
+
+          <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
+            {onOpenModels && (
+              <button
+                type="button"
+                onClick={onOpenModels}
+                className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:border-blue-500 px-3.5 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 transition-colors"
+              >
+                <span>Browse & Switch Cluster Models</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Card 3: OpenAI Gateway & Telemetry */}
+        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-5 flex flex-col justify-between gap-4">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="font-display text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                <Activity className="w-4 h-4 text-blue-500" />
+                OpenAI Wire Gateway
+              </h2>
+              {healthStatus.tested && (
+                <span className={`text-xs font-semibold ${healthStatus.ok ? 'text-emerald-500' : 'text-red-500'}`}>
+                  {healthStatus.ok ? `${healthStatus.latencyMs}ms OK` : 'Failed'}
                 </span>
               )}
             </div>
 
-            {telemetry.diagnosticReport ? (
-              <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                {telemetry.diagnosticReport.checks.map((chk) => (
-                  <div
-                    key={chk.id}
-                    className="flex items-center justify-between gap-2 py-1 border-b border-slate-100 dark:border-slate-800/70 last:border-0 text-xs"
-                  >
-                    <div className="min-w-0">
-                      <div className="font-semibold text-slate-800 dark:text-slate-100 truncate">
-                        {chk.title}
-                      </div>
-                      <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                        {chk.statusText}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      {diagnosticLabel(chk.severity)}
-                      {chk.fixAction && (
-                        <button
-                          type="button"
-                          onClick={() => onApplyAutoFix(chk.fixAction!)}
-                          className="rounded-md bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 text-[11px] font-semibold whitespace-nowrap"
-                        >
-                          Fix
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
+            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+              Compatible with Cursor, Continue, Claude Code, OpenCode, and standard OpenAI client SDKs.
+            </p>
+
+            <div className="space-y-1 text-xs font-mono-num">
+              <div className="flex justify-between text-slate-500 dark:text-slate-400">
+                <span>Base URL</span>
+                <span className="text-slate-900 dark:text-slate-100 font-semibold">http://127.0.0.1:3000/v1</span>
               </div>
-            ) : (
-              <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-                Run a 6-point check on memory limits, network link, battery temperature, and cluster reachability with 1-click fixes.
-              </p>
-            )}
+              <div className="flex justify-between text-slate-500 dark:text-slate-400">
+                <span>Completions</span>
+                <span className="text-slate-900 dark:text-slate-100">POST /v1/chat/completions</span>
+              </div>
+              <div className="flex justify-between text-slate-500 dark:text-slate-400">
+                <span>Active Target</span>
+                <span className="text-blue-600 dark:text-blue-400 font-semibold">{activeModel.id}</span>
+              </div>
+            </div>
           </div>
 
-          <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
-            <span className="text-xs text-slate-500 dark:text-slate-400 truncate">
-              {telemetry.diagnosticReport?.headline ?? '6 automated readiness checks'}
-            </span>
+          <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex items-center gap-2">
             <button
               type="button"
-              onClick={onRunDiagnostics}
-              disabled={telemetry.isDiagnosing}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 hover:bg-slate-800 dark:hover:bg-blue-500 text-white px-3 py-1.5 text-xs font-semibold whitespace-nowrap shrink-0"
+              onClick={handleVerifyHealth}
+              disabled={healthStatus.loading}
+              className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 hover:bg-slate-800 dark:hover:bg-blue-500 text-white px-3 py-2 text-xs font-semibold whitespace-nowrap transition-colors"
             >
-              <Activity className={`w-3.5 h-3.5 ${telemetry.isDiagnosing ? 'animate-pulse' : ''}`} />
-              {telemetry.isDiagnosing ? 'Checking...' : 'Run Auto-Diagnosis'}
+              <RefreshCw className={`w-3.5 h-3.5 ${healthStatus.loading ? 'animate-spin' : ''}`} />
+              <span>{healthStatus.loading ? 'Pinging...' : 'Verify Health'}</span>
             </button>
           </div>
         </div>
       </section>
 
-      {/* 6. Developer Settings Section (Only visible when Developer Mode is ON) */}
+      {/* 6. Developer Section (Only when Developer Mode is ON) */}
       {telemetry.developerModeEnabled && (
         <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-5 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <SlidersHorizontal className="w-4 h-4 text-amber-500" />
               <h2 className="font-display text-sm font-bold text-slate-900 dark:text-slate-100">
-                Developer Node Controls, Thermal Simulator & Raw Telemetry
+                Developer Configuration & Node Events
               </h2>
             </div>
             {onOpen2DLab && (
@@ -1093,88 +1017,18 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
             )}
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="space-y-2">
-              <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                Transport Bind ({telemetry.bindAddress})
-              </div>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => onToggleBindMode(true)}
-                  className={`flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs font-semibold border ${
-                    telemetry.usbLoopbackOnly
-                      ? 'bg-blue-600 text-white border-blue-600'
-                      : 'border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300'
-                  }`}
-                >
-                  <Usb className="w-3.5 h-3.5" />
-                  USB Tunnel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onToggleBindMode(false)}
-                  className={`flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs font-semibold border ${
-                    !telemetry.usbLoopbackOnly
-                      ? 'bg-blue-600 text-white border-blue-600'
-                      : 'border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300'
-                  }`}
-                >
-                  <Wifi className="w-3.5 h-3.5" />
-                  Wi-Fi LAN
-                </button>
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                Cluster Secret & 32-Byte Auth Token
-              </label>
-              <input
-                type="text"
-                value={telemetry.clusterSecret}
-                onChange={(e) => onUpdateSecret(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B1120] px-2.5 py-1.5 text-xs font-mono-num text-slate-900 dark:text-slate-100"
-              />
-              <div className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400 truncate">
-                {telemetry.authTokenHex}
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                Thermal & Memory Stress Guard
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => onChangeSimulatedTempOffsetC(0)}
-                  className="rounded-lg border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:border-emerald-500"
-                >
-                  Cool (Nominal)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onChangeSimulatedTempOffsetC(25)}
-                  className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold text-amber-700 dark:text-amber-300"
-                >
-                  Test SHED_25
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onChangeSimulatedTempOffsetC(30)}
-                  className="rounded-lg border border-red-500/40 bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold text-red-700 dark:text-red-300"
-                >
-                  Test Emergency Offload
-                </button>
-                <button
-                  type="button"
-                  onClick={onSimulateShedLayers}
-                  className="rounded-lg border border-slate-300 dark:border-slate-700 px-2.5 py-1 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:border-amber-500"
-                >
-                  SHED_LAYERS
-                </button>
-              </div>
+          <div className="space-y-1.5">
+            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+              Cluster Secret & 32-Byte Auth Token
+            </label>
+            <input
+              type="text"
+              value={telemetry.clusterSecret}
+              onChange={(e) => onUpdateSecret(e.target.value)}
+              className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B1120] px-2.5 py-1.5 text-xs font-mono-num text-slate-900 dark:text-slate-100"
+            />
+            <div className="text-[11px] font-mono-num text-slate-500 dark:text-slate-400 truncate">
+              {telemetry.authTokenHex}
             </div>
           </div>
 
@@ -1182,10 +1036,10 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
             <div className="flex items-center justify-between text-[11px] font-mono-num text-slate-400">
               <span className="flex items-center gap-1.5 font-semibold">
                 <Terminal className="w-3.5 h-3.5 text-teal-400" />
-                Raw Node Event Log
+                Master Node Server Log
               </span>
               <span>
-                {telemetry.webglRendererName} · Handshakes: {telemetry.handshakesCompleted}
+                Handshakes: {telemetry.handshakesCompleted}
               </span>
             </div>
             <div className="max-h-32 overflow-y-auto space-y-0.5 text-[11px] font-mono-num text-emerald-400">
@@ -1195,14 +1049,6 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
             </div>
           </div>
         </section>
-      )}
-
-      {showQrModal && (
-        <CameraQrScannerDialog
-          activePayload={telemetry.pairingQrPayload}
-          onPairPayload={onPairQrPayload}
-          onClose={() => setShowQrModal(false)}
-        />
       )}
     </div>
   );
