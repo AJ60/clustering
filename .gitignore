@@ -29,6 +29,11 @@ llama-b11429/
 logs/
 
 # Android Build Outputs
+.gradle/
+build/
+app/build/
+local.properties
+debug.keystore
 android/**/build/
 android/**/.gradle/
 android/local.properties
