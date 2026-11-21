@@ -508,9 +508,23 @@ class SilicaViewModel(
                 }
                 val snap = SilicaMasterApiClient.fetchClusterState(normalized, secret)
                 clusterSnapshot.value = snap
-                RpcService.logEngineEvent(
-                    "Master synced ($normalized • ${health.latencyMs}ms • ${models.size} model(s))"
-                )
+                if (snap != null && snap.nodes.isNotEmpty()) {
+                    val summary = snap.nodes.joinToString(" + ") { n ->
+                        "${n.label} (L${n.layerStart}-L${n.layerEnd}, ${n.allocatedLayers}L, ${n.allocatedMb}MB)"
+                    }
+                    RpcService.logEngineEvent("Master synced ($normalized • ${health.latencyMs}ms)")
+                    RpcService.logEngineEvent("[SHARD] Model ${snap.activeModelName}: $summary")
+                    val phoneNode = snap.nodes.firstOrNull { !it.isMaster }
+                    if (phoneNode != null) {
+                        RpcService.logEngineEvent(
+                            "[CACHE] Resident layers: L${phoneNode.layerStart}–L${phoneNode.layerEnd} (${phoneNode.allocatedLayers}L · ${phoneNode.allocatedMb} MB / ${uiState.value.telemetry.safeCapMb} MB cap)"
+                        )
+                    }
+                } else {
+                    RpcService.logEngineEvent(
+                        "Master synced ($normalized • ${health.latencyMs}ms • ${models.size} model(s))"
+                    )
+                }
             } else {
                 clusterSnapshot.value = null
                 RpcService.logEngineEvent("Master probe unreachable: $normalized")
@@ -693,6 +707,11 @@ class SilicaViewModel(
             isStreamingChat.value = true
             liveStreamingTokPerSec.value = 0f
 
+            val phoneLayers = clusterSnapshot.value?.nodes?.firstOrNull { !it.isMaster }?.allocatedLayers ?: 3
+            RpcService.logEngineEvent("[FORWARD] Step started: prompt \"${prompt.take(28)}...\"")
+            RpcService.logEngineEvent("[COMPUTE] Offloading $phoneLayers layer(s) to local ARM NEON pipeline")
+
+            var lastLoggedTokenCount = 0
             val result = SilicaMasterApiClient.streamChatCompletion(
                 baseUrl = cfg.masterBaseUrl,
                 modelId = modelId,
@@ -700,8 +719,12 @@ class SilicaViewModel(
                 temperature = cfg.temperature,
                 systemPrompt = cfg.systemPrompt,
                 secret = cfg.clusterSecret,
-                onDelta = { text, _, tps ->
+                onDelta = { text, count, tps ->
                     liveStreamingTokPerSec.value = tps
+                    if (count - lastLoggedTokenCount >= 30) {
+                        lastLoggedTokenCount = count
+                        RpcService.logEngineEvent("[COMPUTE] Live step: ${"%.1f".format(tps)} tok/s ($count tokens)")
+                    }
                     repository.updateMessage(
                         messageId = assistantMsgId,
                         content = text,
@@ -715,6 +738,7 @@ class SilicaViewModel(
 
             result.onSuccess { (finalText, finalTps, latencyMs) ->
                 val text = finalText.ifBlank { "(Empty completion returned by Master)" }
+                RpcService.logEngineEvent("[FORWARD] Done: ${"%.1f".format(finalTps)} tok/s (${latencyMs}ms) · all layers synchronized")
                 repository.updateMessage(
                     messageId = assistantMsgId,
                     content = text,
@@ -731,6 +755,7 @@ class SilicaViewModel(
                     detail = "Online"
                 )
             }.onFailure { err ->
+                RpcService.logEngineEvent("[ERROR] Forward pass failed: ${err.message ?: "Connection error"}")
                 val cleanError = "Could not reach Master OpenAI endpoint (${cfg.masterBaseUrl}/v1/chat/completions).\n\n${err.message ?: "Connection failed"}"
                 repository.updateMessage(
                     messageId = assistantMsgId,

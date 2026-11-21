@@ -255,110 +255,126 @@ object SilicaMasterApiClient {
         secret: String,
         onDelta: suspend (accumulatedText: String, tokenEstimate: Int, tokPerSec: Float) -> Unit
     ): Result<Triple<String, Float, Long>> = withContext(Dispatchers.IO) {
-        val normalized = normalizeBaseUrl(baseUrl)
-        val startMs = System.currentTimeMillis()
-        var conn: HttpURLConnection? = null
-
-        try {
-            val url = URL("$normalized/v1/chat/completions")
-            conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                connectTimeout = 5000
-                readTimeout = 45000
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Accept", "text/event-stream, application/json")
-                if (secret.isNotBlank()) {
-                    setRequestProperty("X-Cluster-Secret", secret)
-                    setRequestProperty("Authorization", "Bearer $secret")
-                }
+        val candidates = buildList {
+            val norm = normalizeBaseUrl(baseUrl)
+            add(norm)
+            if (norm.contains(":8080")) {
+                add(norm.replace(":8080", ":3000"))
+            } else if (norm.contains(":3000")) {
+                add(norm.replace(":3000", ":8080"))
+            } else {
+                add("$norm:3000")
+                add("$norm:8080")
             }
+        }.distinct()
 
-            val msgArray = JSONArray()
-            if (systemPrompt.isNotBlank()) {
-                msgArray.put(JSONObject().apply {
-                    put("role", "system")
-                    put("content", systemPrompt)
-                })
-            }
-            messages.forEach { msg ->
-                msgArray.put(JSONObject().apply {
-                    put("role", msg.role)
-                    put("content", msg.content)
-                })
-            }
+        var lastError: Exception? = null
 
-            val payload = JSONObject().apply {
-                put("model", modelId)
-                put("stream", true)
-                put("temperature", temperature.toDouble())
-                put("messages", msgArray)
-            }
+        for (candidateBase in candidates) {
+            val startMs = System.currentTimeMillis()
+            var conn: HttpURLConnection? = null
 
-            conn.outputStream.use { os ->
-                os.write(payload.toString().toByteArray(StandardCharsets.UTF_8))
-                os.flush()
-            }
-
-            val code = conn.responseCode
-            if (code !in 200..299) {
-                val errBody = conn.errorStream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
-                return@withContext Result.failure(
-                    IllegalStateException("Master HTTP $code: ${errBody.take(180).ifBlank { "Request failed" }}")
-                )
-            }
-
-            val contentType = conn.contentType.orEmpty().lowercase()
-            val accumulated = StringBuilder()
-            var chunkCount = 0
-
-            if (contentType.contains("text/event-stream")) {
-                BufferedReader(InputStreamReader(conn.inputStream, StandardCharsets.UTF_8)).use { reader ->
-                    while (currentCoroutineContext().isActive) {
-                        val line = reader.readLine() ?: break
-                        val trimmed = line.trim()
-                        if (!trimmed.startsWith("data:")) continue
-                        val dataStr = trimmed.removePrefix("data:").trim()
-                        if (dataStr == "[DONE]") break
-                        val json = runCatching { JSONObject(dataStr) }.getOrNull() ?: continue
-                        val choices = json.optJSONArray("choices") ?: continue
-                        val choice0 = choices.optJSONObject(0) ?: continue
-                        val delta = choice0.optJSONObject("delta")?.optString("content")
-                            ?: choice0.optJSONObject("message")?.optString("content")
-                            ?: ""
-                        if (delta.isNotEmpty()) {
-                            accumulated.append(delta)
-                            chunkCount++
-                            val elapsedSec = ((System.currentTimeMillis() - startMs).coerceAtLeast(50L)) / 1000f
-                            val estTokens = (accumulated.length / 4).coerceAtLeast(chunkCount)
-                            val tps = estTokens / elapsedSec
-                            onDelta(accumulated.toString(), estTokens, tps)
-                        }
+            try {
+                val url = URL("$candidateBase/v1/chat/completions")
+                conn = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 4000
+                    readTimeout = 45000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("Accept", "text/event-stream, application/json")
+                    if (secret.isNotBlank()) {
+                        setRequestProperty("X-Cluster-Secret", secret)
+                        setRequestProperty("Authorization", "Bearer $secret")
                     }
                 }
-            } else {
-                val body = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
-                val json = JSONObject(body)
-                val content = json.optJSONArray("choices")
-                    ?.optJSONObject(0)
-                    ?.optJSONObject("message")
-                    ?.optString("content")
-                    .orEmpty()
-                accumulated.append(content)
-                val elapsedSec = ((System.currentTimeMillis() - startMs).coerceAtLeast(50L)) / 1000f
-                val estTokens = (accumulated.length / 4).coerceAtLeast(1)
-                val tps = estTokens / elapsedSec
-                onDelta(accumulated.toString(), estTokens, tps)
-            }
 
-            val totalMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
-            val finalTokens = (accumulated.length / 4).coerceAtLeast(chunkCount.coerceAtLeast(1))
-            val finalTps = finalTokens / (totalMs / 1000f)
-            Result.success(Triple(accumulated.toString(), finalTps, totalMs))
-        } catch (e: Exception) {
-            Result.failure(e)
-        } finally {
-            conn?.disconnect()
+                val msgArray = JSONArray()
+                if (systemPrompt.isNotBlank()) {
+                    msgArray.put(JSONObject().apply {
+                        put("role", "system")
+                        put("content", systemPrompt)
+                    })
+                }
+                messages.forEach { msg ->
+                    msgArray.put(JSONObject().apply {
+                        put("role", msg.role)
+                        put("content", msg.content)
+                    })
+                }
+
+                val payload = JSONObject().apply {
+                    put("model", modelId)
+                    put("stream", true)
+                    put("temperature", temperature.toDouble())
+                    put("messages", msgArray)
+                }
+
+                conn.outputStream.use { os ->
+                    os.write(payload.toString().toByteArray(StandardCharsets.UTF_8))
+                    os.flush()
+                }
+
+                val code = conn.responseCode
+                if (code !in 200..299) {
+                    val errBody = conn.errorStream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
+                    throw IllegalStateException("Master HTTP $code at $candidateBase: ${errBody.take(180).ifBlank { "Request failed" }}")
+                }
+
+                val contentType = conn.contentType.orEmpty().lowercase()
+                val accumulated = StringBuilder()
+                var chunkCount = 0
+
+                if (contentType.contains("text/event-stream")) {
+                    BufferedReader(InputStreamReader(conn.inputStream, StandardCharsets.UTF_8)).use { reader ->
+                        while (currentCoroutineContext().isActive) {
+                            val line = reader.readLine() ?: break
+                            val trimmed = line.trim()
+                            if (!trimmed.startsWith("data:")) continue
+                            val dataStr = trimmed.removePrefix("data:").trim()
+                            if (dataStr == "[DONE]") break
+                            val json = runCatching { JSONObject(dataStr) }.getOrNull() ?: continue
+                            val choices = json.optJSONArray("choices") ?: continue
+                            val choice0 = choices.optJSONObject(0) ?: continue
+                            val delta = choice0.optJSONObject("delta")?.optString("content")
+                                ?: choice0.optJSONObject("message")?.optString("content")
+                                ?: ""
+                            if (delta.isNotEmpty()) {
+                                accumulated.append(delta)
+                                chunkCount++
+                                val elapsedSec = ((System.currentTimeMillis() - startMs).coerceAtLeast(50L)) / 1000f
+                                val estTokens = (accumulated.length / 4).coerceAtLeast(chunkCount)
+                                val tps = estTokens / elapsedSec
+                                onDelta(accumulated.toString(), estTokens, tps)
+                            }
+                        }
+                    }
+                } else {
+                    val body = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+                    val json = JSONObject(body)
+                    val content = json.optJSONArray("choices")
+                        ?.optJSONObject(0)
+                        ?.optJSONObject("message")
+                        ?.optString("content")
+                        .orEmpty()
+                    accumulated.append(content)
+                    val elapsedSec = ((System.currentTimeMillis() - startMs).coerceAtLeast(50L)) / 1000f
+                    val estTokens = (accumulated.length / 4).coerceAtLeast(1)
+                    val tps = estTokens / elapsedSec
+                    onDelta(accumulated.toString(), estTokens, tps)
+                }
+
+                val totalMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+                val finalTokens = (accumulated.length / 4).coerceAtLeast(chunkCount.coerceAtLeast(1))
+                val finalTps = finalTokens / (totalMs / 1000f)
+                return@withContext Result.success(Triple(accumulated.toString(), finalTps, totalMs))
+            } catch (e: Exception) {
+                lastError = e
+            } finally {
+                conn?.disconnect()
+            }
         }
+
+        Result.failure(lastError ?: IllegalStateException("Unable to reach master endpoint"))
     }
 }

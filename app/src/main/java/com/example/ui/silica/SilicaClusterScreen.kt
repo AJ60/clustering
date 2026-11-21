@@ -240,6 +240,18 @@ fun SilicaClusterScreen(
             }
         }
 
+        // 2b. Live Model Sharding & Layer Cache Breakdown
+        item {
+            SilicaLayerShardingCard(
+                clusterSnapshot = uiState.clusterSnapshot,
+                telemetry = tel,
+                activeModelDisplayName = uiState.activeModelDisplayName,
+                isStreamingChat = uiState.isStreamingChat,
+                liveStreamingTokPerSec = uiState.liveStreamingTokPerSec,
+                masterReachable = uiState.masterHealth.reachable
+            )
+        }
+
         // 3. Active & Paired Node Shard Cards
         item {
             Row(

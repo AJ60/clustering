@@ -386,6 +386,18 @@ fun SilicaCommandScreen(
             }
         }
 
+        // 1b. Live Model Sharding & Layer Cache Residency Card
+        item {
+            SilicaLayerShardingCard(
+                clusterSnapshot = uiState.clusterSnapshot,
+                telemetry = tel,
+                activeModelDisplayName = uiState.activeModelDisplayName,
+                isStreamingChat = uiState.isStreamingChat,
+                liveStreamingTokPerSec = uiState.liveStreamingTokPerSec,
+                masterReachable = uiState.masterHealth.reachable
+            )
+        }
+
         // 2. Live Hardware Telemetry Card
         item {
             SectionSurfaceCard(
