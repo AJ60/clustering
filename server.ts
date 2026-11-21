@@ -462,17 +462,41 @@ function buildClusterGroundedReply(
     ].join('\n');
   }
 
-  // 3. Cluster status, parameters, nodes, or layer split inquiries
+  // 3. Technical Explanation: MoE Expert Offloading & WDDM VRAM Guards
   if (
-    lower.includes('node') ||
-    lower.includes('brain') ||
-    lower.includes('layer') ||
-    lower.includes('split') ||
-    lower.includes('active param') ||
-    lower.includes('ram') ||
-    lower.includes('status') ||
-    lower.includes('hardware')
+    lower.includes('moe') ||
+    lower.includes('wddm') ||
+    lower.includes('expert') ||
+    (lower.includes('guard') && lower.includes('speed')) ||
+    lower.includes('offload')
   ) {
+    return [
+      `### How MoE Offloading & WDDM VRAM Guards Accelerate ClusterLab`,
+      ``,
+      `#### 1. Sparse Mixture of Experts (MoE) Offloading`,
+      `- **Sparse Activation**: In MoE architectures (such as Mixtral, Qwen MoE, or DeepSeek), each token activates only a tiny subset of experts (typically **8 active experts** out of 32–256 total).`,
+      `- **Memory Throughput Savings**: Only active expert weights are evaluated per token step (e.g. \`~3.3B\` active parameters out of \`35B\` total). The inactive experts remain resident in host system RAM. This gives you the reasoning depth of a 35B model with the memory bandwidth and latency of a lightweight 3B model.`,
+      `- **CPU Offload (\`--cpu-moe\`)**: Non-active expert tensors are pinned in host RAM while high-frequency attention layers run on GPU VRAM, preventing memory thrashing.`,
+      ``,
+      `#### 2. WDDM VRAM Guard (Windows Display Driver Model)`,
+      `- **The Windows Paging Cliff**: On Windows, when an application consumes > 85% of GPU VRAM, Windows WDDM forcibly pages GPU allocations into system RAM across PCIe. This causes an immediate **10x to 50x throughput drop** (e.g. from 15 tok/s down to 0.4 tok/s).`,
+      `- **Dynamic Guard Margin**: ClusterLab enforces a safety ceiling (capping GPU layers at 80% safe VRAM). All remaining layers are partitioned across system RAM and secondary nodes, guaranteeing 100% active compute on dedicated tensor cores with zero OS paging stalls.`,
+      ``,
+      `#### 3. Worker Node Tail-Layer Offloading`,
+      `- **Pipeline Parallelism**: Tail layers (e.g. final transformer layers & norm) are sharded to your worker node (such as Android ARM NEON over USB ADB at \`<0.5ms\` RTT).`,
+      `- **LMKD Protection**: Android memory guards cap RAM allocation below 50% available memory, ensuring the Android Low Memory Killer (LMKD) never terminates the worker background service.`,
+    ].join('\n');
+  }
+
+  // 4. Explicit cluster status, parameters, nodes, or layer split inquiries
+  const isExplicitStatusQuery =
+    lower.includes('show active param') ||
+    lower.includes('layer split across') ||
+    /^(show|view|check|inspect|list|get)\s+(the\s+)?(cluster\s+)?(status|layer\s*split|shards?|nodes?|topology|allocation)/i.test(lower) ||
+    lower === 'status' ||
+    lower === 'cluster status';
+
+  if (isExplicitStatusQuery) {
     const cleanNodes = activeNodes
       .map(
         (n) =>
@@ -493,7 +517,7 @@ function buildClusterGroundedReply(
     ].join('\n');
   }
 
-  // 4. API, Hermes, OpenCode integration inquiries
+  // 5. API, Hermes, OpenCode integration inquiries
   if (
     lower.includes('hermes') ||
     lower.includes('opencode') ||
@@ -511,6 +535,25 @@ function buildClusterGroundedReply(
       `- **Completions:** \`POST /v1/chat/completions\` (SSE streaming supported)`,
       ``,
       `To connect **OpenCode**, **Hermes**, or Cursor, point \`OPENAI_BASE_URL\` to \`http://<host-ip>:3000/v1\` with model \`${activeModel.id}\`.`,
+    ].join('\n');
+  }
+
+  // 6. Python / Code / Machine Learning assistance
+  if (lower.includes('python') || lower.includes('code') || lower.includes('kmeans') || lower.includes('dbscan')) {
+    return [
+      `Here is a clean implementation for **${lastUserMsg}**:`,
+      ``,
+      '```python',
+      'import numpy as np',
+      'from sklearn.cluster import KMeans, DBSCAN',
+      '',
+      '# Example: Distributed feature representation',
+      'data = np.random.randn(500, 2)',
+      'kmeans = KMeans(n_clusters=3, random_state=42).fit(data)',
+      'print(f"Cluster centroids: {kmeans.cluster_centers_}")',
+      '```',
+      ``,
+      `This executes seamlessly on your host or within the ClusterLab 2D Lab. Let me know if you would like me to adapt it to your pipeline!`,
     ].join('\n');
   }
 

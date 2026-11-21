@@ -57,7 +57,7 @@ function renderInlineFormatting(text: string): React.ReactNode {
       parts.push(
         <code
           key={match.index}
-          className="rounded bg-blue-500/10 dark:bg-blue-400/10 text-blue-600 dark:text-blue-400 px-1.5 py-0.5 font-mono text-[11px] font-semibold border border-blue-500/20"
+          className="rounded bg-slate-200/90 dark:bg-slate-800 text-slate-800 dark:text-slate-200 px-1.5 py-0.5 font-mono text-[11px] font-medium"
         >
           {code}
         </code>
@@ -142,7 +142,7 @@ const FormattedMarkdownMessage: React.FC<{ content: string }> = ({ content }) =>
       elements.push(
         <h4
           key={`h4-${i}`}
-          className="font-display text-xs font-bold text-blue-600 dark:text-blue-400 mt-2 mb-1"
+          className="font-display text-xs font-bold text-amber-500 dark:text-amber-400 mt-2.5 mb-1"
         >
           {renderInlineFormatting(trimmed.slice(5))}
         </h4>
@@ -156,7 +156,7 @@ const FormattedMarkdownMessage: React.FC<{ content: string }> = ({ content }) =>
       elements.push(
         <blockquote
           key={`bq-${i}`}
-          className="border-l-2 border-blue-500 bg-blue-500/5 dark:bg-blue-500/10 rounded-r px-3 py-1.5 my-1.5 text-slate-700 dark:text-slate-300 italic"
+          className="border-l-2 border-amber-500 bg-amber-500/5 dark:bg-amber-500/10 rounded-r px-3 py-1.5 my-1.5 text-slate-700 dark:text-slate-300 italic"
         >
           {renderInlineFormatting(trimmed.slice(2))}
         </blockquote>
@@ -165,19 +165,27 @@ const FormattedMarkdownMessage: React.FC<{ content: string }> = ({ content }) =>
       continue;
     }
 
-    // 5. Bullet list items: - or *
-    if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-      const listItems: string[] = [];
-      while (i < lines.length && (lines[i].trim().startsWith('- ') || lines[i].trim().startsWith('* '))) {
-        listItems.push(lines[i].trim().slice(2));
+    // 5. Bullet or Numbered list items
+    if (/^(\d+\.|\-|\*)\s+/.test(trimmed)) {
+      const listItems: { marker?: string; text: string }[] = [];
+      while (i < lines.length && /^(\d+\.|\-|\*)\s+/.test(lines[i].trim())) {
+        const itemLine = lines[i].trim();
+        const numMatch = itemLine.match(/^(\d+\.)\s+(.*)$/);
+        if (numMatch) {
+          listItems.push({ marker: numMatch[1], text: numMatch[2] });
+        } else {
+          listItems.push({ marker: '•', text: itemLine.replace(/^[-*]\s+/, '') });
+        }
         i++;
       }
       elements.push(
-        <ul key={`ul-${i}`} className="my-1.5 space-y-1 pl-1">
+        <ul key={`ul-${i}`} className="my-1.5 space-y-1.5 pl-1">
           {listItems.map((item, idx) => (
             <li key={idx} className="flex items-start gap-2 text-xs leading-relaxed text-slate-800 dark:text-slate-200">
-              <span className="text-blue-500 font-bold select-none mt-0.5">•</span>
-              <span className="flex-1">{renderInlineFormatting(item)}</span>
+              <span className="text-amber-500 dark:text-amber-400 font-semibold font-mono text-[11px] select-none mt-0.5 shrink-0">
+                {item.marker}
+              </span>
+              <span className="flex-1">{renderInlineFormatting(item.text)}</span>
             </li>
           ))}
         </ul>
@@ -480,8 +488,8 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
               <div
                 className={`max-w-[88%] rounded-xl px-4 py-3 text-xs leading-relaxed ${
                   msg.role === 'user'
-                    ? 'bg-blue-600 text-white shadow-xs whitespace-pre-wrap'
-                    : 'bg-slate-50 dark:bg-[#0B1120] border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 shadow-xs'
+                    ? 'bg-amber-500 text-black font-semibold shadow-xs whitespace-pre-wrap'
+                    : 'bg-[#0B1120] border border-slate-800 text-slate-100 shadow-xs'
                 }`}
               >
                 {msg.role === 'user' ? (

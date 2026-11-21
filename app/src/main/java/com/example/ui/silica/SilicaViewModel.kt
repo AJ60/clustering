@@ -793,30 +793,71 @@ class SilicaViewModel(
             (telemetry.calibration.performanceScore.coerceAtLeast(20) / 8.5f)
         } else 0f
 
-        result += ClusterPeerUi(
-            id = "local_android",
-            label = "${telemetry.deviceModel.trim()} (This Phone)",
-            address = telemetry.bindAddress,
-            roleLabel = if (localIsMaster) "MASTER HUB" else "LOCAL NODE",
-            backendDriver = telemetry.activeBackend.label.substringBefore(" ("),
-            layerRangeLabel = if (localLayers > 0) "L0–L${localLayers - 1} ($localLayers L)" else "Standby",
-            allocatedLayers = localLayers,
-            allocatedMb = telemetry.safeCapMb,
-            estimatedTokPerSec = localTps,
-            latencyMs = 0L,
-            isOnline = localOnline,
-            isLocalDevice = true,
-            isMaster = localIsMaster
-        )
-
-        // Add live nodes reported by Master /api/cluster/state
+        // When Master cluster snapshot is available, reconcile topology to avoid duplicate self-nodes
         if (snapshot != null && snapshot.nodes.isNotEmpty()) {
-            snapshot.nodes.forEach { remote ->
+            val masterNode = snapshot.nodes.firstOrNull { it.isMaster }
+            val phoneNode = snapshot.nodes.firstOrNull { remote ->
+                !remote.isMaster && (
+                    remote.osType.contains("android", ignoreCase = true) ||
+                    remote.label.contains("Redmi", ignoreCase = true) ||
+                    remote.label.contains("Note", ignoreCase = true) ||
+                    remote.label.contains("Phone", ignoreCase = true) ||
+                    remote.id.contains("dev-", ignoreCase = true)
+                )
+            } ?: snapshot.nodes.firstOrNull { !it.isMaster }
+            val otherWorkers = snapshot.nodes.filter { it != masterNode && it != phoneNode }
+
+            // 1. Master Hub Node
+            if (masterNode != null) {
+                result += ClusterPeerUi(
+                    id = "master_${masterNode.id}",
+                    label = masterNode.label,
+                    address = config.masterBaseUrl.removePrefix("http://").removePrefix("https://"),
+                    roleLabel = "MASTER HUB",
+                    backendDriver = masterNode.backendDriver,
+                    layerRangeLabel = if (masterNode.allocatedLayers > 0) {
+                        "L${masterNode.layerStart}–L${masterNode.layerEnd} (${masterNode.allocatedLayers} L)"
+                    } else "Standby",
+                    allocatedLayers = masterNode.allocatedLayers,
+                    allocatedMb = masterNode.allocatedMb,
+                    estimatedTokPerSec = masterNode.estimatedTokPerSec,
+                    latencyMs = masterHealth.latencyMs.coerceAtLeast(1L),
+                    isOnline = true,
+                    isMaster = true
+                )
+            }
+
+            // 2. This Local Device (accurately unified with Master's shard assignment)
+            val phoneLayers = phoneNode?.allocatedLayers ?: localLayers
+            val phoneRange = if (phoneNode != null && phoneNode.allocatedLayers > 0) {
+                "L${phoneNode.layerStart}–L${phoneNode.layerEnd} (${phoneNode.allocatedLayers} L)"
+            } else if (localLayers > 0) {
+                "L0–L${localLayers - 1} ($localLayers L)"
+            } else "Standby"
+
+            result += ClusterPeerUi(
+                id = "local_android",
+                label = "${telemetry.deviceModel.trim()} (This Phone)",
+                address = telemetry.bindAddress,
+                roleLabel = if (localIsMaster) "MASTER HUB" else "LOCAL WORKER",
+                backendDriver = phoneNode?.backendDriver ?: telemetry.activeBackend.label.substringBefore(" ("),
+                layerRangeLabel = phoneRange,
+                allocatedLayers = phoneLayers,
+                allocatedMb = phoneNode?.allocatedMb ?: telemetry.safeCapMb,
+                estimatedTokPerSec = phoneNode?.estimatedTokPerSec ?: localTps,
+                latencyMs = 0L,
+                isOnline = localOnline,
+                isLocalDevice = true,
+                isMaster = localIsMaster
+            )
+
+            // 3. Any additional remote workers (if there are other physical nodes in cluster)
+            otherWorkers.forEach { remote ->
                 result += ClusterPeerUi(
                     id = "master_${remote.id}",
                     label = remote.label,
-                    address = if (remote.isMaster) config.masterBaseUrl.removePrefix("http://").removePrefix("https://") else remote.osType,
-                    roleLabel = if (remote.isMaster) "MASTER HUB" else "REMOTE WORKER",
+                    address = remote.osType,
+                    roleLabel = "REMOTE WORKER",
                     backendDriver = remote.backendDriver,
                     layerRangeLabel = if (remote.allocatedLayers > 0) {
                         "L${remote.layerStart}–L${remote.layerEnd} (${remote.allocatedLayers} L)"
@@ -826,24 +867,43 @@ class SilicaViewModel(
                     estimatedTokPerSec = remote.estimatedTokPerSec,
                     latencyMs = masterHealth.latencyMs.coerceAtLeast(1L),
                     isOnline = true,
-                    isMaster = remote.isMaster
+                    isMaster = false
                 )
             }
-        } else if (masterHealth.reachable) {
+        } else {
+            // Standalone or pre-connection mode
             result += ClusterPeerUi(
-                id = "live_master_http",
-                label = "OpenAI Master Endpoint",
-                address = config.masterBaseUrl.removePrefix("http://").removePrefix("https://"),
-                roleLabel = "MASTER HUB",
-                backendDriver = "OpenAI HTTP/SSE",
-                layerRangeLabel = masterHealth.activeModel ?: config.selectedModelId,
-                allocatedLayers = 16,
-                allocatedMb = 4096L,
-                estimatedTokPerSec = 18.0f,
-                latencyMs = masterHealth.latencyMs.coerceAtLeast(1L),
-                isOnline = true,
-                isMaster = true
+                id = "local_android",
+                label = "${telemetry.deviceModel.trim()} (This Phone)",
+                address = telemetry.bindAddress,
+                roleLabel = if (localIsMaster) "MASTER HUB" else "LOCAL NODE",
+                backendDriver = telemetry.activeBackend.label.substringBefore(" ("),
+                layerRangeLabel = if (localLayers > 0) "L0–L${localLayers - 1} ($localLayers L)" else "Standby",
+                allocatedLayers = localLayers,
+                allocatedMb = telemetry.safeCapMb,
+                estimatedTokPerSec = localTps,
+                latencyMs = 0L,
+                isOnline = localOnline,
+                isLocalDevice = true,
+                isMaster = localIsMaster
             )
+
+            if (masterHealth.reachable) {
+                result += ClusterPeerUi(
+                    id = "live_master_http",
+                    label = "OpenAI Master Endpoint",
+                    address = config.masterBaseUrl.removePrefix("http://").removePrefix("https://"),
+                    roleLabel = "MASTER HUB",
+                    backendDriver = "OpenAI HTTP/SSE",
+                    layerRangeLabel = masterHealth.activeModel ?: config.selectedModelId,
+                    allocatedLayers = 16,
+                    allocatedMb = 4096L,
+                    estimatedTokPerSec = 18.0f,
+                    latencyMs = masterHealth.latencyMs.coerceAtLeast(1L),
+                    isOnline = true,
+                    isMaster = true
+                )
+            }
         }
 
         // Add manually saved peers from Room

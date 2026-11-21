@@ -123,6 +123,14 @@ data class SilicaUiState(
 ) {
     val activeModelDisplayName: String
         get() {
+            val masterModel = clusterSnapshot?.activeModelName?.trim()
+            if (!masterModel.isNullOrBlank()) {
+                return masterModel
+            }
+            val healthModel = masterHealth.activeModel?.trim()
+            if (!healthModel.isNullOrBlank()) {
+                return healthModel
+            }
             if (config.localGgufName.isNotBlank() && config.selectedModelId == "local-gguf") {
                 return config.localGgufName
             }
