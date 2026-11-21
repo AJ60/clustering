@@ -167,16 +167,58 @@ export const ModelsHubPage: React.FC<ModelsHubPageProps> = ({
     }
   };
 
-  const handleFilePicked = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // In modern browsers, file.name and file.size are provided
-    // Construct local model preset
-    const preset = parseLocalGgufModel(file.name, file.size);
+    // 1. Check if this file is already in our scanned local models
+    const matched = localModels.find(
+      (m) =>
+        m.localPath?.toLowerCase().endsWith(file.name.toLowerCase()) ||
+        m.name.toLowerCase() === file.name.replace(/\.gguf$/i, '').toLowerCase() ||
+        (m.localPath && m.localPath.split(/[/\\]/).pop()?.toLowerCase() === file.name.toLowerCase())
+    );
+
+    if (matched && matched.localPath) {
+      onSelectModel(matched);
+      setLocalScanMessage(`Loaded local model: ${matched.name} (${(matched.sizeMb / 1024).toFixed(2)} GB)`);
+      e.target.value = '';
+      return;
+    }
+
+    // 2. Try reading binary header directly from browser File object slice (isomorphic GGUF parser)
+    let headerBytes: Uint8Array | undefined;
+    try {
+      const slice = await file.slice(0, 131072).arrayBuffer();
+      headerBytes = new Uint8Array(slice);
+    } catch {
+      // Non-blocking
+    }
+
+    // 3. Ask server to resolve absolute path for this filename across all model directories
+    try {
+      const res = await fetch('/api/local/models/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: file.name }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.model) {
+          onSelectModel(data.model);
+          setLocalScanMessage(`Loaded "${data.model.name}" (${(data.model.sizeMb / 1024).toFixed(2)} GB)`);
+          e.target.value = '';
+          if (onRefreshLocalModels) void onRefreshLocalModels();
+          return;
+        }
+      }
+    } catch {
+      // Fallback to local parsing
+    }
+
+    const preset = parseLocalGgufModel(file.name, file.size, headerBytes);
     onSelectModel(preset);
-    setLocalScanMessage(`Loaded local file: ${file.name} (${(file.size / (1024 * 1024 * 1024)).toFixed(2)} GB)`);
-    // Clear the input value so the same file can be re-selected if desired
+    setLocalScanMessage(`Loaded: ${preset.name} (${(file.size / (1024 * 1024 * 1024)).toFixed(2)} GB)`);
     e.target.value = '';
   };
 

@@ -1,5 +1,133 @@
 import { ContextLengthOption, GgufArchitecture, GgufModelPreset } from '../types/starCluster';
 
+export interface GgufHeaderMetadata {
+  magic: string;
+  version: number;
+  tensorCount: number;
+  kvCount: number;
+  name?: string;
+  architecture?: string;
+  layers?: number;
+  contextLength?: number;
+  expertCount?: number;
+  expertUsedCount?: number;
+}
+
+/**
+ * Parses binary GGUF header bytes (first 32KB - 128KB) to read true model card metadata.
+ * Works isomorphically in Node.js and in the browser (via Uint8Array / DataView).
+ */
+export function parseGgufBinaryHeader(bytes: Uint8Array): GgufHeaderMetadata | null {
+  if (bytes.length < 24) return null;
+  // Magic bytes: 'GGUF' (0x47, 0x47, 0x55, 0x46)
+  if (bytes[0] !== 0x47 || bytes[1] !== 0x47 || bytes[2] !== 0x55 || bytes[3] !== 0x46) {
+    return null;
+  }
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const version = view.getUint32(4, true);
+  const tensorCount = Number(view.getBigUint64(8, true));
+  const kvCount = Number(view.getBigUint64(16, true));
+
+  let name: string | undefined;
+  let architecture: string | undefined;
+  let layers: number | undefined;
+  let contextLength: number | undefined;
+  let expertCount: number | undefined;
+  let expertUsedCount: number | undefined;
+
+  const maxSearch = Math.min(bytes.length - 8, 131072);
+  const textDecoder = new TextDecoder('utf-8');
+
+  function findSubstr(needle: string): number {
+    const needleBytes = new TextEncoder().encode(needle);
+    outer: for (let i = 24; i <= maxSearch - needleBytes.length; i++) {
+      for (let j = 0; j < needleBytes.length; j++) {
+        if (bytes[i + j] !== needleBytes[j]) continue outer;
+      }
+      return i;
+    }
+    return -1;
+  }
+
+  // 1. Look for block_count (layers)
+  const blockIdx = findSubstr('block_count');
+  if (blockIdx !== -1) {
+    const valOffset = blockIdx + 11 + 4;
+    if (valOffset + 4 <= bytes.length) {
+      const val = view.getUint32(valOffset, true);
+      if (val > 0 && val <= 256) layers = val;
+    }
+  }
+
+  // 2. Look for context_length
+  const ctxIdx = findSubstr('context_length');
+  if (ctxIdx !== -1) {
+    const valOffset = ctxIdx + 14 + 4;
+    if (valOffset + 4 <= bytes.length) {
+      const val = view.getUint32(valOffset, true);
+      if (val >= 512 && val <= 1048576) contextLength = val;
+    }
+  }
+
+  // 3. Look for expert_count / expert_used_count (MoE architecture)
+  const expIdx = findSubstr('expert_count');
+  if (expIdx !== -1) {
+    const valOffset = expIdx + 12 + 4;
+    if (valOffset + 4 <= bytes.length) {
+      const val = view.getUint32(valOffset, true);
+      if (val > 0 && val <= 512) expertCount = val;
+    }
+  }
+  const expUsedIdx = findSubstr('expert_used_count');
+  if (expUsedIdx !== -1) {
+    const valOffset = expUsedIdx + 17 + 4;
+    if (valOffset + 4 <= bytes.length) {
+      const val = view.getUint32(valOffset, true);
+      if (val > 0 && val <= 64) expertUsedCount = val;
+    }
+  }
+
+  // 4. Look for general.name
+  const nameIdx = findSubstr('general.name');
+  if (nameIdx !== -1) {
+    const lenOffset = nameIdx + 12 + 4;
+    if (lenOffset + 8 <= bytes.length) {
+      const len = Number(view.getBigUint64(lenOffset, true));
+      const start = lenOffset + 8;
+      if (len > 0 && len < 128 && start + len <= bytes.length) {
+        name = textDecoder.decode(bytes.subarray(start, start + len)).trim();
+      }
+    }
+  }
+
+  // 5. Look for general.architecture
+  const archIdx = findSubstr('general.architecture');
+  if (archIdx !== -1) {
+    const lenOffset = archIdx + 20 + 4;
+    if (lenOffset + 8 <= bytes.length) {
+      const len = Number(view.getBigUint64(lenOffset, true));
+      const start = lenOffset + 8;
+      if (len > 0 && len < 64 && start + len <= bytes.length) {
+        architecture = textDecoder.decode(bytes.subarray(start, start + len)).trim();
+      }
+    }
+  }
+
+  return {
+    magic: 'GGUF',
+    version,
+    tensorCount,
+    kvCount,
+    name,
+    architecture,
+    layers,
+    contextLength,
+    expertCount,
+    expertUsedCount,
+  };
+}
+
 export function inferGgufQuantFromFilename(filename: string): string {
   const match = filename.match(
     /(IQ[1-4][_-][A-Z0-9]+|Q[0-8][_-][A-Z0-9_]+|Q[0-8]_[01]|FP16|F16|FP32|F32|BF16|TQ[1-2][_-][0-9]|BITNET|1\.58B|B1\.58|TURBOQUANT|TURBO|VQ[_-][0-9A-Z]+)/i
@@ -96,7 +224,6 @@ export function inferGgufParamsFromFilename(filename: string, sizeMb: number): {
   // Infer layer count from parameter count and architecture
   let layers = 32;
   if (architecture === 'Looped') {
-    // Looped models have 12 to 24 distinct layers repeated in loop iterations
     layers = totalParamsB <= 7 ? 16 : 24;
   } else if (totalParamsB <= 2.0) {
     layers = 28;
@@ -120,14 +247,50 @@ export function inferGgufParamsFromFilename(filename: string, sizeMb: number): {
   };
 }
 
-export function parseLocalGgufModel(filePath: string, sizeBytes: number): GgufModelPreset {
+export function parseLocalGgufModel(
+  filePath: string,
+  sizeBytes: number,
+  headerBytes?: Uint8Array
+): GgufModelPreset {
   // Extract clean filename from Windows or Unix path
   const filename = filePath.split(/[/\\]/).pop() || 'model.gguf';
   const sizeMb = Math.max(10, Math.round(sizeBytes / (1024 * 1024)));
   const quant = inferGgufQuantFromFilename(filename);
-  const { totalParamsB, activeParamsB, architecture, layers } = inferGgufParamsFromFilename(filename, sizeMb);
 
-  const cleanName = filename
+  // Fallback heuristic estimation
+  const inferred = inferGgufParamsFromFilename(filename, sizeMb);
+  let totalParamsB = inferred.totalParamsB;
+  let activeParamsB = inferred.activeParamsB;
+  let architecture = inferred.architecture;
+  let layers = inferred.layers;
+  let rawName: string | undefined;
+  let detectedCtx: number | undefined;
+
+  // Try extracting binary header metadata if provided
+  if (headerBytes && headerBytes.length >= 24) {
+    const meta = parseGgufBinaryHeader(headerBytes);
+    if (meta) {
+      if (meta.name) rawName = meta.name;
+      if (meta.layers && meta.layers > 0) layers = meta.layers;
+      if (meta.contextLength && meta.contextLength > 0) detectedCtx = meta.contextLength;
+
+      // Detect architecture from GGUF metadata
+      if (meta.expertCount && meta.expertCount > 0) {
+        architecture = 'MoE';
+        const activeExperts = meta.expertUsedCount || 8;
+        activeParamsB = parseFloat(
+          Math.min(totalParamsB, Math.max(1.5, totalParamsB * (activeExperts / meta.expertCount) * 1.5)).toFixed(1)
+        );
+      } else if (meta.architecture?.includes('moe')) {
+        architecture = 'MoE';
+        activeParamsB = parseFloat(Math.min(totalParamsB, Math.max(1.8, totalParamsB * 0.12)).toFixed(1));
+      } else if (meta.architecture?.includes('bitnet') || meta.architecture?.includes('ternary')) {
+        architecture = 'Ternary';
+      }
+    }
+  }
+
+  const cleanName = rawName || filename
     .replace(/\.gguf$/i, '')
     .replace(/[-_](iq[1-4]|q[0-8]|f16|f32|bf16)[a-z0-9_.-]*/i, '')
     .replace(/[-_]+/g, ' ')
@@ -136,8 +299,15 @@ export function parseLocalGgufModel(filePath: string, sizeBytes: number): GgufMo
   const id = `local-${filename.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
 
   let contextLengthDefault: ContextLengthOption = 8192;
-  if (totalParamsB <= 2) contextLengthDefault = 8192;
-  else if (totalParamsB >= 30) contextLengthDefault = 4096;
+  if (detectedCtx) {
+    contextLengthDefault = detectedCtx >= 32768 ? 16384 : detectedCtx >= 16384 ? 16384 : detectedCtx >= 8192 ? 8192 : 4096;
+  } else if (totalParamsB <= 2) {
+    contextLengthDefault = 8192;
+  } else if (totalParamsB >= 30) {
+    contextLengthDefault = 4096;
+  }
+
+  const archLabel = architecture === 'MoE' ? 'Sparse MoE' : architecture;
 
   return {
     id,
@@ -151,8 +321,8 @@ export function parseLocalGgufModel(filePath: string, sizeBytes: number): GgufMo
     contextLengthDefault,
     hfRepo: `local/${filename}`,
     hfUrl: `file://${filePath.replace(/\\/g, '/')}`,
-    summary: `${(sizeMb / 1024).toFixed(2)} GB · ${layers} layers · Local file on disk`,
-    tags: ['local', 'disk', quant.toLowerCase()],
+    summary: `${(sizeMb / 1024).toFixed(2)} GB · ${layers}L · ${archLabel} · Local PC GGUF`,
+    tags: ['local', 'disk', quant.toLowerCase(), architecture.toLowerCase()],
     isLocal: true,
     localPath: filePath,
   };

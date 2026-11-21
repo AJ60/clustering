@@ -311,20 +311,42 @@ async function auditClusterNetwork(): Promise<ClusterNetworkAuditReport> {
   };
 }
 
+function readGgufHeaderBytes(filePath: string): Uint8Array | undefined {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(131072);
+    const bytesRead = fs.readSync(fd, buf, 0, 131072, 0);
+    fs.closeSync(fd);
+    return new Uint8Array(buf.buffer, buf.byteOffset, bytesRead);
+  } catch {
+    return undefined;
+  }
+}
+
 function scanLocalGgufFiles(customDir?: string): { directory: string; models: GgufModelPreset[] } {
   const models: GgufModelPreset[] = [];
   const searchDirs: string[] = [];
+  const userProfile = process.env.USERPROFILE || process.env.HOME || '';
 
-  if (customDir && fs.existsSync(customDir)) {
-    searchDirs.push(customDir);
+  if (customDir) {
+    const cleaned = customDir.replace(/^["']|["']$/g, '').trim();
+    if (fs.existsSync(cleaned)) {
+      searchDirs.push(cleaned);
+    }
   }
 
-  const userProfile = process.env.USERPROFILE || process.env.HOME || '';
   const defaultDirs = [
     path.join(process.cwd(), 'models'),
+    path.join(userProfile, '.lmstudio', 'models'),
+    path.join(userProfile, '.freetoken', 'models'),
     path.join(userProfile, 'Downloads'),
+    path.join(userProfile, 'Downloads', 'Models'),
+    path.join(userProfile, 'Desktop'),
+    path.join(userProfile, 'OneDrive', 'Desktop'),
     path.join(userProfile, 'models'),
+    path.join(userProfile, '.ollama', 'models'),
     path.join(userProfile, '.cache', 'lm-studio', 'models'),
+    path.join(userProfile, '.cache', 'huggingface', 'hub'),
   ];
 
   for (const d of defaultDirs) {
@@ -334,16 +356,33 @@ function scanLocalGgufFiles(customDir?: string): { directory: string; models: Gg
   }
 
   const primaryDir = searchDirs[0] || path.join(userProfile, 'Downloads');
+  const seenPaths = new Set<string>();
 
-  for (const dir of searchDirs) {
+  function walk(dir: string, depth = 0) {
+    if (depth > 4) return;
     try {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.isFile() && entry.name.toLowerCase().endsWith('.gguf')) {
-          const fullPath = path.join(dir, entry.name);
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          // Skip hidden git / node_modules
+          if (entry.name.startsWith('.') && entry.name !== '.lmstudio' && entry.name !== '.freetoken') continue;
+          if (entry.name === 'node_modules') continue;
+          walk(fullPath, depth + 1);
+        } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.gguf')) {
+          const lowerName = entry.name.toLowerCase();
+          // Filter out auxiliary non-LLM weights (vision mmproj adapters and vocab files)
+          if (lowerName.startsWith('mmproj-') || lowerName.startsWith('ggml-vocab-')) continue;
+          if (seenPaths.has(fullPath.toLowerCase())) continue;
+          seenPaths.add(fullPath.toLowerCase());
+
           try {
             const stat = fs.statSync(fullPath);
-            models.push(parseLocalGgufModel(fullPath, stat.size));
+            // Must be at least 50MB to be an actual LLM model
+            if (stat.size >= 50 * 1024 * 1024) {
+              const headerBuf = readGgufHeaderBytes(fullPath);
+              models.push(parseLocalGgufModel(fullPath, stat.size, headerBuf));
+            }
           } catch {
             // Ignore unreadable files
           }
@@ -354,6 +393,11 @@ function scanLocalGgufFiles(customDir?: string): { directory: string; models: Gg
     }
   }
 
+  for (const dir of searchDirs) {
+    walk(dir, 0);
+  }
+
+  models.sort((a, b) => b.sizeMb - a.sizeMb);
   return { directory: primaryDir, models };
 }
 
@@ -603,10 +647,34 @@ async function createApp() {
 
   app.post('/api/local/models/add', (req, res) => {
     const body = req.body as { filePath?: string } | undefined;
-    const targetPath = body?.filePath?.trim();
+    let targetPath = body?.filePath?.trim() ?? '';
     if (!targetPath) {
       res.status(400).json({ error: 'filePath parameter is required' });
       return;
+    }
+
+    // Strip wrapping quotes copied from Windows Explorer "Copy as Path"
+    targetPath = targetPath.replace(/^["']|["']$/g, '').trim();
+
+    // Expand tilde
+    const userProfile = process.env.USERPROFILE || process.env.HOME || '';
+    if (targetPath.startsWith('~')) {
+      targetPath = path.join(userProfile, targetPath.slice(1));
+    }
+
+    // If file doesn't exist directly, search all known model directories for matching filename or substring
+    if (!fs.existsSync(targetPath)) {
+      const scan = scanLocalGgufFiles();
+      const match = scan.models.find(
+        (m) =>
+          m.localPath?.toLowerCase() === targetPath.toLowerCase() ||
+          m.name.toLowerCase().includes(targetPath.toLowerCase()) ||
+          m.id.toLowerCase().includes(targetPath.toLowerCase()) ||
+          path.basename(m.localPath || '').toLowerCase().includes(targetPath.toLowerCase())
+      );
+      if (match && match.localPath && fs.existsSync(match.localPath)) {
+        targetPath = match.localPath;
+      }
     }
 
     if (!fs.existsSync(targetPath)) {
@@ -616,13 +684,79 @@ async function createApp() {
 
     try {
       const stat = fs.statSync(targetPath);
-      const model = parseLocalGgufModel(targetPath, stat.size);
+      const headerBuf = readGgufHeaderBytes(targetPath);
+      const model = parseLocalGgufModel(targetPath, stat.size, headerBuf);
       res.json({ ok: true, model });
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Failed to inspect local GGUF file',
       });
     }
+  });
+
+  // 1-Click Zero-Config Model Activation: automatically determines tuning and node distribution
+  app.post('/api/models/activate', (req, res) => {
+    const body = req.body as { modelId?: string; filePath?: string; model?: GgufModelPreset } | undefined;
+    let targetModel: GgufModelPreset | undefined = body?.model;
+
+    if (!targetModel && body?.filePath) {
+      let targetPath = body.filePath.replace(/^["']|["']$/g, '').trim();
+      const userProfile = process.env.USERPROFILE || process.env.HOME || '';
+      if (targetPath.startsWith('~')) {
+        targetPath = path.join(userProfile, targetPath.slice(1));
+      }
+      if (!fs.existsSync(targetPath)) {
+        const scan = scanLocalGgufFiles();
+        const match = scan.models.find(
+          (m) =>
+            m.localPath?.toLowerCase() === targetPath.toLowerCase() ||
+            m.name.toLowerCase().includes(targetPath.toLowerCase()) ||
+            path.basename(m.localPath || '').toLowerCase().includes(targetPath.toLowerCase())
+        );
+        if (match && match.localPath) targetPath = match.localPath;
+      }
+
+      if (fs.existsSync(targetPath)) {
+        const stat = fs.statSync(targetPath);
+        const headerBuf = readGgufHeaderBytes(targetPath);
+        targetModel = parseLocalGgufModel(targetPath, stat.size, headerBuf);
+      }
+    }
+
+    if (!targetModel && body?.modelId) {
+      targetModel = GGUF_MODEL_PRESETS.find((p) => p.id === body.modelId);
+      if (!targetModel) {
+        const scan = scanLocalGgufFiles();
+        targetModel = scan.models.find((m) => m.id === body.modelId);
+      }
+    }
+
+    if (!targetModel) {
+      res.status(404).json({ error: 'Model could not be found or inspected' });
+      return;
+    }
+
+    // Automatically configure tuning & sharding plan based on model card & architecture
+    const tuningConfig = createDefaultBackendTuningConfig(targetModel);
+    const liveHardware = probeLiveHardware();
+    const telemetry = createInitialTelemetryState(false);
+    const nodes = buildStarClusterNodes(telemetry, 'LIVE_CLUSTER', 0, tuningConfig, liveHardware);
+    const plan = planStarCluster(nodes, targetModel, undefined, tuningConfig);
+
+    clusterSnapshot = {
+      activeModel: targetModel,
+      clusterMode: 'LIVE_CLUSTER',
+      tuningConfig,
+      plan,
+      upstreamBaseUrl: clusterSnapshot.upstreamBaseUrl,
+      updatedAt: new Date().toISOString(),
+    };
+
+    res.json({
+      ok: true,
+      snapshot: clusterSnapshot,
+      message: `Activated ${targetModel.name} (${targetModel.architecture} · ${targetModel.layers}L) sharded across ${plan.nodes.length} node(s)`,
+    });
   });
 
   app.get('/api/cluster/state', (_req, res) => {

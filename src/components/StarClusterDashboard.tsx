@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   DeviceTelemetryState,
 } from '../types/clustering';
@@ -15,6 +15,7 @@ import {
   ThermalState,
 } from '../types/starCluster';
 import { buildTunedOsBackendProfile } from '../domain/backendTuner';
+import { parseLocalGgufModel } from '../data/localModelsScanner';
 import {
   Activity,
   AlertTriangle,
@@ -24,16 +25,21 @@ import {
   Cpu,
   Download,
   Flame,
+  FolderOpen,
+  HardDrive,
   Layers,
   Radio,
   RefreshCw,
+  Search,
   Server,
   ShieldAlert,
   SlidersHorizontal,
   Smartphone,
   Snowflake,
+  Sparkles,
   Terminal,
   Usb,
+  X,
   Zap,
 } from 'lucide-react';
 
@@ -53,6 +59,9 @@ interface StarClusterDashboardProps {
   onOpenChat?: () => void;
   onOpen2DLab?: () => void;
   onRefreshHardware?: () => void;
+  onAddLocalModelPath?: (filePath: string) => Promise<GgufModelPreset | null>;
+  onRefreshLocalModels?: (dir?: string) => Promise<void>;
+  onActivateModel?: (model: GgufModelPreset) => Promise<void>;
 }
 
 function thermalLabel(state: ThermalState): {
@@ -104,6 +113,9 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
   onOpenChat,
   onOpen2DLab,
   onRefreshHardware,
+  onAddLocalModelPath,
+  onRefreshLocalModels,
+  onActivateModel,
 }) => {
   const masterNode =
     clusterPlan.nodes.find((n) => n.role === 'Master') ?? clusterPlan.nodes[0];
@@ -119,6 +131,128 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
   const [copiedAdb, setCopiedAdb] = useState(false);
   const [networkAudit, setNetworkAudit] = useState<ClusterNetworkAuditReport | null>(null);
   const [isAuditing, setIsAuditing] = useState(false);
+  const [showQuickLoadModal, setShowQuickLoadModal] = useState(false);
+  const [quickPathInput, setQuickPathInput] = useState('');
+  const [quickLoading, setQuickLoading] = useState(false);
+  const [quickFeedback, setQuickFeedback] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleActivateModel = async (model: GgufModelPreset) => {
+    if (onActivateModel) {
+      await onActivateModel(model);
+    } else {
+      onSelectModel(model);
+    }
+  };
+
+  const handleQuickAddPath = async (pathOrName: string) => {
+    if (!pathOrName.trim()) return;
+    setQuickLoading(true);
+    setQuickFeedback(null);
+    try {
+      if (onAddLocalModelPath) {
+        const model = await onAddLocalModelPath(pathOrName.trim());
+        if (model) {
+          await handleActivateModel(model);
+          setQuickFeedback(`Loaded & Auto-Distributed "${model.name}" (${(model.sizeMb / 1024).toFixed(1)} GB)`);
+          window.setTimeout(() => {
+            setShowQuickLoadModal(false);
+            setQuickFeedback(null);
+            setQuickPathInput('');
+          }, 1100);
+          return;
+        }
+      }
+      const res = await fetch('/api/local/models/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: pathOrName.trim() }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.model) {
+          await handleActivateModel(data.model);
+          if (onRefreshLocalModels) void onRefreshLocalModels();
+          setQuickFeedback(`Loaded & Auto-Distributed "${data.model.name}"`);
+          window.setTimeout(() => {
+            setShowQuickLoadModal(false);
+            setQuickFeedback(null);
+            setQuickPathInput('');
+          }, 1100);
+          return;
+        }
+      }
+      setQuickFeedback('Model not found at that path. Select from detected list or browse.');
+    } catch {
+      setQuickFeedback('Failed to load GGUF file.');
+    } finally {
+      setQuickLoading(false);
+    }
+  };
+
+  const handleQuickFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setQuickLoading(true);
+    setQuickFeedback(`Analyzing ${file.name}...`);
+    try {
+      const matched = localModels.find(
+        (m) =>
+          m.localPath?.toLowerCase().endsWith(file.name.toLowerCase()) ||
+          m.name.toLowerCase() === file.name.replace(/\.gguf$/i, '').toLowerCase() ||
+          (m.localPath && m.localPath.split(/[/\\]/).pop()?.toLowerCase() === file.name.toLowerCase())
+      );
+      if (matched) {
+        await handleActivateModel(matched);
+        setQuickFeedback(`Loaded "${matched.name}"`);
+        window.setTimeout(() => {
+          setShowQuickLoadModal(false);
+          setQuickFeedback(null);
+        }, 1100);
+        return;
+      }
+
+      let headerBytes: Uint8Array | undefined;
+      try {
+        const slice = await file.slice(0, 131072).arrayBuffer();
+        headerBytes = new Uint8Array(slice);
+      } catch {
+        // Non-blocking
+      }
+
+      const res = await fetch('/api/local/models/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: file.name }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.model) {
+          await handleActivateModel(data.model);
+          if (onRefreshLocalModels) void onRefreshLocalModels();
+          setQuickFeedback(`Loaded "${data.model.name}"`);
+          window.setTimeout(() => {
+            setShowQuickLoadModal(false);
+            setQuickFeedback(null);
+          }, 1100);
+          return;
+        }
+      }
+
+      const parsed = parseLocalGgufModel(file.name, file.size, headerBytes);
+      await handleActivateModel(parsed);
+      setQuickFeedback(`Loaded "${parsed.name}"`);
+      window.setTimeout(() => {
+        setShowQuickLoadModal(false);
+        setQuickFeedback(null);
+      }, 1100);
+    } catch {
+      setQuickFeedback('Error parsing GGUF file.');
+    } finally {
+      setQuickLoading(false);
+      e.target.value = '';
+    }
+  };
   const [healthStatus, setHealthStatus] = useState<{
     tested: boolean;
     loading: boolean;
@@ -230,7 +364,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
               value={activeModel.id}
               onChange={(e) => {
                 const chosen = presetOptions.find((m) => m.id === e.target.value);
-                if (chosen) onSelectModel(chosen);
+                if (chosen) void handleActivateModel(chosen);
               }}
               className="rounded-lg border border-slate-700 bg-[#0B1120] px-3 py-2 text-xs font-semibold text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
             >
@@ -251,6 +385,16 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                 ))}
               </optgroup>
             </select>
+
+            <button
+              type="button"
+              onClick={() => setShowQuickLoadModal(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-gradient-to-r from-amber-500/20 to-amber-600/20 hover:from-amber-500/30 hover:to-amber-600/30 text-amber-300 border border-amber-500/40 transition-all hover:scale-[1.02] shadow-xs shrink-0"
+              title="1-Click Load Any Local GGUF Model from PC"
+            >
+              <FolderOpen className="w-3.5 h-3.5 text-amber-400" />
+              <span>Load Local GGUF</span>
+            </button>
           </div>
 
           {activeModel.isLocal && (
@@ -369,6 +513,77 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
               <span>Inference Chat</span>
             </button>
           )}
+        </div>
+      </section>
+
+      {/* 1.5 Auto-Pilot Intelligent Resource Distribution Status Banner */}
+      <section className="rounded-xl border border-amber-500/30 bg-gradient-to-r from-[#0C1220] via-[#080E1A] to-[#0C1220] p-4 shadow-sm">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="flex items-start sm:items-center gap-3">
+            <div className="p-2.5 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-400 shrink-0">
+              <Sparkles className="w-5 h-5 text-amber-400 animate-pulse" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-bold text-slate-100 flex items-center gap-1.5">
+                  ✨ Auto-Pilot Cluster Active
+                </span>
+                <span className="text-[10px] font-mono-num font-bold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                  Zero-Config Auto-Sharding
+                </span>
+                <span className="text-[10px] font-mono-num px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+                  {activeModel.architecture === 'MoE' ? 'Sparse MoE (8 active experts)' : activeModel.architecture}
+                </span>
+                {activeModel.isLocal && (
+                  <span className="text-[10px] font-mono-num px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                    Local Disk
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-300 mt-1">
+                Model <strong className="text-white">{activeModel.name}</strong> ({activeModel.quant} · {activeModel.layers} layers · {(activeModel.sizeMb / 1024).toFixed(1)} GB) automatically distributed:
+                <span className="text-cyan-300 font-semibold ml-1.5">
+                  {masterNode?.label.split(' ')[0]} ({masterNode?.allocatedLayers}L / {masterNode?.sharePct}%)
+                </span>
+                {workerNodes.length > 0 && (
+                  <>
+                    {' + '}
+                    <span className="text-emerald-300 font-semibold">
+                      {workerNodes.map((w) => `${w.label.split(' ')[0]} (${w.allocatedLayers}L / ${w.sharePct}%)`).join(', ')}
+                    </span>
+                  </>
+                )}
+                {' · '}
+                <span className="text-amber-400 font-medium">
+                  {tuningConfig.moeCpuOffload ? '--cpu-moe ' : ''}
+                  {tuningConfig.enableFlashAttn ? '--flash-attn ' : ''}
+                  LMKD RAM Guard Active
+                </span>
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0 self-end md:self-auto">
+            {onRefreshHardware && (
+              <button
+                type="button"
+                onClick={onRefreshHardware}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700 transition-colors shadow-xs"
+                title="Re-probe connected nodes and automatically rebalance layers"
+              >
+                <RefreshCw className="w-3.5 h-3.5 text-slate-400" />
+                <span>Auto-Rebalance</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowQuickLoadModal(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 transition-colors shadow-xs"
+            >
+              <FolderOpen className="w-3.5 h-3.5 text-amber-400" />
+              <span>Switch / Load GGUF</span>
+            </button>
+          </div>
         </div>
       </section>
 
@@ -886,6 +1101,174 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
             </div>
           </div>
         </section>
+      )}
+
+      {/* Quick Load Local GGUF Modal */}
+      {showQuickLoadModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+          <div className="w-full max-w-2xl rounded-2xl border border-slate-700/80 bg-[#0B1120] p-6 shadow-2xl space-y-5 text-slate-100 max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-400">
+                  <FolderOpen className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <span>1-Click Load Local GGUF</span>
+                    <span className="text-[10px] font-mono-num font-bold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                      Auto-Pilot
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Loads any GGUF from your machine. Layers, architecture, and node distributions configure automatically.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowQuickLoadModal(false);
+                  setQuickFeedback(null);
+                }}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {quickFeedback && (
+              <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-semibold flex items-center gap-2 shrink-0">
+                <Sparkles className="w-4 h-4 shrink-0 text-amber-400 animate-pulse" />
+                <span>{quickFeedback}</span>
+              </div>
+            )}
+
+            <div className="space-y-4 overflow-y-auto pr-1 flex-1">
+              {/* Option A: Browse File Directly */}
+              <div
+                onClick={() => fileInputRef.current?.click()}
+                className="cursor-pointer rounded-xl border-2 border-dashed border-slate-700 hover:border-amber-500 bg-[#070A12] p-5 text-center transition-all hover:bg-slate-900/40 group"
+              >
+                <FolderOpen className="w-8 h-8 text-slate-400 group-hover:text-amber-400 mx-auto mb-2 transition-colors" />
+                <div className="text-sm font-semibold text-slate-200 group-hover:text-amber-300">
+                  Browse Any .gguf File on Your PC
+                </div>
+                <p className="text-xs text-slate-400 mt-1">
+                  Click to select a file from LM Studio, FreeToken, Downloads, or any folder
+                </p>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".gguf"
+                  onChange={handleQuickFilePicked}
+                  className="hidden"
+                />
+              </div>
+
+              {/* Option B: Direct Path or Name */}
+              <div className="space-y-1.5">
+                <label className="block text-xs font-semibold text-slate-300">
+                  Or Paste GGUF File Path / Model Name
+                </label>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Search className="w-3.5 h-3.5 absolute left-3 top-3 text-slate-500" />
+                    <input
+                      type="text"
+                      value={quickPathInput}
+                      onChange={(e) => setQuickPathInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void handleQuickAddPath(quickPathInput);
+                      }}
+                      placeholder="e.g. C:\Users\name\.lmstudio\models\model.gguf or Qwen3"
+                      className="w-full rounded-lg border border-slate-700 bg-[#070A12] pl-8 pr-3 py-2 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    disabled={quickLoading || !quickPathInput.trim()}
+                    onClick={() => void handleQuickAddPath(quickPathInput)}
+                    className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-black text-xs font-bold transition-colors whitespace-nowrap shadow-xs"
+                  >
+                    {quickLoading ? 'Loading...' : 'Load & Distribute'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Option C: Detected Local Models List */}
+              <div className="space-y-2 pt-2 border-t border-slate-800">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                    <HardDrive className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Detected GGUF Models on PC ({localModels.length})</span>
+                  </span>
+                  {onRefreshLocalModels && (
+                    <button
+                      type="button"
+                      onClick={() => void onRefreshLocalModels()}
+                      className="text-xs text-amber-400 hover:text-amber-300 flex items-center gap-1 font-semibold"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>Rescan Drives</span>
+                    </button>
+                  )}
+                </div>
+
+                {localModels.length === 0 ? (
+                  <div className="rounded-lg border border-slate-800 bg-[#070A12] p-4 text-center text-xs text-slate-400">
+                    No models found in default folders. Use "Browse" above to pick your model file directly.
+                  </div>
+                ) : (
+                  <div className="max-h-60 overflow-y-auto space-y-2 pr-1">
+                    {localModels.map((m) => {
+                      const isCurrent = activeModel.id === m.id;
+                      return (
+                        <div
+                          key={m.id}
+                          className={`rounded-lg border p-3 flex items-center justify-between gap-3 transition-colors ${
+                            isCurrent
+                              ? 'border-amber-500/50 bg-amber-500/10'
+                              : 'border-slate-800 bg-[#070A12] hover:border-slate-700'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-xs text-slate-100 truncate">
+                                {m.name}
+                              </span>
+                              <span className="text-[10px] font-mono-num px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 shrink-0">
+                                {m.architecture === 'MoE' ? 'Sparse MoE' : m.architecture}
+                              </span>
+                              <span className="text-[10px] font-mono-num text-slate-400 shrink-0">
+                                {m.layers}L · {m.quant}
+                              </span>
+                            </div>
+                            <div className="text-[11px] font-mono-num text-slate-500 truncate mt-0.5" title={m.localPath}>
+                              {(m.sizeMb / 1024).toFixed(1)} GB · {m.localPath || 'Local PC file'}
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            disabled={isCurrent}
+                            onClick={() => void handleActivateModel(m)}
+                            className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all shrink-0 ${
+                              isCurrent
+                                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 cursor-default'
+                                : 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-black shadow-xs'
+                            }`}
+                          >
+                            {isCurrent ? 'Active Shard' : '⚡ 1-Click Load'}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

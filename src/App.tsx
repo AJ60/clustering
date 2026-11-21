@@ -228,6 +228,32 @@ export function App() {
     }));
   };
 
+  const handleActivateModel = async (model: GgufModelPreset) => {
+    handleSelectModel(model);
+    try {
+      const res = await fetch('/api/models/activate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          modelId: model.id,
+          filePath: model.localPath,
+          model,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.snapshot?.activeModel) {
+          setActiveModel(data.snapshot.activeModel);
+        }
+        if (data.snapshot?.tuningConfig) {
+          setTuningConfig(data.snapshot.tuningConfig);
+        }
+      }
+    } catch {
+      // Non-blocking fallback
+    }
+  };
+
   const handleUpdateTuningConfig = (patch: Partial<BackendTuningConfig>) => {
     setTuningConfig((prev) => ({ ...prev, ...patch }));
   };
@@ -426,7 +452,7 @@ export function App() {
           <ModelsHubPage
             clusterPlan={clusterPlan}
             activeModel={activeModel}
-            onSelectModel={handleSelectModel}
+            onSelectModel={handleActivateModel}
             onOpenChat={() => setActiveTab('CHAT')}
             localModels={localModels}
             onRefreshLocalModels={fetchLocalModels}
@@ -578,6 +604,7 @@ export function App() {
             liveHardware={liveHardware}
             localModels={localModels}
             onSelectModel={handleSelectModel}
+            onActivateModel={handleActivateModel}
             onChangeClusterMode={setClusterMode}
             onUpdateTuningConfig={handleUpdateTuningConfig}
             onUpdateSecret={node.updateClusterSecret}
@@ -587,6 +614,8 @@ export function App() {
               state.developerModeEnabled ? () => setActiveTab('LAB') : undefined
             }
             onRefreshHardware={fetchLiveHardware}
+            onAddLocalModelPath={handleAddLocalModelPath}
+            onRefreshLocalModels={fetchLocalModels}
           />
         )}
       </main>
