@@ -466,6 +466,7 @@ export function App() {
             upstreamBaseUrl={upstreamBaseUrl}
             onChangeUpstreamBaseUrl={setUpstreamBaseUrl}
             onOpenModels={() => setActiveTab('MODELS')}
+            onUpdateTuningConfig={handleUpdateTuningConfig}
           />
         ) : activeTab === 'API' ? (
           <ApiHarnessConnectPage

@@ -15,13 +15,15 @@ export function createDefaultBackendTuningConfig(
   return {
     windowsAccelerator: 'CUDA 12.6',
     linuxAccelerator: 'CUDA 12.6',
-    contextLength: model.contextLengthDefault ?? 8192,
-    kvCacheQuant: model.sizeMb > 16000 ? 'q8_0' : 'f16',
+    contextLength: model.contextLengthDefault ?? 16384,
+    kvCacheQuant: model.sizeMb > 14000 || model.totalParamsB >= 20 ? 'q8_0' : 'f16',
     enableFlashAttn: model.architecture !== 'Ternary',
     moeCpuOffload: model.architecture === 'MoE',
     windowsNoMmap: model.sizeMb <= 20000,
     linuxMlock: model.sizeMb <= 22000,
     linuxNumaInterleave: true,
+    enableContextShift: true,
+    contBatching: true,
   };
 }
 
@@ -151,6 +153,12 @@ export function buildTunedOsBackendProfile(
   if (tensorSplitArg) {
     cliFlags.push(`--tensor-split ${tensorSplitArg}`);
   }
+  if (config.enableContextShift !== false) {
+    cliFlags.push('--ctx-shift');
+  }
+  if (config.contBatching !== false) {
+    cliFlags.push('--cont-batching');
+  }
 
   const envVars: Array<{ key: string; value: string; reason: string }> = isWindows
     ? [
@@ -274,6 +282,7 @@ export function buildTunedOsBackendProfile(
     batchSize,
     ubatchSize,
     kvCacheMb,
+    contextShiftEnabled: config.enableContextShift !== false,
     expectedTokPerSec,
     envVars,
     cliFlags,

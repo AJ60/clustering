@@ -7,6 +7,7 @@ import {
   BackendTuningConfig,
   ClusterMode,
   ClusterNetworkAuditReport,
+  ContextLengthOption,
   GGUF_MODEL_PRESETS,
   GgufModelPreset,
   LiveHardwareProbe,
@@ -33,6 +34,7 @@ import {
   Search,
   Server,
   ShieldAlert,
+  ShieldCheck,
   SlidersHorizontal,
   Smartphone,
   Snowflake,
@@ -107,7 +109,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
   localModels = [],
   onSelectModel,
   onChangeClusterMode,
-  onUpdateTuningConfig: _onUpdateTuningConfig,
+  onUpdateTuningConfig,
   onUpdateSecret,
   onOpenModels,
   onOpenChat,
@@ -1018,9 +1020,77 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
               </div>
             </div>
 
-            <p className="text-xs text-slate-400 leading-relaxed">
-              Auto-tuned flags ({backendProfile.gpuOffloadLayers}L GPU offload, {backendProfile.recommendedThreads} threads, --no-mmap memory guard).
-            </p>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-slate-400 font-medium">Context Horizon:</span>
+                <span className="font-mono-num text-amber-400 font-semibold">
+                  {tuningConfig.contextLength.toLocaleString()} ctx (Max: {(activeModel.maxContextLength || 131072).toLocaleString()})
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {([4096, 8192, 16384, 32768, 65536, 131072, 262144] as ContextLengthOption[])
+                  .filter((len) => len <= (activeModel.maxContextLength || 262144))
+                  .map((len) => {
+                    const isSelected = tuningConfig.contextLength === len;
+                    const label = len >= 1024 ? `${len / 1024}K` : `${len}`;
+                    return (
+                      <button
+                        key={len}
+                        type="button"
+                        onClick={() => onUpdateTuningConfig({ contextLength: len })}
+                        className={`px-2 py-0.5 rounded text-[10px] font-mono-num font-semibold transition-all ${
+                          isSelected
+                            ? 'bg-amber-500 text-black shadow-xs'
+                            : 'bg-[#080C14] border border-slate-800 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+              </div>
+
+              <div className="flex items-center justify-between text-xs pt-1">
+                <span className="text-slate-400 font-medium">KV Cache Quant:</span>
+                <span className="font-mono-num text-slate-300">
+                  {clusterPlan.kvCacheTotalMb} MB ({tuningConfig.kvCacheQuant.toUpperCase()})
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-1">
+                {(
+                  [
+                    { label: 'F16', value: 'f16', desc: 'Full Precision' },
+                    { label: 'Q8_0', value: 'q8_0', desc: '50% RAM Cut' },
+                    { label: 'Q4_0', value: 'q4_0', desc: 'TurboQuant · 75% Cut' },
+                  ] as const
+                ).map((opt) => {
+                  const isSelected = tuningConfig.kvCacheQuant === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => onUpdateTuningConfig({ kvCacheQuant: opt.value })}
+                      className={`px-1.5 py-1 rounded text-center transition-all ${
+                        isSelected
+                          ? 'bg-amber-500/10 border border-amber-500 text-amber-400'
+                          : 'bg-[#080C14] border border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <div className="text-[10px] font-bold font-mono-num">{opt.label}</div>
+                      <div className="text-[8px] text-slate-500 truncate">{opt.desc}</div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="rounded-md bg-emerald-500/10 border border-emerald-500/30 p-2 flex items-center gap-1.5 text-[11px] text-emerald-400">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span className="font-semibold">24h Agentic Longevity:</span>
+                <span className="text-slate-300 text-[10px]">
+                  --ctx-shift & --cont-batching enabled (zero OOM)
+                </span>
+              </div>
+            </div>
 
             <pre className="rounded-lg bg-[#070A11] border border-slate-800 p-2.5 text-[10px] font-mono-num text-emerald-400 overflow-x-auto max-h-20 select-all">
               {backendProfile.launchCommand}

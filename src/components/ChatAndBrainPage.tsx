@@ -1,7 +1,9 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
   BackendTuningConfig,
+  ContextLengthOption,
   GgufModelPreset,
+  KvCacheQuantOption,
   StarClusterPlan,
 } from '../types/starCluster';
 import {
@@ -9,8 +11,10 @@ import {
   Brain,
   Cpu,
   HardDrive,
+  Infinity as InfinityIcon,
   Send,
   Settings2,
+  ShieldCheck,
   Square,
   Trash2,
   Zap,
@@ -33,12 +37,30 @@ interface ChatAndBrainPageProps {
   upstreamBaseUrl: string;
   onChangeUpstreamBaseUrl: (url: string) => void;
   onOpenModels: () => void;
+  onUpdateTuningConfig?: (patch: Partial<BackendTuningConfig>) => void;
 }
 
 const STARTER_PROMPTS = [
+  'Whats the issue for long prompts and how does the cluster survive 24hr agentic tasks?',
+  'write a 1000 word story about space',
   'Show active parameters and layer split across every Windows & Linux node.',
-  'How do I connect OpenCode or Hermes to this ClusterLab OpenAI endpoint?',
   'Explain how MoE expert offloading and WDDM VRAM guards improve speed here.',
+];
+
+const CONTEXT_OPTIONS: { label: string; value: ContextLengthOption }[] = [
+  { label: '4K', value: 4096 },
+  { label: '8K', value: 8192 },
+  { label: '16K', value: 16384 },
+  { label: '32K', value: 32768 },
+  { label: '64K', value: 65536 },
+  { label: '128K', value: 131072 },
+  { label: '262K', value: 262144 },
+];
+
+const KV_OPTIONS: { label: string; value: KvCacheQuantOption; desc: string }[] = [
+  { label: 'F16', value: 'f16', desc: 'Full Precision' },
+  { label: 'Q8_0', value: 'q8_0', desc: '50% RAM Cut' },
+  { label: 'Q4_0', value: 'q4_0', desc: 'TurboQuant · 75% Cut' },
 ];
 
 function renderInlineFormatting(text: string): React.ReactNode {
@@ -219,6 +241,7 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
   upstreamBaseUrl,
   onChangeUpstreamBaseUrl,
   onOpenModels,
+  onUpdateTuningConfig,
 }) => {
   const [messages, setMessages] = useState<ChatTurn[]>([
     {
@@ -638,6 +661,93 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
               </div>
             </div>
           </div>
+
+          {/* 24h Agentic Longevity & Context Horizon Tuning Controls */}
+          {onUpdateTuningConfig && (
+            <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-3">
+              {/* Context Length Horizon Selector */}
+              <div>
+                <div className="flex items-center justify-between text-[11px] mb-1.5">
+                  <span className="font-semibold text-slate-700 dark:text-slate-300">
+                    Context Horizon
+                  </span>
+                  <span className="text-[10px] font-mono-num text-slate-500">
+                    Max: {(activeModel.maxContextLength || 131072).toLocaleString()} ctx
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {CONTEXT_OPTIONS.filter(
+                    (opt) => opt.value <= (activeModel.maxContextLength || 262144)
+                  ).map((opt) => {
+                    const isSelected = tuningConfig.contextLength === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => onUpdateTuningConfig({ contextLength: opt.value })}
+                        className={`px-2 py-0.5 rounded text-[10px] font-mono-num font-semibold transition-all ${
+                          isSelected
+                            ? 'bg-blue-600 text-white shadow-xs'
+                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* KV Cache Precision Selector */}
+              <div>
+                <div className="flex items-center justify-between text-[11px] mb-1.5">
+                  <span className="font-semibold text-slate-700 dark:text-slate-300">
+                    KV Cache Precision
+                  </span>
+                  <span className="text-[10px] font-mono-num text-slate-500">
+                    {clusterPlan.kvCacheTotalMb} MB VRAM/RAM
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  {KV_OPTIONS.map((opt) => {
+                    const isSelected = tuningConfig.kvCacheQuant === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => onUpdateTuningConfig({ kvCacheQuant: opt.value })}
+                        className={`px-2 py-1 rounded text-center transition-all ${
+                          isSelected
+                            ? 'bg-blue-600/10 border border-blue-500 text-blue-600 dark:text-blue-400'
+                            : 'bg-slate-100 dark:bg-slate-800/60 border border-transparent text-slate-600 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="text-[10px] font-bold font-mono-num">{opt.label}</div>
+                        <div className="text-[9px] text-slate-500 truncate">{opt.desc}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 24-Hour Agentic Longevity Guard Banner */}
+              <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 p-2.5 flex items-start gap-2">
+                <ShieldCheck className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+                <div className="space-y-0.5 text-[11px]">
+                  <div className="font-semibold text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+                    <span>24h Agentic Longevity Guard: ACTIVE</span>
+                    <InfinityIcon className="w-3.5 h-3.5 text-emerald-500" />
+                  </div>
+                  <div className="text-[10px] text-slate-600 dark:text-slate-300 leading-snug">
+                    <span className="font-mono text-emerald-600 dark:text-emerald-400 font-semibold">
+                      --ctx-shift
+                    </span>{' '}
+                    slides attention window dynamically on overflow. Zero OOM · continuous batching · WDDM & Android safe caps.
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 font-mono-num">

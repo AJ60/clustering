@@ -298,13 +298,17 @@ export function parseLocalGgufModel(
 
   const id = `local-${filename.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
 
-  let contextLengthDefault: ContextLengthOption = 8192;
+  const maxContextLength = detectedCtx || (totalParamsB <= 2 ? 32768 : 131072);
+  let contextLengthDefault: ContextLengthOption = 16384;
   if (detectedCtx) {
-    contextLengthDefault = detectedCtx >= 32768 ? 16384 : detectedCtx >= 16384 ? 16384 : detectedCtx >= 8192 ? 8192 : 4096;
+    if (detectedCtx >= 131072) contextLengthDefault = 131072;
+    else if (detectedCtx >= 65536) contextLengthDefault = 65536;
+    else if (detectedCtx >= 32768) contextLengthDefault = 32768;
+    else if (detectedCtx >= 16384) contextLengthDefault = 16384;
+    else if (detectedCtx >= 8192) contextLengthDefault = 8192;
+    else contextLengthDefault = 4096;
   } else if (totalParamsB <= 2) {
     contextLengthDefault = 8192;
-  } else if (totalParamsB >= 30) {
-    contextLengthDefault = 4096;
   }
 
   const archLabel = architecture === 'MoE' ? 'Sparse MoE' : architecture;
@@ -319,6 +323,7 @@ export function parseLocalGgufModel(
     totalParamsB,
     activeParamsB,
     contextLengthDefault,
+    maxContextLength,
     hfRepo: `local/${filename}`,
     hfUrl: `file://${filePath.replace(/\\/g, '/')}`,
     summary: `${(sizeMb / 1024).toFixed(2)} GB · ${layers}L · ${archLabel} · Local PC GGUF`,

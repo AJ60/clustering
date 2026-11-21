@@ -74,7 +74,7 @@ export type ModelPresetId =
   | 'dense-70b'
   | 'custom-hf';
 
-export type ContextLengthOption = 4096 | 8192 | 16384 | 32768;
+export type ContextLengthOption = 4096 | 8192 | 16384 | 32768 | 65536 | 131072 | 262144;
 export type KvCacheQuantOption = 'f16' | 'q8_0' | 'q4_0';
 export type BackendOsTarget = 'windows' | 'linux';
 
@@ -91,6 +91,7 @@ export interface GgufModelPreset {
   totalParamsB: number;
   activeParamsB: number;
   contextLengthDefault: ContextLengthOption;
+  maxContextLength?: number;
   hfRepo: string;
   hfUrl: string;
   summary: string;
@@ -284,6 +285,8 @@ export interface BackendTuningConfig {
   windowsNoMmap: boolean;
   linuxMlock: boolean;
   linuxNumaInterleave: boolean;
+  enableContextShift?: boolean;
+  contBatching?: boolean;
 }
 
 export interface TunedOsBackendProfile {
@@ -293,6 +296,7 @@ export interface TunedOsBackendProfile {
   recommendedThreads: number;
   gpuOffloadLayers: number;
   vramSafetyReserveMb: number;
+  contextShiftEnabled?: boolean;
   ramSafetyReserveMb: number;
   batchSize: number;
   ubatchSize: number;
