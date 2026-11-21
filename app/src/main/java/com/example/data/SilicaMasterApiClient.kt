@@ -57,7 +57,7 @@ object SilicaMasterApiClient {
 
     fun normalizeBaseUrl(raw: String): String {
         val trimmed = raw.trim().trimEnd('/')
-        if (trimmed.isEmpty()) return "http://127.0.0.1:8080"
+        if (trimmed.isEmpty()) return "http://127.0.0.1:3000"
         val withScheme = if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
             trimmed
         } else {
@@ -74,8 +74,18 @@ object SilicaMasterApiClient {
         withContext(Dispatchers.IO) {
             val normalized = normalizeBaseUrl(baseUrl)
             val start = System.currentTimeMillis()
-            // Try /health first, then fall back to /v1/models (standard llama-server)
-            val candidates = listOf("$normalized/health", "$normalized/v1/models")
+            val altPortUrl = when {
+                normalized.contains(":8080") -> normalized.replace(":8080", ":3000")
+                normalized.contains(":3000") -> normalized.replace(":3000", ":8080")
+                else -> "$normalized:3000"
+            }
+            // Auto-probe port 3000 (ClusterLab Master) and port 8080 (llama-server)
+            val candidates = listOf(
+                "$normalized/health",
+                "$altPortUrl/health",
+                "$normalized/v1/models",
+                "$altPortUrl/v1/models"
+            )
             for (endpoint in candidates) {
                 val res = runCatching {
                     val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
@@ -155,56 +165,67 @@ object SilicaMasterApiClient {
     suspend fun fetchClusterState(baseUrl: String, secret: String): MasterClusterSnapshot? =
         withContext(Dispatchers.IO) {
             val normalized = normalizeBaseUrl(baseUrl)
-            runCatching {
-                val conn = (URL("$normalized/api/cluster/state").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 2500
-                    readTimeout = 3000
-                    setRequestProperty("Accept", "application/json")
-                    if (secret.isNotBlank()) {
-                        setRequestProperty("X-Cluster-Secret", secret)
-                    }
-                }
-                try {
-                    if (conn.responseCode !in 200..299) return@runCatching null
-                    val text = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
-                    val root = JSONObject(text)
-                    val activeModelObj = root.optJSONObject("activeModel")
-                    val modelName = activeModelObj?.optString("name").orEmpty()
-                        .ifBlank { activeModelObj?.optString("id").orEmpty() }
-                    val plan = root.optJSONObject("plan") ?: return@runCatching null
-                    val nodesArr = plan.optJSONArray("nodes") ?: JSONArray()
-                    val parsedNodes = buildList {
-                        for (i in 0 until nodesArr.length()) {
-                            val n = nodesArr.optJSONObject(i) ?: continue
-                            add(
-                                RemoteClusterNodeInfo(
-                                    id = n.optString("id", "node_$i"),
-                                    label = n.optString("label", "Cluster Node ${i + 1}"),
-                                    osType = n.optString("osType", "LAN"),
-                                    backendDriver = n.optString("backendDriver", "CPU/RPC"),
-                                    layerStart = n.optInt("layerStart", 0),
-                                    layerEnd = n.optInt("layerEnd", 0),
-                                    allocatedLayers = n.optInt("allocatedLayers", 0),
-                                    allocatedMb = n.optLong("allocatedMb", 0L),
-                                    estimatedTokPerSec = n.optDouble("estimatedTokPerSec", 0.0).toFloat(),
-                                    isMaster = n.optBoolean("isMaster", i == 0)
-                                )
-                            )
+            val altUrl = when {
+                normalized.contains(":8080") -> normalized.replace(":8080", ":3000")
+                normalized.contains(":3000") -> normalized.replace(":3000", ":8080")
+                else -> "$normalized:3000"
+            }
+            val urls = listOf("$normalized/api/cluster/state", "$altUrl/api/cluster/state")
+            for (targetUrl in urls) {
+                val snapshot = runCatching {
+                    val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 2500
+                        readTimeout = 3000
+                        setRequestProperty("Accept", "application/json")
+                        if (secret.isNotBlank()) {
+                            setRequestProperty("X-Cluster-Secret", secret)
                         }
                     }
-                    MasterClusterSnapshot(
-                        activeModelName = modelName,
-                        totalSafePoolMb = plan.optLong("totalSafePoolMb", 0L),
-                        neededMb = plan.optLong("neededMb", 0L),
-                        fitVerdict = plan.optString("fitVerdict", "READY"),
-                        estimatedClusterTokPerSec = plan.optDouble("estimatedClusterTokPerSec", 0.0).toFloat(),
-                        nodes = parsedNodes
-                    )
-                } finally {
-                    conn.disconnect()
-                }
-            }.getOrNull()
+                    try {
+                        if (conn.responseCode !in 200..299) return@runCatching null
+                        val text = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+                        val root = JSONObject(text)
+                        val activeModelObj = root.optJSONObject("activeModel")
+                        val modelName = activeModelObj?.optString("name").orEmpty()
+                            .ifBlank { activeModelObj?.optString("id").orEmpty() }
+                        val plan = root.optJSONObject("plan") ?: return@runCatching null
+                        val nodesArr = plan.optJSONArray("nodes") ?: JSONArray()
+                        val parsedNodes = buildList {
+                            for (i in 0 until nodesArr.length()) {
+                                val n = nodesArr.optJSONObject(i) ?: continue
+                                add(
+                                    RemoteClusterNodeInfo(
+                                        id = n.optString("id", "node_$i"),
+                                        label = n.optString("label", "Cluster Node ${i + 1}"),
+                                        osType = n.optString("osType", "LAN"),
+                                        backendDriver = n.optString("backendDriver", "CPU/RPC"),
+                                        layerStart = n.optInt("layerStart", 0),
+                                        layerEnd = n.optInt("layerEnd", 0),
+                                        allocatedLayers = n.optInt("allocatedLayers", 0),
+                                        allocatedMb = n.optLong("allocatedMb", 0L),
+                                        estimatedTokPerSec = n.optDouble("estimatedTokPerSec", 0.0).toFloat(),
+                                        isMaster = n.optBoolean("isMaster", i == 0)
+                                    )
+                                )
+                            }
+                        }
+                        MasterClusterSnapshot(
+                            activeModelName = modelName,
+                            totalSafePoolMb = plan.optLong("totalSafePoolMb", 0L),
+                            neededMb = plan.optLong("neededMb", 0L),
+                            fitVerdict = plan.optString("fitVerdict", "READY"),
+                            estimatedClusterTokPerSec = plan.optDouble("estimatedClusterTokPerSec", 0.0).toFloat(),
+                            nodes = parsedNodes
+                        )
+                    } finally {
+                        conn.disconnect()
+                    }
+                }.getOrNull()
+
+                if (snapshot != null) return@withContext snapshot
+            }
+            null
         }
 
     suspend fun probePeerTcp(address: String, timeoutMs: Int = 900): Long? =

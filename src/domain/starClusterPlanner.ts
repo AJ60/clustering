@@ -47,8 +47,9 @@ export function computeVramSafeCap(rawFreeVramMb: number, vramCapPct = 90): numb
 
 export function scoreClusterNode(node: StarClusterNode): number {
   const vramBonus = 1 + (Math.max(0, node.vramFreeMb) / 1024) * 0.22;
-  const num = (0.7 * node.memBwGbps + 10.0 * node.computeTflops) * vramBonus;
-  const den = 1.0 + 0.15 * node.rttMs + 2.0 * node.pktLossPct;
+  const linkBonus = node.linkType === 'Local' ? 1.4 : node.linkType === 'USB-C Tunnel' ? 1.15 : 0.88;
+  const num = (0.7 * node.memBwGbps + 10.0 * node.computeTflops) * vramBonus * linkBonus;
+  const den = 1.0 + 0.15 * Math.max(0.1, node.rttMs) + 2.0 * node.pktLossPct;
   return Number((num / Math.max(0.01, den)).toFixed(2));
 }
 
@@ -214,18 +215,23 @@ export function buildStarClusterNodes(
   if (mode === 'LIVE_CLUSTER') {
     if (liveHardware?.connectedDevices && liveHardware.connectedDevices.length > 0) {
       const realWorkers: StarClusterNode[] = liveHardware.connectedDevices.map((dev) => ({
-        nodeId: `dev-${dev.id}`,
+        nodeId: dev.id.startsWith('dev-') ? dev.id : `dev-${dev.id}`,
         label: `${dev.model} (Worker)`,
         role: 'Worker',
         platform: dev.platform === 'Android' ? 'Android' : 'Desktop',
         osType: dev.platform === 'Android' ? 'android' : 'linux',
-        backendDriver: dev.platform === 'Android' ? 'Snapdragon 675 / NEON' : 'CPU OpenBLAS',
+        backendDriver:
+          dev.platform === 'Android'
+            ? 'Snapdragon / ARM NEON'
+            : dev.vramMb && dev.vramMb > 0
+              ? 'CUDA / ROCm'
+              : 'CPU OpenBLAS',
         linkType: dev.transport.includes('USB') ? 'USB-C Tunnel' : 'Wi-Fi LAN',
         totalRamMb: dev.totalRamMb ?? 3700,
-        availableRamMb: 1800,
-        vramFreeMb: 0,
-        memBwGbps: 24.0,
-        computeTflops: 1.4,
+        availableRamMb: dev.availableRamMb ?? 1800,
+        vramFreeMb: dev.vramMb ?? 0,
+        memBwGbps: dev.computeTflops && dev.computeTflops > 10 ? 900.0 : dev.platform === 'Android' ? 24.0 : 44.0,
+        computeTflops: dev.computeTflops ?? (dev.platform === 'Android' ? 1.4 : 3.5),
         physicalCores: 8,
         rttMs: dev.rttMs ?? 0.8,
         pktLossPct: 0,
@@ -380,12 +386,14 @@ export function planStarCluster(
   // Greedy capacity-aware MB distribution across active star nodes
   let remainingNeed = Math.min(model.sizeMb, totalSafePoolMb);
   const sortedActive = [...active].sort((a, b) => b.score - a.score);
+  const maxNodeShareRatio = active.length > 1 ? 0.85 : 1.0;
+  const minAllocPerNode = Math.max(64, Math.floor(model.sizeMb / (active.length * 4)));
 
   for (const node of sortedActive) {
     if (remainingNeed <= 0 || totalScore <= 0) break;
     const targetWeight = node.score / totalScore;
-    const proportionalMb = Math.round(model.sizeMb * targetWeight);
-    const alloc = Math.min(node.effectiveCapMb, Math.max(256, proportionalMb), remainingNeed);
+    const proportionalMb = Math.round(model.sizeMb * targetWeight * maxNodeShareRatio);
+    const alloc = Math.min(node.effectiveCapMb, Math.max(minAllocPerNode, proportionalMb), remainingNeed);
     node.allocatedMb = alloc;
     remainingNeed -= alloc;
   }
@@ -407,23 +415,35 @@ export function planStarCluster(
   // Assign contiguous layer slices + Active Parameters + KV + Backend tuning per node
   let assignedLayersSum = 0;
   const activeWithAlloc = evaluated.filter((n) => n.allocatedMb > 0);
+  const mbPerLayer = model.sizeMb / Math.max(1, model.layers);
+
   activeWithAlloc.forEach((node, idx) => {
     const ratio = node.allocatedMb / totalAllocated;
     node.sharePct = Math.round(ratio * 100);
+    let targetLayers = Math.max(1, Math.round(ratio * model.layers));
     if (idx === activeWithAlloc.length - 1) {
-      node.allocatedLayers = Math.max(1, model.layers - assignedLayersSum);
-    } else {
-      node.allocatedLayers = Math.max(1, Math.round(ratio * model.layers));
-      assignedLayersSum += node.allocatedLayers;
+      targetLayers = Math.max(1, model.layers - assignedLayersSum);
     }
+
+    // Strictly bound Android mobile workers to their safe RAM capacity
+    if (node.platform === 'Android') {
+      const maxAndroidLayers = Math.max(1, Math.floor(node.effectiveCapMb / Math.max(1, mbPerLayer)));
+      targetLayers = Math.min(targetLayers, maxAndroidLayers);
+    }
+
+    node.allocatedLayers = targetLayers;
+    assignedLayersSum += node.allocatedLayers;
   });
 
-  // Ensure sum equals model.layers cleanly if rounding slightly overshot
+  // Ensure sum equals model.layers cleanly without violating mobile safe caps
   if (activeWithAlloc.length > 0) {
     const sumLayers = activeWithAlloc.reduce((acc, n) => acc + n.allocatedLayers, 0);
     if (sumLayers !== model.layers) {
-      const largest = [...activeWithAlloc].sort((a, b) => b.allocatedLayers - a.allocatedLayers)[0];
-      largest.allocatedLayers = Math.max(1, largest.allocatedLayers + (model.layers - sumLayers));
+      // Absorb discrepancy into high-headroom Desktop/Master node
+      const masterOrLargest =
+        activeWithAlloc.find((n) => n.role === 'Master') ??
+        [...activeWithAlloc].sort((a, b) => b.effectiveCapMb - a.effectiveCapMb)[0];
+      masterOrLargest.allocatedLayers = Math.max(1, masterOrLargest.allocatedLayers + (model.layers - sumLayers));
     }
   }
 
@@ -439,7 +459,6 @@ export function planStarCluster(
       node.totalParamsB = Number((model.totalParamsB * layerShare).toFixed(2));
       node.kvCacheMb = Math.max(32, Math.round(totalKvCacheMb * layerShare));
 
-      const mbPerLayer = model.sizeMb / Math.max(1, model.layers);
       const gpuLayerCap =
         node.safeVramMb > 0 ? Math.floor(node.safeVramMb / Math.max(1, mbPerLayer)) : 0;
       node.nglLayers = Math.min(node.allocatedLayers, gpuLayerCap);
@@ -454,15 +473,19 @@ export function planStarCluster(
       if (node.osType === 'windows') {
         flags.push(effectiveConfig.windowsAccelerator);
         if (effectiveConfig.windowsNoMmap) flags.push('--no-mmap');
-        flags.push('WDDM Guard -450MB');
+        flags.push('WDDM Guard');
       } else if (node.osType === 'linux') {
         flags.push(effectiveConfig.linuxAccelerator);
-        if (effectiveConfig.linuxNumaInterleave) flags.push('numactl --interleave');
+        if (effectiveConfig.linuxNumaInterleave) flags.push('numactl');
         if (effectiveConfig.linuxMlock) flags.push('--mlock');
       } else if (node.osType === 'android') {
         flags.push('<=50% Safe RAM');
-        flags.push('USB/NEON');
+        flags.push(node.linkType === 'USB-C Tunnel' ? 'USB 0.5ms' : 'Wi-Fi');
       }
+      if (model.architecture === 'Looped') flags.push('Looped');
+      if (model.architecture === 'Ternary') flags.push('BitNet 1.58b');
+      if (model.architecture === 'TurboQuant') flags.push('TurboQuant');
+      if (model.architecture === 'MoE') flags.push('Sparse MoE');
       if (effectiveConfig.enableFlashAttn && node.nglLayers > 0) flags.push('FlashAttn');
       if (effectiveConfig.moeCpuOffload && model.architecture === 'MoE') flags.push('--cpu-moe');
       node.tuningFlags = flags;

@@ -41,7 +41,7 @@ interface ModelsHubPageProps {
 }
 
 type ModelHubTab = 'local' | 'hf';
-type CatalogFilter = 'all' | 'fits' | 'moe' | 'coding' | 'ternary';
+type CatalogFilter = 'all' | 'fits' | 'moe' | 'coding' | 'ternary' | 'turboquant' | 'looped';
 type SortMode = 'fit' | 'downloads';
 
 export const ModelsHubPage: React.FC<ModelsHubPageProps> = ({
@@ -210,6 +210,8 @@ export const ModelsHubPage: React.FC<ModelsHubPageProps> = ({
         if (filter === 'fits') return fit.canLoadCleanly;
         if (filter === 'moe') return model.architecture === 'MoE';
         if (filter === 'ternary') return model.architecture === 'Ternary';
+        if (filter === 'turboquant') return model.architecture === 'TurboQuant';
+        if (filter === 'looped') return model.architecture === 'Looped';
         if (filter === 'coding') {
           return (
             model.tags.some((t) => /code|coding|hermes|opencode|tool/i.test(t)) ||
@@ -456,6 +458,8 @@ export const ModelsHubPage: React.FC<ModelsHubPageProps> = ({
                       ['moe', 'MoE'],
                       ['coding', 'Coding'],
                       ['ternary', 'Ternary'],
+                      ['turboquant', 'TurboQuant'],
+                      ['looped', 'Looped'],
                     ] as const
                   ).map(([key, label]) => (
                     <button

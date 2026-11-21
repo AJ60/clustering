@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 import child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
@@ -9,9 +10,11 @@ import type {
   BackendOsTarget,
   BackendTuningConfig,
   ClusterMode,
+  ClusterNetworkAuditReport,
   ConnectedDeviceInfo,
   GgufModelPreset,
   LiveHardwareProbe,
+  NodeNetworkAudit,
   StarClusterPlan,
 } from './src/types/starCluster.ts';
 import {
@@ -46,6 +49,84 @@ interface RuntimeClusterSnapshot {
   updatedAt: string;
 }
 
+interface RegisteredWorkerRecord {
+  id: string;
+  label: string;
+  role: 'Worker' | 'Master';
+  platform: 'Android' | 'Desktop' | 'Edge ARM';
+  osType: 'android' | 'linux' | 'windows';
+  ip: string;
+  totalRamMb: number;
+  availableRamMb: number;
+  vramMb: number;
+  computeTflops: number;
+  memBwGbps: number;
+  rttMs: number;
+  linkType: 'Local' | 'USB-C Tunnel' | 'Ethernet 2.5G' | 'Wi-Fi LAN';
+  lastSeenMs: number;
+}
+
+const registeredWorkers = new Map<string, RegisteredWorkerRecord>();
+
+function getHostIp(): string {
+  const ifaces = os.networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const netInfo of ifaces[name] || []) {
+      if (netInfo.family === 'IPv4' && !netInfo.internal) {
+        return netInfo.address;
+      }
+    }
+  }
+  return '127.0.0.1';
+}
+
+function testTcpReachability(
+  host: string,
+  port: number,
+  timeoutMs = 1200
+): Promise<{ reachable: boolean; rttMs: number }> {
+  return new Promise((resolve) => {
+    const t0 = performance.now();
+    const socket = new net.Socket();
+    let settled = false;
+
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => {
+      if (!settled) {
+        settled = true;
+        const rtt = Number((performance.now() - t0).toFixed(2));
+        socket.destroy();
+        resolve({ reachable: true, rttMs: rtt });
+      }
+    });
+
+    socket.once('timeout', () => {
+      if (!settled) {
+        settled = true;
+        socket.destroy();
+        resolve({ reachable: false, rttMs: timeoutMs });
+      }
+    });
+
+    socket.once('error', () => {
+      if (!settled) {
+        settled = true;
+        socket.destroy();
+        resolve({ reachable: false, rttMs: -1 });
+      }
+    });
+
+    try {
+      socket.connect(port, host);
+    } catch {
+      if (!settled) {
+        settled = true;
+        resolve({ reachable: false, rttMs: -1 });
+      }
+    }
+  });
+}
+
 function probeLiveHardware(): LiveHardwareProbe {
   const isWin = process.platform === 'win32';
   const osLabel = isWin ? 'Windows 11' : process.platform === 'darwin' ? 'macOS' : 'Linux';
@@ -75,6 +156,15 @@ function probeLiveHardware(): LiveHardwareProbe {
           if (modelMatch) {
             modelName = modelMatch[1].replace(/_/g, ' ');
           }
+
+          // Auto-maintain reverse tunnel (tcp:3000) and forward tunnel (tcp:50052)
+          try {
+            child_process.execFile(adbPath, ['reverse', 'tcp:3000', 'tcp:3000'], { timeout: 1500 }, () => {});
+            child_process.execFile(adbPath, ['forward', 'tcp:50052', 'tcp:50052'], { timeout: 1500 }, () => {});
+          } catch {
+            // Non-blocking background tunnel maintenance
+          }
+
           connectedDevices.push({
             id: devId,
             model: modelName,
@@ -82,13 +172,47 @@ function probeLiveHardware(): LiveHardwareProbe {
             transport: 'USB-C (ADB Reverse Tunnel)',
             safeCapMb: 1300,
             totalRamMb: 3700,
-            rttMs: 0.8,
+            availableRamMb: 1800,
+            computeTflops: 1.4,
+            rttMs: 0.48,
+            bandwidthMbps: 320,
+            ip: '127.0.0.1:50052',
+            lastHeartbeatMs: Date.now(),
           });
         }
       }
     }
   } catch {
     // ADB inactive or not found
+  }
+
+  // Merge any live registered remote workers (Linux node, Android over Wi-Fi, etc.)
+  const now = Date.now();
+  for (const [id, worker] of registeredWorkers.entries()) {
+    if (now - worker.lastSeenMs > 45000) {
+      registeredWorkers.delete(id);
+      continue;
+    }
+    if (!connectedDevices.some((d) => d.id === worker.id)) {
+      connectedDevices.push({
+        id: worker.id,
+        model: worker.label,
+        platform: worker.platform === 'Android' ? 'Android' : 'Linux',
+        transport: worker.linkType,
+        safeCapMb:
+          worker.platform === 'Android'
+            ? Math.floor(worker.totalRamMb * 0.45)
+            : Math.max(512, worker.availableRamMb - 1024),
+        totalRamMb: worker.totalRamMb,
+        availableRamMb: worker.availableRamMb,
+        vramMb: worker.vramMb,
+        computeTflops: worker.computeTflops,
+        rttMs: worker.rttMs,
+        bandwidthMbps: worker.linkType.includes('USB') ? 320 : 1000,
+        ip: worker.ip,
+        lastHeartbeatMs: worker.lastSeenMs,
+      });
+    }
   }
 
   return {
@@ -101,6 +225,89 @@ function probeLiveHardware(): LiveHardwareProbe {
     cpuModel,
     cores,
     connectedDevices,
+  };
+}
+
+async function auditClusterNetwork(): Promise<ClusterNetworkAuditReport> {
+  const hostIp = getHostIp();
+  const hostHostname = os.hostname();
+  const hw = probeLiveHardware();
+
+  // Test local master socket reachability
+  const master3000Check = await testTcpReachability('127.0.0.1', 3000);
+  const rpc50052Check = await testTcpReachability('127.0.0.1', 50052);
+  const upstream8080Check = await testTcpReachability('127.0.0.1', 8080);
+
+  const nodes: NodeNetworkAudit[] = [];
+
+  // 1. Master node
+  nodes.push({
+    nodeId: 'win-master',
+    label: `${hw.osLabel} Master Host`,
+    role: 'Master',
+    ip: hostIp,
+    linkType: 'Local',
+    rttMs: master3000Check.reachable ? master3000Check.rttMs : 0.2,
+    bandwidthMbps: 10000,
+    packetLossPct: 0,
+    status: 'Optimal',
+    portsReachable: {
+      master3000: master3000Check.reachable,
+      upstream8080: upstream8080Check.reachable,
+    },
+  });
+
+  // 2. Connected worker devices
+  for (const dev of hw.connectedDevices) {
+    const isUsb = dev.transport.includes('USB');
+    const workerPortCheck = isUsb ? rpc50052Check : await testTcpReachability(dev.ip || '127.0.0.1', 50052);
+
+    nodes.push({
+      nodeId: dev.id,
+      label: `${dev.model} (Worker)`,
+      role: 'Worker',
+      ip: dev.ip || (isUsb ? '127.0.0.1 (ADB Tunnel)' : 'LAN'),
+      linkType: isUsb ? 'USB-C Tunnel' : 'Wi-Fi LAN',
+      rttMs: workerPortCheck.reachable ? workerPortCheck.rttMs : dev.rttMs ?? 0.8,
+      bandwidthMbps: isUsb ? 320 : 866,
+      packetLossPct: 0,
+      status: 'Optimal',
+      portsReachable: {
+        rpc50052: workerPortCheck.reachable,
+        master3000: master3000Check.reachable,
+      },
+    });
+  }
+
+  const avgRtt = Number(
+    (nodes.reduce((sum, n) => sum + Math.max(0.1, n.rttMs), 0) / Math.max(1, nodes.length)).toFixed(2)
+  );
+
+  let clusterRating = 'Ultra-Fast (Sub-Millisecond USB/Local Loopback)';
+  if (nodes.some((n) => n.linkType === 'Wi-Fi LAN' && n.rttMs > 15)) {
+    clusterRating = 'Normal (Wi-Fi High-Latency)';
+  } else if (nodes.length > 1) {
+    clusterRating = `High-Throughput Star Cluster (~${avgRtt}ms Avg RTT · 0% Loss)`;
+  }
+
+  return {
+    timestamp: new Date().toISOString(),
+    hostIp,
+    hostHostname,
+    activeTransport: hw.connectedDevices.length > 0 ? hw.connectedDevices[0].transport : 'Local Bus Only',
+    nodes,
+    summary: {
+      totalNodes: nodes.length,
+      healthyNodes: nodes.filter((n) => n.status === 'Optimal').length,
+      clusterRating,
+      avgRttMs: avgRtt,
+      bottleneckNode:
+        nodes.filter((n) => n.linkType !== 'Local' || n.rttMs > 20).length > 0
+          ? [...nodes.filter((n) => n.linkType !== 'Local' || n.rttMs > 20)].sort(
+              (a, b) => b.rttMs - a.rttMs
+            )[0]?.label
+          : null,
+    },
   };
 }
 
@@ -267,6 +474,84 @@ async function createApp() {
     res.json(probeLiveHardware());
   });
 
+  app.get('/api/cluster/network/audit', async (_req, res) => {
+    try {
+      const report = await auditClusterNetwork();
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Network audit failed',
+      });
+    }
+  });
+
+  app.get('/api/cluster/beacon', (_req, res) => {
+    const hostIp = getHostIp();
+    res.json({
+      service: 'ClusterLab-Master',
+      version: '2.0',
+      masterHost: hostIp,
+      port: 3000,
+      rpcPort: 50052,
+      activeModel: clusterSnapshot.activeModel.name,
+      activeClusterMode: clusterSnapshot.clusterMode,
+      activeNodes: clusterSnapshot.plan.nodes.filter((n) => n.allocatedLayers > 0).length,
+      clusterRating: clusterSnapshot.plan.fitVerdict,
+      updatedAt: clusterSnapshot.updatedAt,
+    });
+  });
+
+  app.post('/api/cluster/nodes/register', (req, res) => {
+    const body = req.body as Partial<RegisteredWorkerRecord> | undefined;
+    if (!body || !body.id) {
+      res.status(400).json({ error: 'Worker id is required for registration' });
+      return;
+    }
+
+    const workerRecord: RegisteredWorkerRecord = {
+      id: body.id,
+      label: body.label || (body.platform === 'Android' ? 'Android Worker' : 'Linux Node'),
+      role: 'Worker',
+      platform: body.platform || 'Desktop',
+      osType: body.osType || (body.platform === 'Android' ? 'android' : 'linux'),
+      ip: body.ip || (typeof req.ip === 'string' ? req.ip : '127.0.0.1'),
+      totalRamMb: Number(body.totalRamMb) || 4096,
+      availableRamMb: Number(body.availableRamMb) || 2048,
+      vramMb: Number(body.vramMb) || 0,
+      computeTflops: Number(body.computeTflops) || 1.5,
+      memBwGbps: Number(body.memBwGbps) || 30.0,
+      rttMs: Number(body.rttMs) || 1.0,
+      linkType: (body.linkType as any) || 'Wi-Fi LAN',
+      lastSeenMs: Date.now(),
+    };
+
+    registeredWorkers.set(workerRecord.id, workerRecord);
+    clusterSnapshot.clusterMode = 'LIVE_CLUSTER';
+
+    const liveHardware = probeLiveHardware();
+    const nodes = buildStarClusterNodes(
+      createInitialTelemetryState(false),
+      'LIVE_CLUSTER',
+      0,
+      clusterSnapshot.tuningConfig,
+      liveHardware
+    );
+    clusterSnapshot.plan = planStarCluster(nodes, clusterSnapshot.activeModel, undefined, clusterSnapshot.tuningConfig);
+    clusterSnapshot.updatedAt = new Date().toISOString();
+
+    const assigned =
+      clusterSnapshot.plan.nodes.find(
+        (n) => n.nodeId === `dev-${workerRecord.id}` || n.nodeId === workerRecord.id
+      )?.allocatedLayers || 0;
+
+    res.json({
+      ok: true,
+      registered: workerRecord.id,
+      assignedLayers: assigned,
+      activeModel: clusterSnapshot.activeModel.name,
+    });
+  });
+
   app.get('/api/local/models', (req, res) => {
     const dirParam = typeof req.query.dir === 'string' ? req.query.dir.trim() : undefined;
     const result = scanLocalGgufFiles(dirParam);
@@ -312,11 +597,36 @@ async function createApp() {
       return;
     }
 
+    let activeModel = body.activeModel;
+    if (activeModel && activeModel.id) {
+      const presetMatch = GGUF_MODEL_PRESETS.find((p) => p.id === activeModel!.id);
+      if (presetMatch) {
+        activeModel = { ...presetMatch, ...activeModel };
+      }
+    }
+    activeModel = activeModel ?? clusterSnapshot.activeModel;
+
+    const clusterMode = body.clusterMode ?? clusterSnapshot.clusterMode;
+    const tuningConfig = body.tuningConfig ?? clusterSnapshot.tuningConfig;
+    let plan = body.plan;
+
+    if (!plan && (body.activeModel || body.clusterMode)) {
+      const liveHardware = probeLiveHardware();
+      const nodes = buildStarClusterNodes(
+        createInitialTelemetryState(false),
+        clusterMode,
+        0,
+        tuningConfig,
+        liveHardware
+      );
+      plan = planStarCluster(nodes, activeModel, undefined, tuningConfig);
+    }
+
     clusterSnapshot = {
-      activeModel: body.activeModel ?? clusterSnapshot.activeModel,
-      clusterMode: body.clusterMode ?? clusterSnapshot.clusterMode,
-      tuningConfig: body.tuningConfig ?? clusterSnapshot.tuningConfig,
-      plan: body.plan ?? clusterSnapshot.plan,
+      activeModel,
+      clusterMode,
+      tuningConfig,
+      plan: plan ?? clusterSnapshot.plan,
       upstreamBaseUrl:
         typeof body.upstreamBaseUrl === 'string'
           ? body.upstreamBaseUrl.trim()

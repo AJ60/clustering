@@ -133,6 +133,60 @@ describe('serverApi Endpoints', () => {
     assert.equal(resNonExistent.status, 404);
   });
 
+  it('GET /api/cluster/network/audit returns comprehensive audit of host and worker nodes', async () => {
+    const res = await fetch(`${baseUrl}/api/cluster/network/audit`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      hostIp: string;
+      nodes: Array<{ nodeId: string; rttMs: number; bandwidthMbps: number }>;
+      summary: { totalNodes: number; clusterRating: string };
+    };
+    assert.ok(typeof body.hostIp === 'string');
+    assert.ok(Array.isArray(body.nodes));
+    assert.ok(body.nodes.length >= 1);
+    assert.ok(body.summary.totalNodes >= 1);
+    assert.ok(body.summary.clusterRating.length > 0);
+  });
+
+  it('GET /api/cluster/beacon returns discovery beacon with master coordinates', async () => {
+    const res = await fetch(`${baseUrl}/api/cluster/beacon`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      service: string;
+      masterHost: string;
+      port: number;
+      activeModel: string;
+    };
+    assert.equal(body.service, 'ClusterLab-Master');
+    assert.ok(body.port === 3000);
+    assert.ok(typeof body.activeModel === 'string');
+  });
+
+  it('POST /api/cluster/nodes/register dynamically registers worker node and shards layers', async () => {
+    const res = await fetch(`${baseUrl}/api/cluster/nodes/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: 'test-linux-worker',
+        label: 'Ubuntu RTX 4090 Node',
+        platform: 'Desktop',
+        osType: 'linux',
+        totalRamMb: 64000,
+        availableRamMb: 48000,
+        vramMb: 24000,
+        computeTflops: 82.0,
+        memBwGbps: 1008.0,
+        linkType: 'Ethernet 2.5G',
+      }),
+    });
+
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; registered: string; assignedLayers: number };
+    assert.equal(body.ok, true);
+    assert.equal(body.registered, 'test-linux-worker');
+    assert.ok(body.assignedLayers > 0);
+  });
+
   it('returns structured JSON 404 for unknown /api and /v1 routes', async () => {
     const resApi = await fetch(`${baseUrl}/api/non-existent-route`);
     assert.equal(resApi.status, 404);

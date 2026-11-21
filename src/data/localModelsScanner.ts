@@ -1,43 +1,104 @@
-import { ContextLengthOption, GgufModelPreset } from '../types/starCluster';
+import { ContextLengthOption, GgufArchitecture, GgufModelPreset } from '../types/starCluster';
 
 export function inferGgufQuantFromFilename(filename: string): string {
-  const match = filename.match(/(IQ[1-4][_-][A-Z0-9]+|Q[0-8][_-][A-Z0-9_]+|FP16|F16|FP32|F32|BF16|TQ[1-2][_-][0-9])/i);
+  const match = filename.match(
+    /(IQ[1-4][_-][A-Z0-9]+|Q[0-8][_-][A-Z0-9_]+|Q[0-8]_[01]|FP16|F16|FP32|F32|BF16|TQ[1-2][_-][0-9]|BITNET|1\.58B|B1\.58|TURBOQUANT|TURBO|VQ[_-][0-9A-Z]+)/i
+  );
   if (!match) return 'Q4_K_M';
   const raw = match[1].replace('-', '_').toUpperCase();
   if (raw === 'FP16') return 'F16';
   if (raw === 'FP32') return 'F32';
+  if (raw.includes('BITNET') || raw.includes('1.58')) return 'BITNET_1.58B';
   return raw;
+}
+
+export function estimateBpwFromQuant(quant: string, arch: GgufArchitecture): number {
+  const q = quant.toUpperCase();
+  if (arch === 'Ternary' || q.includes('BITNET') || q.includes('1.58') || q.startsWith('TQ1')) return 1.58;
+  if (arch === 'TurboQuant' || q.includes('TURBO')) return 2.2;
+  if (q.includes('IQ1')) return 1.75;
+  if (q.includes('IQ2') || q.includes('Q2')) return 2.6;
+  if (q.includes('IQ3') || q.includes('Q3')) return 3.4;
+  if (q.includes('IQ4') || q.includes('Q4')) return 4.5;
+  if (q.includes('Q5')) return 5.5;
+  if (q.includes('Q6')) return 6.6;
+  if (q.includes('Q8')) return 8.5;
+  if (q.includes('F16') || q.includes('BF16')) return 16.0;
+  if (q.includes('F32')) return 32.0;
+  return 4.5;
 }
 
 export function inferGgufParamsFromFilename(filename: string, sizeMb: number): {
   totalParamsB: number;
   activeParamsB: number;
-  architecture: 'MoE' | 'Ternary' | 'Dense';
+  architecture: GgufArchitecture;
   layers: number;
 } {
   const lower = filename.toLowerCase();
-  const isMoe = lower.includes('moe') || lower.includes('mixtral') || lower.includes('a3b');
-  const isTernary = lower.includes('bitnet') || lower.includes('tq1') || lower.includes('tq2');
+  const isLooped =
+    lower.includes('looped') ||
+    lower.includes('recursive') ||
+    lower.includes('weight-tied') ||
+    lower.includes('tied') ||
+    lower.includes('universal') ||
+    lower.includes('ut-');
+  const isTurbo =
+    lower.includes('turboquant') ||
+    lower.includes('turbo') ||
+    lower.includes('tq-') ||
+    lower.includes('vq-');
+  const isTernary =
+    lower.includes('bitnet') ||
+    lower.includes('1.58b') ||
+    lower.includes('b1.58') ||
+    lower.includes('tq1') ||
+    lower.includes('tq2') ||
+    lower.includes('ternary');
+  const isMoe =
+    lower.includes('moe') ||
+    lower.includes('mixtral') ||
+    lower.includes('a3b') ||
+    lower.includes('dbrx') ||
+    lower.includes('deepseek');
+
+  const architecture: GgufArchitecture = isLooped
+    ? 'Looped'
+    : isTurbo
+      ? 'TurboQuant'
+      : isTernary
+        ? 'Ternary'
+        : isMoe
+          ? 'MoE'
+          : 'Dense';
+
+  const quant = inferGgufQuantFromFilename(filename);
+  const bpw = estimateBpwFromQuant(quant, architecture);
 
   const paramMatch = filename.match(/([0-9]+(?:\.[0-9]+)?)[bB](?:-|_|\.|$)/);
   let totalParamsB = 0;
   if (paramMatch) {
     totalParamsB = parseFloat(paramMatch[1]);
   } else {
-    // Estimate from file size and assumed 4.5 bits-per-weight average
+    // Estimate total parameters from disk size and detected BPW
     const approxBytes = sizeMb * 1024 * 1024;
-    totalParamsB = parseFloat(((approxBytes * 8) / (4.5 * 1e9)).toFixed(1));
+    totalParamsB = parseFloat(((approxBytes * 8) / (bpw * 1e9)).toFixed(1));
     if (totalParamsB < 1) totalParamsB = 1.5;
   }
 
   let activeParamsB = totalParamsB;
-  if (isMoe) {
+  if (architecture === 'MoE') {
     activeParamsB = parseFloat(Math.min(totalParamsB, Math.max(1.8, totalParamsB * 0.12)).toFixed(1));
+  } else if (architecture === 'Looped') {
+    // In Looped models, active params equal single-pass physical layer weight footprint
+    activeParamsB = parseFloat((totalParamsB * 0.5).toFixed(1));
   }
 
-  // Infer layer count from parameter count
+  // Infer layer count from parameter count and architecture
   let layers = 32;
-  if (totalParamsB <= 2.0) {
+  if (architecture === 'Looped') {
+    // Looped models have 12 to 24 distinct layers repeated in loop iterations
+    layers = totalParamsB <= 7 ? 16 : 24;
+  } else if (totalParamsB <= 2.0) {
     layers = 28;
   } else if (totalParamsB <= 4.0) {
     layers = 30;
@@ -46,7 +107,7 @@ export function inferGgufParamsFromFilename(filename: string, sizeMb: number): {
   } else if (totalParamsB <= 16.0) {
     layers = 40;
   } else if (totalParamsB <= 35.0) {
-    layers = isMoe ? 48 : 36;
+    layers = architecture === 'MoE' ? 48 : 36;
   } else {
     layers = 80;
   }
@@ -54,7 +115,7 @@ export function inferGgufParamsFromFilename(filename: string, sizeMb: number): {
   return {
     totalParamsB,
     activeParamsB,
-    architecture: isMoe ? 'MoE' : isTernary ? 'Ternary' : 'Dense',
+    architecture,
     layers,
   };
 }

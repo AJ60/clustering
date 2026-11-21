@@ -12,6 +12,8 @@ describe('localModelsScanner', () => {
     assert.equal(inferGgufQuantFromFilename('Qwen2.5-1.5B-Instruct-Q4_K_M.gguf'), 'Q4_K_M');
     assert.equal(inferGgufQuantFromFilename('DeepSeek-R1-Distill-Q8_0.gguf'), 'Q8_0');
     assert.equal(inferGgufQuantFromFilename('model-fp16.gguf'), 'F16');
+    assert.equal(inferGgufQuantFromFilename('BitNet-b1.58-3B.gguf'), 'BITNET_1.58B');
+    assert.equal(inferGgufQuantFromFilename('Llama-3-TurboQuant-8B.gguf'), 'TURBOQUANT');
   });
 
   it('correctly infers parameters, architecture and layers', () => {
@@ -25,6 +27,14 @@ describe('localModelsScanner', () => {
     assert.equal(moe.architecture, 'MoE');
     assert.equal(moe.activeParamsB, 3.6);
     assert.equal(moe.layers, 48);
+
+    const looped = inferGgufParamsFromFilename('Universal-Looped-Transformer-7B.gguf', 4200);
+    assert.equal(looped.architecture, 'Looped');
+    assert.equal(looped.layers, 16);
+
+    const turbo = inferGgufParamsFromFilename('Mistral-TurboQuant-8B.gguf', 2400);
+    assert.equal(turbo.architecture, 'TurboQuant');
+    assert.equal(turbo.totalParamsB, 8);
   });
 
   it('parses full local GGUF preset from file path and size', () => {

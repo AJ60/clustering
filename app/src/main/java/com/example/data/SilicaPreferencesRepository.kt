@@ -26,7 +26,7 @@ data class SilicaEngineConfig(
     val contextLength: Int = 4096,
     val kvCacheQuant: String = "Q8_0", // "F16" | "Q8_0" | "Q4_0"
     val usbBridgeOnly: Boolean = true,
-    val masterBaseUrl: String = "http://127.0.0.1:8080",
+    val masterBaseUrl: String = "http://127.0.0.1:3000",
     val clusterSecret: String = "clusterd-default-hmac-key",
     val tensorCacheEnabled: Boolean = true,
     val temperature: Float = 0.7f,

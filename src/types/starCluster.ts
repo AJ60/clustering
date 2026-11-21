@@ -4,6 +4,8 @@ export type ClusterTierCode = 'S' | 'A' | 'B' | 'C';
 
 export type ClusterMode = 'LIVE_CLUSTER' | 'LOCAL_DEVICE' | 'VIRTUAL_4NODE';
 
+export type GgufArchitecture = 'MoE' | 'Ternary' | 'TurboQuant' | 'Looped' | 'Dense';
+
 export interface ConnectedDeviceInfo {
   id: string;
   model: string;
@@ -11,7 +13,45 @@ export interface ConnectedDeviceInfo {
   transport: string;
   safeCapMb: number;
   totalRamMb?: number;
+  availableRamMb?: number;
+  vramMb?: number;
+  computeTflops?: number;
   rttMs?: number;
+  bandwidthMbps?: number;
+  ip?: string;
+  lastHeartbeatMs?: number;
+}
+
+export interface NodeNetworkAudit {
+  nodeId: string;
+  label: string;
+  role: 'Master' | 'Worker';
+  ip: string;
+  linkType: 'Local' | 'USB-C Tunnel' | 'Ethernet 2.5G' | 'Wi-Fi LAN';
+  rttMs: number;
+  bandwidthMbps: number;
+  packetLossPct: number;
+  status: 'Optimal' | 'Degraded' | 'Offline';
+  portsReachable: {
+    master3000?: boolean;
+    rpc50052?: boolean;
+    upstream8080?: boolean;
+  };
+}
+
+export interface ClusterNetworkAuditReport {
+  timestamp: string;
+  hostIp: string;
+  hostHostname: string;
+  activeTransport: string;
+  nodes: NodeNetworkAudit[];
+  summary: {
+    totalNodes: number;
+    healthyNodes: number;
+    clusterRating: string;
+    avgRttMs: number;
+    bottleneckNode?: string | null;
+  };
 }
 
 export interface LiveHardwareProbe {
@@ -45,7 +85,7 @@ export interface GgufModelPreset {
   id: string;
   name: string;
   quant: string;
-  architecture: 'MoE' | 'Ternary' | 'Dense';
+  architecture: GgufArchitecture;
   sizeMb: number;
   layers: number;
   totalParamsB: number;
@@ -278,7 +318,7 @@ export interface HfCatalogModel {
   hfUrl: string;
   name: string;
   author: string;
-  architecture: 'MoE' | 'Ternary' | 'Dense';
+  architecture: GgufArchitecture;
   totalParamsB: number;
   activeParamsB: number;
   layers: number;
