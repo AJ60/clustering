@@ -269,12 +269,22 @@ function probeLiveHardware(): LiveHardwareProbe {
 
           // Strict real device check: is the Silica worker app installed and running on the phone?
           const { isInstalled, isRunning } = checkAdbWorkerStatus(adbPath, devId);
+
+          // If the app is NOT installed on the phone, immediately prune any stale Android registrations
+          if (!isInstalled) {
+            for (const [id, worker] of registeredWorkers.entries()) {
+              if (worker.platform === 'Android' || worker.id === devId || worker.id === `dev-${devId}`) {
+                registeredWorkers.delete(id);
+              }
+            }
+          }
+
           const isRegisteredLive = Array.from(registeredWorkers.values()).some(
             (w) =>
               (w.id === devId || w.id === `dev-${devId}` || w.platform === 'Android') &&
               Date.now() - w.lastSeenMs < 15000
           );
-          const isWorkerActive = (isInstalled && isRunning) || isRegisteredLive;
+          const isWorkerActive = isInstalled && (isRunning || isRegisteredLive);
           const workerStatus: 'Running' | 'Not Installed' | 'Stopped' | 'Offline' = !isInstalled
             ? 'Not Installed'
             : isWorkerActive
@@ -336,9 +346,31 @@ function probeLiveHardware(): LiveHardwareProbe {
       workerStatus: 'Running',
     };
 
-    const existingIdx = connectedDevices.findIndex((d) => d.id === worker.id || d.id === `dev-${worker.id}`);
+    const existingIdx = connectedDevices.findIndex(
+      (d) =>
+        d.id === worker.id ||
+        d.id === `dev-${worker.id}` ||
+        `dev-${d.id}` === worker.id ||
+        (d.platform === 'Android' && worker.platform === 'Android')
+    );
     if (existingIdx >= 0) {
-      connectedDevices[existingIdx] = workerDevInfo;
+      const existing = connectedDevices[existingIdx];
+      // If the USB check already confirmed the app is not running or uninstalled on the phone, prune stale registration
+      if (existing.platform === 'Android' && !existing.isWorkerRunning) {
+        registeredWorkers.delete(id);
+        continue;
+      }
+      connectedDevices[existingIdx] = {
+        ...existing,
+        model: existing.model && !existing.model.includes('Android Device') ? existing.model : worker.label,
+        safeCapMb: Math.min(existing.safeCapMb || 1300, Math.floor(worker.totalRamMb * 0.45)),
+        totalRamMb: worker.totalRamMb || existing.totalRamMb,
+        availableRamMb: worker.availableRamMb || existing.availableRamMb,
+        computeTflops: worker.computeTflops || existing.computeTflops,
+        isOnline: true,
+        isWorkerRunning: true,
+        workerStatus: 'Running',
+      };
     } else {
       connectedDevices.push(workerDevInfo);
     }
@@ -535,6 +567,52 @@ function scanLocalGgufFiles(customDir?: string): { directory: string; models: Gg
   return { directory: primaryDir, models };
 }
 
+function resolveModelPreset(modelIdOrName?: string): GgufModelPreset {
+  if (modelIdOrName && typeof modelIdOrName === 'string') {
+    const trimmed = modelIdOrName.trim();
+    const lower = trimmed.toLowerCase();
+
+    // 1. Direct match in curated presets by ID or Name
+    const preset = GGUF_MODEL_PRESETS.find(
+      (p) => p.id.toLowerCase() === lower || p.name.toLowerCase() === lower
+    );
+    if (preset) return preset;
+
+    // 2. Direct match in scanned local GGUF models
+    const local = scanLocalGgufFiles();
+    const localMatch = local.models.find(
+      (m) =>
+        m.id.toLowerCase() === lower ||
+        m.name.toLowerCase() === lower ||
+        (m.localPath && m.localPath.toLowerCase() === lower) ||
+        path.basename(m.localPath || '').toLowerCase() === lower
+    );
+    if (localMatch) return localMatch;
+
+    // 3. Substring / fuzzy match in local GGUF models
+    const fuzzyLocal = local.models.find(
+      (m) =>
+        m.id.toLowerCase().includes(lower) ||
+        m.name.toLowerCase().includes(lower) ||
+        lower.includes(m.name.toLowerCase()) ||
+        (m.localPath && path.basename(m.localPath).toLowerCase().includes(lower))
+    );
+    if (fuzzyLocal) return fuzzyLocal;
+
+    // 4. Substring in curated presets
+    const fuzzyPreset = GGUF_MODEL_PRESETS.find(
+      (p) =>
+        p.id.toLowerCase().includes(lower) ||
+        p.name.toLowerCase().includes(lower) ||
+        lower.includes(p.name.toLowerCase())
+    );
+    if (fuzzyPreset) return fuzzyPreset;
+  }
+
+  // 5. Fallback to active model or first preset
+  return clusterSnapshot?.activeModel || GGUF_MODEL_PRESETS[0];
+}
+
 function createDefaultSnapshot(): RuntimeClusterSnapshot {
   const activeModel = GGUF_MODEL_PRESETS[0];
   const tuningConfig = createDefaultBackendTuningConfig(activeModel);
@@ -556,11 +634,11 @@ let clusterSnapshot: RuntimeClusterSnapshot = createDefaultSnapshot();
 
 function buildClusterGroundedReply(
   messages: ChatMessageInput[],
-  requestedModel: string
+  targetModel: GgufModelPreset
 ): string {
   const lastUserMsg =
     [...messages].reverse().find((m) => m.role === 'user')?.content?.trim() ?? '';
-  const { activeModel, plan, tuningConfig } = clusterSnapshot;
+  const { plan, tuningConfig } = clusterSnapshot;
   const activeNodes = plan.nodes.filter((n) => n.allocatedLayers > 0);
   const lower = lastUserMsg.toLowerCase();
   const nodeNames = activeNodes.map((n) => n.label).join(' and ');
@@ -568,7 +646,7 @@ function buildClusterGroundedReply(
   // 1. Natural greeting handling
   if (/^(hi|hello|hey|greetings|good\s*(morning|afternoon|evening)|yo|sup|test)[\s!.,?]*$/i.test(lastUserMsg)) {
     return [
-      `Hello! I am **ClusterLab**, currently running **${activeModel.name}** (${activeModel.quant}) distributed across **${activeNodes.length} active node(s)** (${nodeNames}).`,
+      `Hello! I am **ClusterLab**, currently running **${targetModel.name}** (${targetModel.quant}) distributed across **${activeNodes.length} active node(s)** (${nodeNames}).`,
       ``,
       `All \`${plan.activeParamsPerTokenB}B\` active parameters are sharded across your devices at ~\`${plan.estimatedClusterTokPerSec} tok/s\`.`,
       ``,
@@ -592,7 +670,7 @@ function buildClusterGroundedReply(
     lower.includes('crash dump');
 
   if (isContextOrAgenticQuery) {
-    const maxCtx = activeModel.maxContextLength || 131072;
+    const maxCtx = targetModel.maxContextLength || 131072;
     return [
       `### Long Prompts & 24-Hour Continuous Agentic Task Architecture`,
       ``,
@@ -613,7 +691,7 @@ function buildClusterGroundedReply(
       `#### 3. Heterogeneous Multi-Device Protection`,
       `- **Windows Master VRAM Floor**: Caps GPU layers safely below 80% safe VRAM to prevent WDDM paging thrashing.`,
       `- **Android LMKD Safety Floor**: Caps mobile worker memory at $\\le 50\\%$ of available RAM, shielding the background service from Android process eviction.`,
-      `- **Active KV Allocation for ${activeModel.name}**: \`${tuningConfig.contextLength.toLocaleString()} ctx\` configured · \`${tuningConfig.kvCacheQuant.toUpperCase()}\` precision consumes **\`${plan.kvCacheTotalMb} MB\`** total across the cluster.`,
+      `- **Active KV Allocation for ${targetModel.name}**: \`${tuningConfig.contextLength.toLocaleString()} ctx\` configured · \`${tuningConfig.kvCacheQuant.toUpperCase()}\` precision consumes **\`${plan.kvCacheTotalMb} MB\`** total across the cluster.`,
     ].join('\n');
   }
 
@@ -676,7 +754,7 @@ function buildClusterGroundedReply(
         `"All stations," Lyra said softly, her voice steady and full of wonder. "Prepare the landing shuttle. We’re going to introduce ourselves."`,
         ``,
         `---`,
-        `*Generated across **${activeNodes.length} active cluster node(s)** (${nodeNames}) running **${activeModel.name}** at ~${plan.estimatedClusterTokPerSec} tok/s.*`,
+        `*Generated across **${activeNodes.length} active cluster node(s)** (${nodeNames}) running **${targetModel.name}** at ~${plan.estimatedClusterTokPerSec} tok/s.*`,
       ].join('\n');
     }
 
@@ -703,7 +781,7 @@ function buildClusterGroundedReply(
       `"It's done," Daniel whispered, meeting Mara's gaze. "Now, we run."`,
       ``,
       `---`,
-      `*Generated across **${activeNodes.length} active node(s)** (${nodeNames}) running **${activeModel.name}** at ~${plan.estimatedClusterTokPerSec} tok/s.*`,
+      `*Generated across **${activeNodes.length} active node(s)** (${nodeNames}) running **${targetModel.name}** at ~${plan.estimatedClusterTokPerSec} tok/s.*`,
     ].join('\n');
   }
 
@@ -720,7 +798,7 @@ function buildClusterGroundedReply(
       `### Capabilities`,
       `- **Multi-Device Sharding:** Split any GGUF model across Windows, Linux, and Android simultaneously.`,
       `- **24h Agentic Longevity:** Zero-OOM continuous loop execution with sliding-window attention (\`--ctx-shift\`) and continuous batching (\`--cont-batching\`).`,
-      `- **Context Horizon Scaling:** Support context lengths from \`4,096\` up to \`${(activeModel.maxContextLength || 131072).toLocaleString()} ctx\` with TurboQuant/Q4_0, Q8_0, or F16.`,
+      `- **Context Horizon Scaling:** Support context lengths from \`4,096\` up to \`${(targetModel.maxContextLength || 131072).toLocaleString()} ctx\` with TurboQuant/Q4_0, Q8_0, or F16.`,
       `- **Resource Monitoring:** Live tracking of compute (TFLOPS), bandwidth, round-trip latency, and safety reserves.`,
       `- **Zero-Config Routing:** Real-time layer dispatching over USB-C ADB tunnels and LAN.`,
       `- **Coding & Problem Solving:** Write code, explain algorithms, and assist with ML pipelines.`,
@@ -772,9 +850,9 @@ function buildClusterGroundedReply(
       .join('\n');
 
     return [
-      `### Cluster Status & Layer Allocation (\`${requestedModel || activeModel.name}\`)`,
+      `### Cluster Status & Layer Allocation (\`${targetModel.id}\`)`,
       ``,
-      `- **Architecture:** ${activeModel.architecture} (${activeModel.quant})`,
+      `- **Architecture:** ${targetModel.architecture} (${targetModel.quant})`,
       `- **Active Parameters:** \`${plan.activeParamsPerTokenB}B\` active / \`${plan.totalParamsB}B\` total`,
       `- **Cluster Pool:** \`${(plan.totalSafePoolMb / 1024).toFixed(1)} GB\` safe pool / \`${(plan.neededMb / 1024).toFixed(1)} GB\` needed (**${plan.fitVerdict}**, ~${plan.estimatedClusterTokPerSec} tok/s)`,
       `- **Context & KV Cache:** \`${tuningConfig.contextLength.toLocaleString()} ctx\` · \`${tuningConfig.kvCacheQuant.toUpperCase()}\` (${plan.kvCacheTotalMb} MB) · \`24h Agentic Guard Active\``,
@@ -797,11 +875,11 @@ function buildClusterGroundedReply(
       ``,
       `OpenAI-compatible routes are live on this ClusterLab server:`,
       `- **Base URL:** \`http://localhost:3000/v1\``,
-      `- **Model ID:** \`${activeModel.id}\``,
+      `- **Model ID:** \`${targetModel.id}\``,
       `- **Models List:** \`GET /v1/models\``,
       `- **Completions:** \`POST /v1/chat/completions\` (SSE streaming supported)`,
       ``,
-      `To connect **OpenCode**, **Hermes**, or Cursor, point \`OPENAI_BASE_URL\` to \`http://<host-ip>:3000/v1\` with model \`${activeModel.id}\`.`,
+      `To connect **OpenCode**, **Hermes**, or Cursor, point \`OPENAI_BASE_URL\` to \`http://<host-ip>:3000/v1\` with model \`${targetModel.id}\`.`,
     ].join('\n');
   }
 
@@ -828,7 +906,7 @@ function buildClusterGroundedReply(
   return [
     `I have processed your request: "${lastUserMsg}".`,
     ``,
-    `Based on the current architecture of **${activeModel.name}** (${activeModel.quant}, ${activeModel.architecture}) sharded across **${activeNodes.length} active node(s)**:`,
+    `Based on the current architecture of **${targetModel.name}** (${targetModel.quant}, ${targetModel.architecture}) sharded across **${activeNodes.length} active node(s)**:`,
     `- **Active Parameter Slice**: \`${plan.activeParamsPerTokenB}B\` active weights executed per token step.`,
     `- **Throughput**: Running at ~\`${plan.estimatedClusterTokPerSec} tok/s\` with \`${tuningConfig.contextLength.toLocaleString()} ctx\` and \`${tuningConfig.kvCacheQuant.toUpperCase()}\` KV cache.`,
     `- **24h Agentic Guard**: \`--ctx-shift\` sliding attention active, allowing continuous infinite agent loops without OOM.`,
@@ -1048,16 +1126,11 @@ async function createApp() {
     }
 
     if (!targetModel && body?.modelId) {
-      targetModel = GGUF_MODEL_PRESETS.find((p) => p.id === body.modelId);
-      if (!targetModel) {
-        const scan = scanLocalGgufFiles();
-        targetModel = scan.models.find((m) => m.id === body.modelId);
-      }
+      targetModel = resolveModelPreset(body.modelId);
     }
 
     if (!targetModel) {
-      res.status(404).json({ error: 'Model could not be found or inspected' });
-      return;
+      targetModel = resolveModelPreset();
     }
 
     // Automatically configure tuning & sharding plan based on model card & architecture
@@ -1105,14 +1178,9 @@ async function createApp() {
       return;
     }
 
-    let activeModel = body.activeModel;
-    if (activeModel && activeModel.id) {
-      const presetMatch = GGUF_MODEL_PRESETS.find((p) => p.id === activeModel!.id);
-      if (presetMatch) {
-        activeModel = { ...presetMatch, ...activeModel };
-      }
-    }
-    activeModel = activeModel ?? clusterSnapshot.activeModel;
+    let activeModel = body.activeModel
+      ? resolveModelPreset(body.activeModel.id || body.activeModel.name)
+      : clusterSnapshot.activeModel;
 
     const clusterMode = body.clusterMode ?? clusterSnapshot.clusterMode;
     const tuningConfig = body.tuningConfig ?? clusterSnapshot.tuningConfig;
@@ -1227,9 +1295,11 @@ async function createApp() {
   app.get('/v1/models', (_req, res) => {
     const nowSec = Math.floor(Date.now() / 1000);
     const seen = new Set<string>();
-    const modelsData = [clusterSnapshot.activeModel, ...GGUF_MODEL_PRESETS]
+    const localScan = scanLocalGgufFiles();
+    const allCandidateModels = [clusterSnapshot.activeModel, ...localScan.models, ...GGUF_MODEL_PRESETS];
+    const modelsData = allCandidateModels
       .filter((m) => {
-        if (seen.has(m.id)) return false;
+        if (!m || !m.id || seen.has(m.id)) return false;
         seen.add(m.id);
         return true;
       })
@@ -1272,6 +1342,14 @@ async function createApp() {
 
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const requestedModel = body.model || clusterSnapshot.activeModel.id;
+    const targetModel = resolveModelPreset(requestedModel);
+
+    // If requested model differs from current active model, seamlessly switch active snapshot
+    if (targetModel.id !== clusterSnapshot.activeModel.id) {
+      clusterSnapshot.activeModel = targetModel;
+      clusterSnapshot.tuningConfig = createDefaultBackendTuningConfig(targetModel);
+    }
+
     const upstreamRaw = (body.x_upstream_url ?? clusterSnapshot.upstreamBaseUrl ?? '').trim();
 
     // Optional real upstream forwarding to a user-configured llama-server / clusterd endpoint
@@ -1325,9 +1403,10 @@ async function createApp() {
       clusterSnapshot.tuningConfig,
       liveHardware
     );
-    clusterSnapshot.plan = planStarCluster(nodes, clusterSnapshot.activeModel, undefined, clusterSnapshot.tuningConfig);
+    clusterSnapshot.plan = planStarCluster(nodes, targetModel, undefined, clusterSnapshot.tuningConfig);
+    clusterSnapshot.updatedAt = new Date().toISOString();
 
-    const replyText = buildClusterGroundedReply(messages, requestedModel);
+    const replyText = buildClusterGroundedReply(messages, targetModel);
     const completionId = `chatcmpl-clusterlab-${Date.now()}`;
     const created = Math.floor(Date.now() / 1000);
     const promptTokens = Math.max(
@@ -1363,7 +1442,7 @@ async function createApp() {
             id: completionId,
             object: 'chat.completion.chunk',
             created,
-            model: requestedModel,
+            model: targetModel.id,
             choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
           };
           res.write(`data: ${JSON.stringify(roleChunk)}\n\n`);
@@ -1374,7 +1453,7 @@ async function createApp() {
             id: completionId,
             object: 'chat.completion.chunk',
             created,
-            model: requestedModel,
+            model: targetModel.id,
             choices: [
               {
                 index: 0,
@@ -1391,7 +1470,7 @@ async function createApp() {
             id: completionId,
             object: 'chat.completion.chunk',
             created,
-            model: requestedModel,
+            model: targetModel.id,
             choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
             usage: {
               prompt_tokens: promptTokens,
@@ -1419,7 +1498,7 @@ async function createApp() {
       id: completionId,
       object: 'chat.completion',
       created,
-      model: requestedModel,
+      model: targetModel.id,
       choices: [
         {
           index: 0,

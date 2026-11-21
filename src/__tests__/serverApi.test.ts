@@ -198,4 +198,61 @@ describe('serverApi Endpoints', () => {
     const bodyV1 = await resV1.json();
     assert.equal(bodyV1.error, 'API endpoint not found');
   });
+
+  it('POST /v1/chat/completions dynamically switches model and includes exact model name in reply text and trace', async () => {
+    // 1. Send request with Recursive Flint local model
+    const resFlint = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'local-flint-q4-k-m-gguf',
+        messages: [{ role: 'user', content: 'write a 1000 word story about space' }],
+      }),
+    });
+    assert.equal(resFlint.status, 200);
+    const bodyFlint = (await resFlint.json()) as any;
+    assert.equal(bodyFlint.model, 'local-flint-q4-k-m-gguf');
+    const contentFlint = bodyFlint.choices[0].message.content;
+    assert.ok(contentFlint.includes('Recursive Flint'), 'Response must cite Recursive Flint, not Qwen2.5');
+    assert.ok(!contentFlint.includes('Qwen2.5-1.5B-Instruct'), 'Response must not contain stale Qwen2.5-1.5B');
+
+    // 2. Send request with Qwen3.8-27B
+    const resQwen3 = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'local-qwen3-8-27b-q4-0-gguf',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    assert.equal(resQwen3.status, 200);
+    const bodyQwen3 = (await resQwen3.json()) as any;
+    assert.equal(bodyQwen3.model, 'local-qwen3-8-27b-q4-0-gguf');
+    const contentQwen3 = bodyQwen3.choices[0].message.content;
+    assert.ok(contentQwen3.includes('Qwen3.8-27B'), 'Greeting must cite Qwen3.8-27B');
+  });
+
+  it('deduplicates Android mobile worker registrations to prevent ghost duplicate nodes', async () => {
+    const regRes = await fetch(`${baseUrl}/api/cluster/nodes/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: 'android-redmi-worker',
+        label: 'Xiaomi Redmi Note 7 Pro',
+        platform: 'Android',
+        addr: '127.0.0.1:50052',
+        totalRamMb: 3700,
+        availableRamMb: 1800,
+      }),
+    });
+    assert.equal(regRes.status, 200);
+    const body = (await regRes.json()) as any;
+    assert.equal(body.ok, true);
+
+    // Verify snapshot nodes count: at most 1 Android node should ever exist in active nodes
+    const androidNodes = body.snapshot.plan.nodes.filter(
+      (n: any) => n.platform === 'Android' || n.label.includes('Redmi') || n.label.includes('Android')
+    );
+    assert.ok(androidNodes.length <= 1, `Expected at most 1 Android node, got ${androidNodes.length}`);
+  });
 });

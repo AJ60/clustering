@@ -345,6 +345,15 @@ class SilicaViewModel(
                 }
                 cacheRefreshNonce.update { it + 1 }
             }
+            // Proactively notify Master and resync cluster state
+            withContext(Dispatchers.IO) {
+                SilicaMasterApiClient.activateModelOnMaster(
+                    baseUrl = uiState.value.config.masterBaseUrl,
+                    modelId = modelId,
+                    secret = uiState.value.config.clusterSecret
+                )
+            }
+            syncWithMaster()
         }
     }
 
@@ -660,7 +669,9 @@ class SilicaViewModel(
 
         val state = uiState.value
         val cfg = state.config
-        val modelId = cfg.selectedModelId
+        val modelId = clusterSnapshot.value?.activeModelName?.trim()?.ifBlank { null }
+            ?: masterHealth.value.activeModel?.trim()?.ifBlank { null }
+            ?: cfg.selectedModelId
 
         activeStreamJob = viewModelScope.launch {
             var sessionId = activeSessionId.value

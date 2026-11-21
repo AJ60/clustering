@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BackendTuningConfig,
   ContextLengthOption,
@@ -265,6 +265,24 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
   const [showUpstreamInput, setShowUpstreamInput] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Keep chat welcome message synchronized when activeModel or cluster allocation changes
+  useEffect(() => {
+    setMessages((prev) => {
+      if (prev.length <= 1 && (prev.length === 0 || prev[0].id === 'welcome')) {
+        return [
+          {
+            id: 'welcome',
+            role: 'assistant',
+            content: `Cluster Brain ready on **${activeModel.name}** (${activeModel.quant}). Currently routing **${clusterPlan.activeParamsPerTokenB}B active** of **${clusterPlan.totalParamsB}B total** parameters across **${clusterPlan.nodes.filter((n) => n.allocatedLayers > 0).length} node(s)** at ~${clusterPlan.estimatedClusterTokPerSec} tok/s.`,
+            activeParamsB: clusterPlan.activeParamsPerTokenB,
+            tokPerSec: clusterPlan.estimatedClusterTokPerSec,
+          },
+        ];
+      }
+      return prev;
+    });
+  }, [activeModel.id, activeModel.name, activeModel.quant, clusterPlan]);
 
   const activeNodes = useMemo(
     () => clusterPlan.nodes.filter((n) => n.allocatedLayers > 0),

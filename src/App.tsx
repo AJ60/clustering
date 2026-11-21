@@ -6,6 +6,7 @@ import {
   GGUF_MODEL_PRESETS,
   GgufModelPreset,
   LiveHardwareProbe,
+  RuntimeClusterSnapshot,
 } from './types/starCluster';
 import { createDefaultBackendTuningConfig } from './domain/backendTuner';
 import {
@@ -86,6 +87,7 @@ export function App() {
   const [upstreamBaseUrl, setUpstreamBaseUrl] = useState('');
   const [liveHardware, setLiveHardware] = useState<LiveHardwareProbe | undefined>(undefined);
   const [localModels, setLocalModels] = useState<GgufModelPreset[]>([]);
+  const isInitializedRef = useRef(false);
 
   // Dialog States
   const [showSettings, setShowSettings] = useState(false);
@@ -167,6 +169,38 @@ export function App() {
   useEffect(() => {
     void fetchLiveHardware();
     void fetchLocalModels();
+
+    // Restore active model from server state or localStorage on initial mount
+    const restoreActiveModel = async () => {
+      try {
+        const res = await fetch('/api/cluster/state');
+        if (res.ok) {
+          const snapshot = (await res.json()) as RuntimeClusterSnapshot;
+          if (snapshot.activeModel && snapshot.activeModel.id) {
+            setActiveModel(snapshot.activeModel);
+            if (snapshot.tuningConfig) setTuningConfig(snapshot.tuningConfig);
+            if (snapshot.clusterMode) setClusterMode(snapshot.clusterMode);
+            if (typeof snapshot.upstreamBaseUrl === 'string') setUpstreamBaseUrl(snapshot.upstreamBaseUrl);
+            isInitializedRef.current = true;
+            return;
+          }
+        }
+      } catch {
+        // Fall through to localStorage
+      }
+
+      const savedId = localStorage.getItem('clusterlab_active_model_id');
+      if (savedId) {
+        const match = GGUF_MODEL_PRESETS.find((p) => p.id === savedId);
+        if (match) {
+          setActiveModel(match);
+          setTuningConfig(createDefaultBackendTuningConfig(match));
+        }
+      }
+      isInitializedRef.current = true;
+    };
+
+    void restoreActiveModel();
   }, []);
 
   const clusterPlan = useMemo(() => {
@@ -182,6 +216,12 @@ export function App() {
 
   // Sync active model, plan & backend tuning to Express /api/cluster/state
   useEffect(() => {
+    if (!isInitializedRef.current) return;
+    try {
+      localStorage.setItem('clusterlab_active_model_id', activeModel.id);
+    } catch {
+      // Non-blocking
+    }
     const controller = new AbortController();
     fetch('/api/cluster/state', {
       method: 'POST',
@@ -216,6 +256,11 @@ export function App() {
 
   const handleSelectModel = (model: GgufModelPreset) => {
     setActiveModel(model);
+    try {
+      localStorage.setItem('clusterlab_active_model_id', model.id);
+    } catch {
+      // Non-blocking
+    }
     const recommended = createDefaultBackendTuningConfig(model);
     setTuningConfig((prev) => ({
       ...prev,
@@ -244,6 +289,7 @@ export function App() {
         const data = await res.json();
         if (data.snapshot?.activeModel) {
           setActiveModel(data.snapshot.activeModel);
+          localStorage.setItem('clusterlab_active_model_id', data.snapshot.activeModel.id);
         }
         if (data.snapshot?.tuningConfig) {
           setTuningConfig(data.snapshot.tuningConfig);

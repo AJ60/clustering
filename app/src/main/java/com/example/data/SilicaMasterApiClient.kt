@@ -241,6 +241,43 @@ object SilicaMasterApiClient {
             null
         }
 
+    suspend fun activateModelOnMaster(baseUrl: String, modelId: String, secret: String): Boolean =
+        withContext(Dispatchers.IO) {
+            val normalized = normalizeBaseUrl(baseUrl)
+            val altUrl = when {
+                normalized.contains(":8080") -> normalized.replace(":8080", ":3000")
+                normalized.contains(":3000") -> normalized.replace(":3000", ":8080")
+                else -> "$normalized:3000"
+            }
+            val urls = listOf("$normalized/api/models/activate", "$altUrl/api/models/activate").distinct()
+            val payload = JSONObject().apply {
+                put("modelId", modelId)
+            }.toString().toByteArray(StandardCharsets.UTF_8)
+
+            for (targetUrl in urls) {
+                val ok = runCatching {
+                    val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
+                        requestMethod = "POST"
+                        connectTimeout = 3000
+                        readTimeout = 4000
+                        doOutput = true
+                        setRequestProperty("Content-Type", "application/json")
+                        if (secret.isNotBlank()) {
+                            setRequestProperty("X-Cluster-Secret", secret)
+                        }
+                    }
+                    try {
+                        conn.outputStream.use { it.write(payload) }
+                        conn.responseCode in 200..299
+                    } finally {
+                        conn.disconnect()
+                    }
+                }.getOrDefault(false)
+                if (ok) return@withContext true
+            }
+            false
+        }
+
     suspend fun probePeerTcp(address: String, timeoutMs: Int = 900): Long? =
         withContext(Dispatchers.IO) {
             val host = address.substringBefore(":").trim()

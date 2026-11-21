@@ -340,3 +340,12 @@ export interface HfCatalogModel {
   summary: string;
   source: 'curated' | 'huggingface';
 }
+
+export interface RuntimeClusterSnapshot {
+  activeModel: GgufModelPreset;
+  clusterMode: ClusterMode;
+  tuningConfig: BackendTuningConfig;
+  plan: StarClusterPlan;
+  upstreamBaseUrl: string;
+  updatedAt: string;
+}

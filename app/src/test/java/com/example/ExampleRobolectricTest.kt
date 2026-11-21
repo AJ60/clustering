@@ -24,7 +24,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [29, 36])
+@Config(sdk = [29, 34])
 class ExampleRobolectricTest {
 
     @Test
