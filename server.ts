@@ -937,8 +937,14 @@ async function createApp() {
     return app;
   }
 
-  const isProd = process.env.NODE_ENV === 'production';
-  if (!isProd) {
+  const distDir = fs.existsSync(path.join(__dirname, 'index.html'))
+    ? __dirname
+    : path.resolve(process.cwd(), 'dist');
+  const hasDist = fs.existsSync(path.join(distDir, 'index.html'));
+
+  const isDev = process.env.NODE_ENV === 'development' || (!process.env.NODE_ENV && !hasDist);
+
+  if (isDev) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -946,12 +952,6 @@ async function createApp() {
     });
     app.use(vite.middlewares);
   } else {
-    // When running compiled dist/server.js, __dirname is the dist directory containing index.html.
-    // When running from repo root, dist is a subdirectory.
-    const distDir = fs.existsSync(path.join(__dirname, 'index.html'))
-      ? __dirname
-      : path.resolve(__dirname, 'dist');
-
     app.use(express.static(distDir));
 
     // SPA fallback: in Express 5 (path-to-regexp v6+), catch-all middleware avoids syntax errors

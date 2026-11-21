@@ -53,8 +53,8 @@ export const ModelsHubPage: React.FC<ModelsHubPageProps> = ({
   onRefreshLocalModels,
   onAddLocalModelPath,
 }) => {
-  // Navigation & Sub-views
-  const [hubTab, setHubTab] = useState<ModelHubTab>(() => (localModels.length > 0 ? 'local' : 'local'));
+  // Navigation & Sub-views: default to 'hf' so catalog is immediately visible, or 'local' if local files are present
+  const [hubTab, setHubTab] = useState<ModelHubTab>(() => (localModels.length > 0 ? 'local' : 'hf'));
 
   // Local Models Directory Scan & File Picker State
   const [scanDirInput, setScanDirInput] = useState('');
@@ -393,7 +393,7 @@ export const ModelsHubPage: React.FC<ModelsHubPageProps> = ({
               {[
                 { label: 'Downloads Folder', path: '' },
                 { label: './models', path: './models' },
-                { label: 'LM Studio Cache', path: `${process.env.USERPROFILE || 'C:\\Users\\alojy'}\\.cache\\lm-studio\\models` },
+                { label: 'LM Studio Cache', path: 'C:\\Users\\alojy\\.cache\\lm-studio\\models' },
               ].map((chip) => (
                 <button
                   key={chip.label}
