@@ -214,30 +214,40 @@ export function buildStarClusterNodes(
   // 1. Live Hardware Mode: Uses real host specs and real detected devices (e.g. Redmi Note 7 Pro)
   if (mode === 'LIVE_CLUSTER') {
     if (liveHardware?.connectedDevices && liveHardware.connectedDevices.length > 0) {
-      const realWorkers: StarClusterNode[] = liveHardware.connectedDevices.map((dev) => ({
-        nodeId: dev.id.startsWith('dev-') ? dev.id : `dev-${dev.id}`,
-        label: `${dev.model} (Worker)`,
-        role: 'Worker',
-        platform: dev.platform === 'Android' ? 'Android' : 'Desktop',
-        osType: dev.platform === 'Android' ? 'android' : 'linux',
-        backendDriver:
-          dev.platform === 'Android'
-            ? 'Snapdragon / ARM NEON'
-            : dev.vramMb && dev.vramMb > 0
-              ? 'CUDA / ROCm'
-              : 'CPU OpenBLAS',
-        linkType: dev.transport.includes('USB') ? 'USB-C Tunnel' : 'Wi-Fi LAN',
-        totalRamMb: dev.totalRamMb ?? 3700,
-        availableRamMb: dev.availableRamMb ?? 1800,
-        vramFreeMb: dev.vramMb ?? 0,
-        memBwGbps: dev.computeTflops && dev.computeTflops > 10 ? 900.0 : dev.platform === 'Android' ? 24.0 : 44.0,
-        computeTflops: dev.computeTflops ?? (dev.platform === 'Android' ? 1.4 : 3.5),
-        physicalCores: 8,
-        rttMs: dev.rttMs ?? 0.8,
-        pktLossPct: 0,
-        tempC: 34.0,
-        isConnected: true,
-      }));
+      const realWorkers: StarClusterNode[] = liveHardware.connectedDevices.map((dev) => {
+        const isWorkerActive = Boolean(dev.isWorkerRunning && dev.isOnline);
+        const statusNote = isWorkerActive
+          ? `${dev.safeCapMb} MB safe cap`
+          : dev.workerStatus === 'Not Installed'
+            ? 'Offline (Silica App Not Installed)'
+            : 'Offline (Silica Service Stopped)';
+
+        return {
+          nodeId: dev.id.startsWith('dev-') ? dev.id : `dev-${dev.id}`,
+          label: `${dev.model} (Worker)`,
+          role: 'Worker',
+          platform: dev.platform === 'Android' ? 'Android' : 'Desktop',
+          osType: dev.platform === 'Android' ? 'android' : 'linux',
+          backendDriver:
+            dev.platform === 'Android'
+              ? 'Snapdragon / ARM NEON'
+              : dev.vramMb && dev.vramMb > 0
+                ? 'CUDA / ROCm'
+                : 'CPU OpenBLAS',
+          linkType: dev.transport.includes('USB') ? 'USB-C Tunnel' : 'Wi-Fi LAN',
+          totalRamMb: dev.totalRamMb ?? 3700,
+          availableRamMb: dev.availableRamMb ?? 1800,
+          vramFreeMb: dev.vramMb ?? 0,
+          memBwGbps: dev.computeTflops && dev.computeTflops > 10 ? 900.0 : dev.platform === 'Android' ? 24.0 : 44.0,
+          computeTflops: dev.computeTflops ?? (dev.platform === 'Android' ? 1.4 : 3.5),
+          physicalCores: 8,
+          rttMs: dev.rttMs ?? 0.8,
+          pktLossPct: isWorkerActive ? 0 : 100,
+          tempC: 34.0,
+          isConnected: isWorkerActive,
+          statusNote,
+        };
+      });
       return [masterHostNode, ...realWorkers];
     }
 
@@ -367,7 +377,7 @@ export function planStarCluster(
       sharePct: 0,
       statusNote:
         !n.isConnected
-          ? 'Paused / Memory shedded'
+          ? (n.statusNote || 'Offline / Disconnected')
           : thermalStatus.state === 'EMERGENCY_OFFLOAD'
             ? thermalStatus.reason
             : `${effectiveCapMb.toLocaleString()} MB safe cap`,

@@ -20,6 +20,9 @@ export interface ConnectedDeviceInfo {
   bandwidthMbps?: number;
   ip?: string;
   lastHeartbeatMs?: number;
+  isOnline?: boolean;
+  isWorkerRunning?: boolean;
+  workerStatus?: 'Running' | 'Not Installed' | 'Stopped' | 'Offline';
 }
 
 export interface NodeNetworkAudit {
@@ -233,6 +236,7 @@ export interface StarClusterNode {
   pktLossPct: number;
   tempC: number;
   isConnected: boolean;
+  statusNote?: string;
 }
 
 export interface PlannedStarNode extends StarClusterNode {

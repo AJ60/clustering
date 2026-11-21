@@ -127,6 +127,108 @@ function testTcpReachability(
   });
 }
 
+function testRpcReachability(
+  host: string,
+  port: number,
+  timeoutMs = 800
+): Promise<{ reachable: boolean; rttMs: number }> {
+  return new Promise((resolve) => {
+    const t0 = performance.now();
+    const socket = new net.Socket();
+    let settled = false;
+    let receivedData = false;
+
+    const finalize = (reachable: boolean, rttMs: number) => {
+      if (!settled) {
+        settled = true;
+        socket.destroy();
+        resolve({ reachable, rttMs });
+      }
+    };
+
+    socket.setTimeout(timeoutMs);
+
+    socket.once('connect', () => {
+      try {
+        socket.write(JSON.stringify({ cmd: 'ping' }) + '\n');
+      } catch {
+        finalize(false, -1);
+      }
+    });
+
+    socket.on('data', () => {
+      receivedData = true;
+      const rtt = Number((performance.now() - t0).toFixed(2));
+      finalize(true, rtt);
+    });
+
+    socket.once('close', () => {
+      if (!receivedData) {
+        finalize(false, -1);
+      }
+    });
+
+    socket.once('timeout', () => {
+      finalize(false, timeoutMs);
+    });
+
+    socket.once('error', () => {
+      finalize(false, -1);
+    });
+
+    try {
+      socket.connect(port, host);
+    } catch {
+      finalize(false, -1);
+    }
+  });
+}
+
+interface CachedDeviceCheck {
+  isInstalled: boolean;
+  isRunning: boolean;
+  timestamp: number;
+}
+const deviceCheckCache = new Map<string, CachedDeviceCheck>();
+
+function checkAdbWorkerStatus(adbPath: string, devId: string): { isInstalled: boolean; isRunning: boolean } {
+  const cached = deviceCheckCache.get(devId);
+  const now = Date.now();
+  if (cached && now - cached.timestamp < 3000) {
+    return { isInstalled: cached.isInstalled, isRunning: cached.isRunning };
+  }
+
+  let isInstalled = false;
+  let isRunning = false;
+
+  try {
+    const pkgCheck = child_process.execFileSync(
+      adbPath,
+      ['-s', devId, 'shell', 'pm list packages com.aistudio.clusterlab.kxmpzq com.example'],
+      { timeout: 1500 }
+    ).toString();
+    isInstalled = pkgCheck.includes('package:com.aistudio.clusterlab.kxmpzq') || pkgCheck.includes('package:com.example');
+  } catch {
+    isInstalled = false;
+  }
+
+  if (isInstalled) {
+    try {
+      const pidCheck = child_process.execFileSync(
+        adbPath,
+        ['-s', devId, 'shell', 'pidof com.aistudio.clusterlab.kxmpzq com.example'],
+        { timeout: 1500 }
+      ).toString().trim();
+      isRunning = pidCheck.length > 0;
+    } catch {
+      isRunning = false;
+    }
+  }
+
+  deviceCheckCache.set(devId, { isInstalled, isRunning, timestamp: now });
+  return { isInstalled, isRunning };
+}
+
 function probeLiveHardware(): LiveHardwareProbe {
   const isWin = process.platform === 'win32';
   const osLabel = isWin ? 'Windows 11' : process.platform === 'darwin' ? 'macOS' : 'Linux';
@@ -165,19 +267,36 @@ function probeLiveHardware(): LiveHardwareProbe {
             // Non-blocking background tunnel maintenance
           }
 
+          // Strict real device check: is the Silica worker app installed and running on the phone?
+          const { isInstalled, isRunning } = checkAdbWorkerStatus(adbPath, devId);
+          const isRegisteredLive = Array.from(registeredWorkers.values()).some(
+            (w) =>
+              (w.id === devId || w.id === `dev-${devId}` || w.platform === 'Android') &&
+              Date.now() - w.lastSeenMs < 15000
+          );
+          const isWorkerActive = (isInstalled && isRunning) || isRegisteredLive;
+          const workerStatus: 'Running' | 'Not Installed' | 'Stopped' | 'Offline' = !isInstalled
+            ? 'Not Installed'
+            : isWorkerActive
+              ? 'Running'
+              : 'Stopped';
+
           connectedDevices.push({
             id: devId,
             model: modelName,
             platform: 'Android',
             transport: 'USB-C (ADB Reverse Tunnel)',
-            safeCapMb: 1300,
+            safeCapMb: isWorkerActive ? 1300 : 0,
             totalRamMb: 3700,
-            availableRamMb: 1800,
-            computeTflops: 1.4,
-            rttMs: 0.48,
-            bandwidthMbps: 320,
+            availableRamMb: isWorkerActive ? 1800 : 0,
+            computeTflops: isWorkerActive ? 1.4 : 0,
+            rttMs: isWorkerActive ? 0.48 : -1,
+            bandwidthMbps: isWorkerActive ? 320 : 0,
             ip: '127.0.0.1:50052',
-            lastHeartbeatMs: Date.now(),
+            lastHeartbeatMs: isWorkerActive ? Date.now() : 0,
+            isOnline: isWorkerActive,
+            isWorkerRunning: isWorkerActive,
+            workerStatus,
           });
         }
       }
@@ -189,29 +308,39 @@ function probeLiveHardware(): LiveHardwareProbe {
   // Merge any live registered remote workers (Linux node, Android over Wi-Fi, etc.)
   const now = Date.now();
   for (const [id, worker] of registeredWorkers.entries()) {
-    if (now - worker.lastSeenMs > 45000) {
+    if (now - worker.lastSeenMs > 15000) {
       registeredWorkers.delete(id);
       continue;
     }
-    if (!connectedDevices.some((d) => d.id === worker.id)) {
-      connectedDevices.push({
-        id: worker.id,
-        model: worker.label,
-        platform: worker.platform === 'Android' ? 'Android' : 'Linux',
-        transport: worker.linkType,
-        safeCapMb:
-          worker.platform === 'Android'
-            ? Math.floor(worker.totalRamMb * 0.45)
-            : Math.max(512, worker.availableRamMb - 1024),
-        totalRamMb: worker.totalRamMb,
-        availableRamMb: worker.availableRamMb,
-        vramMb: worker.vramMb,
-        computeTflops: worker.computeTflops,
-        rttMs: worker.rttMs,
-        bandwidthMbps: worker.linkType.includes('USB') ? 320 : 1000,
-        ip: worker.ip,
-        lastHeartbeatMs: worker.lastSeenMs,
-      });
+    const safeCap =
+      worker.platform === 'Android'
+        ? Math.floor(worker.totalRamMb * 0.45)
+        : Math.max(512, worker.availableRamMb - 1024);
+
+    const workerDevInfo: ConnectedDeviceInfo = {
+      id: worker.id,
+      model: worker.label,
+      platform: worker.platform === 'Android' ? 'Android' : 'Linux',
+      transport: worker.linkType,
+      safeCapMb: safeCap,
+      totalRamMb: worker.totalRamMb,
+      availableRamMb: worker.availableRamMb,
+      vramMb: worker.vramMb,
+      computeTflops: worker.computeTflops,
+      rttMs: worker.rttMs,
+      bandwidthMbps: worker.linkType.includes('USB') ? 320 : 1000,
+      ip: worker.ip,
+      lastHeartbeatMs: worker.lastSeenMs,
+      isOnline: true,
+      isWorkerRunning: true,
+      workerStatus: 'Running',
+    };
+
+    const existingIdx = connectedDevices.findIndex((d) => d.id === worker.id || d.id === `dev-${worker.id}`);
+    if (existingIdx >= 0) {
+      connectedDevices[existingIdx] = workerDevInfo;
+    } else {
+      connectedDevices.push(workerDevInfo);
     }
   }
 
@@ -233,9 +362,9 @@ async function auditClusterNetwork(): Promise<ClusterNetworkAuditReport> {
   const hostHostname = os.hostname();
   const hw = probeLiveHardware();
 
-  // Test local master socket reachability
+  // Test local master socket reachability and RPC
   const master3000Check = await testTcpReachability('127.0.0.1', 3000);
-  const rpc50052Check = await testTcpReachability('127.0.0.1', 50052);
+  const rpc50052Check = await testRpcReachability('127.0.0.1', 50052);
   const upstream8080Check = await testTcpReachability('127.0.0.1', 8080);
 
   const nodes: NodeNetworkAudit[] = [];
@@ -260,7 +389,12 @@ async function auditClusterNetwork(): Promise<ClusterNetworkAuditReport> {
   // 2. Connected worker devices
   for (const dev of hw.connectedDevices) {
     const isUsb = dev.transport.includes('USB');
-    const workerPortCheck = isUsb ? rpc50052Check : await testTcpReachability(dev.ip || '127.0.0.1', 50052);
+    const isWorkerRunning = Boolean(dev.isOnline && dev.isWorkerRunning);
+    const workerPortCheck = isUsb
+      ? rpc50052Check
+      : await testRpcReachability(dev.ip?.split(':')[0] || '127.0.0.1', 50052);
+
+    const isHealthy = isWorkerRunning && (isUsb ? true : workerPortCheck.reachable);
 
     nodes.push({
       nodeId: dev.id,
@@ -268,12 +402,12 @@ async function auditClusterNetwork(): Promise<ClusterNetworkAuditReport> {
       role: 'Worker',
       ip: dev.ip || (isUsb ? '127.0.0.1 (ADB Tunnel)' : 'LAN'),
       linkType: isUsb ? 'USB-C Tunnel' : 'Wi-Fi LAN',
-      rttMs: workerPortCheck.reachable ? workerPortCheck.rttMs : dev.rttMs ?? 0.8,
-      bandwidthMbps: isUsb ? 320 : 866,
-      packetLossPct: 0,
-      status: 'Optimal',
+      rttMs: isHealthy ? (workerPortCheck.reachable ? workerPortCheck.rttMs : dev.rttMs ?? 0.8) : -1,
+      bandwidthMbps: isHealthy ? (isUsb ? 320 : 866) : 0,
+      packetLossPct: isHealthy ? 0 : 100,
+      status: isHealthy ? 'Optimal' : 'Offline',
       portsReachable: {
-        rpc50052: workerPortCheck.reachable,
+        rpc50052: isHealthy && workerPortCheck.reachable,
         master3000: master3000Check.reachable,
       },
     });
@@ -806,8 +940,11 @@ async function createApp() {
 
     const assigned =
       clusterSnapshot.plan.nodes.find(
-        (n) => n.nodeId === `dev-${workerRecord.id}` || n.nodeId === workerRecord.id || n.platform === 'Android'
-      )?.allocatedLayers || 0;
+        (n) => n.nodeId === `dev-${workerRecord.id}` || n.nodeId === workerRecord.id
+      )?.allocatedLayers ||
+      (workerRecord.platform === 'Android'
+        ? clusterSnapshot.plan.nodes.find((n) => n.platform === 'Android')?.allocatedLayers || 0
+        : 0);
 
     res.json({
       ok: true,
@@ -942,11 +1079,22 @@ async function createApp() {
     res.json({
       ok: true,
       snapshot: clusterSnapshot,
-      message: `Activated ${targetModel.name} (${targetModel.architecture} · ${targetModel.layers}L) sharded across ${plan.nodes.length} node(s)`,
+      message: `Activated ${targetModel.name} (${targetModel.architecture} · ${targetModel.layers}L) sharded across ${plan.nodes.filter((n) => n.allocatedLayers > 0).length} active node(s)`,
     });
   });
 
   app.get('/api/cluster/state', (_req, res) => {
+    // Re-verify live nodes dynamically
+    const liveHardware = probeLiveHardware();
+    const nodes = buildStarClusterNodes(
+      createInitialTelemetryState(false),
+      clusterSnapshot.clusterMode,
+      0,
+      clusterSnapshot.tuningConfig,
+      liveHardware
+    );
+    clusterSnapshot.plan = planStarCluster(nodes, clusterSnapshot.activeModel, undefined, clusterSnapshot.tuningConfig);
+    clusterSnapshot.updatedAt = new Date().toISOString();
     res.json(clusterSnapshot);
   });
 
@@ -1167,6 +1315,17 @@ async function createApp() {
         clearTimeout(timeout);
       }
     }
+
+    // Re-verify live plan before computing execution trace
+    const liveHardware = probeLiveHardware();
+    const nodes = buildStarClusterNodes(
+      createInitialTelemetryState(false),
+      clusterSnapshot.clusterMode,
+      0,
+      clusterSnapshot.tuningConfig,
+      liveHardware
+    );
+    clusterSnapshot.plan = planStarCluster(nodes, clusterSnapshot.activeModel, undefined, clusterSnapshot.tuningConfig);
 
     const replyText = buildClusterGroundedReply(messages, requestedModel);
     const completionId = `chatcmpl-clusterlab-${Date.now()}`;

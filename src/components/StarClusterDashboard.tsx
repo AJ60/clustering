@@ -346,9 +346,15 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
     }
   };
 
-  const liveNodeCount = liveHardware
-    ? 1 + (liveHardware.connectedDevices?.length ?? 0)
-    : clusterPlan.nodes.length;
+  const activeNodes = useMemo(
+    () => clusterPlan.nodes.filter((n) => n.allocatedLayers > 0),
+    [clusterPlan.nodes]
+  );
+  const activeNodeCount = activeNodes.length;
+  const offlineNodes = useMemo(
+    () => clusterPlan.nodes.filter((n) => n.allocatedLayers === 0),
+    [clusterPlan.nodes]
+  );
 
   const totalModelLayers = activeModel.layers || 28;
 
@@ -463,7 +469,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
               </span>
               <span>
-                Live Cluster ({liveNodeCount} Node{liveNodeCount !== 1 ? 's' : ''})
+                Live Cluster ({activeNodeCount} Active{offlineNodes.length > 0 ? ` · ${offlineNodes.length} Off` : ''})
               </span>
             </button>
             <button
@@ -604,13 +610,13 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                 </span>
               </h2>
               <p className="text-xs text-slate-400 mt-0.5">
-                {activeModel.name} ({activeModel.quant}) · {totalModelLayers} layers sharded across {clusterPlan.nodes.length} compute nodes
+                {activeModel.name} ({activeModel.quant}) · {totalModelLayers} layers sharded across {activeNodeCount} active compute node(s)
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-3 text-xs">
-            {clusterPlan.nodes.map((node) => {
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            {activeNodes.map((node) => {
               const isMaster = node.role === 'Master';
               const dotColor = isMaster ? 'bg-cyan-400' : 'bg-emerald-400';
               const textColor = isMaster ? 'text-cyan-300' : 'text-emerald-300';
@@ -623,13 +629,21 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                 </div>
               );
             })}
+            {offlineNodes.map((node) => (
+              <div key={node.nodeId} className="flex items-center gap-1.5 text-slate-500">
+                <span className="w-2.5 h-2.5 rounded-full bg-slate-600" />
+                <span className="font-mono-num text-[11px]">
+                  {node.label}: 0 layers · {node.statusNote || 'Offline'}
+                </span>
+              </div>
+            ))}
           </div>
         </div>
 
         {/* Contiguous Multi-Segment Layer Bar */}
         <div className="space-y-2">
           <div className="h-6 w-full rounded-lg bg-[#070A11] p-0.5 border border-slate-800 overflow-hidden flex">
-            {clusterPlan.nodes.map((node) => {
+            {activeNodes.map((node) => {
               const isMaster = node.role === 'Master';
               const bgGradient = isMaster
                 ? 'from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400'
@@ -693,7 +707,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
             {clusterPlan.tierLabel}
           </div>
           <div className="text-xs text-amber-400 font-mono-num font-semibold">
-            {clusterPlan.activeParamsPerTokenB}B active/tok · {clusterPlan.nodes.length} node(s)
+            {clusterPlan.activeParamsPerTokenB}B active/tok · {activeNodeCount} active node(s)
           </div>
         </div>
 
@@ -759,9 +773,9 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Cpu className="w-4 h-4 text-cyan-400" />
-            <span className="text-sm font-bold text-slate-100">Active Compute Nodes</span>
+            <span className="text-sm font-bold text-slate-100">Cluster Fleet Hardware</span>
             <span className="text-xs font-mono-num font-normal text-slate-400">
-              ({clusterPlan.nodes.length} connected)
+              ({activeNodeCount} active{offlineNodes.length > 0 ? `, ${offlineNodes.length} offline` : ''})
             </span>
             {networkAudit && (
               <span className="text-[11px] font-mono-num text-emerald-400 font-semibold px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20">
@@ -782,6 +796,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {clusterPlan.nodes.map((node) => {
+            const isNodeActive = node.allocatedLayers > 0;
             const isMaster = node.role === 'Master';
             const isSelected = node.nodeId === selectedNodeId;
             const tMeta = thermalLabel(node.thermalStatus.state);
@@ -792,16 +807,18 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
               <div
                 key={node.nodeId}
                 onClick={() => setSelectedNodeId(node.nodeId)}
-                className={`rounded-xl border bg-[#0D121F] p-4 space-y-3 cursor-pointer transition-all ${
-                  isSelected
-                    ? 'border-amber-500 shadow-lg shadow-amber-500/5 ring-1 ring-amber-500/50'
-                    : 'border-slate-800 hover:border-slate-700'
+                className={`rounded-xl border p-4 space-y-3 cursor-pointer transition-all ${
+                  isNodeActive
+                    ? isSelected
+                      ? 'bg-[#0D121F] border-amber-500 shadow-lg shadow-amber-500/5 ring-1 ring-amber-500/50'
+                      : 'bg-[#0D121F] border-slate-800 hover:border-slate-700'
+                    : 'bg-[#0A0E18] border-slate-800/60 opacity-65 hover:opacity-90'
                 }`}
               >
                 {/* Node Card Header */}
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2">
-                    <div className={`p-2 rounded-lg ${isMaster ? 'bg-cyan-500/10 text-cyan-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
+                    <div className={`p-2 rounded-lg ${isMaster ? 'bg-cyan-500/10 text-cyan-400' : isNodeActive ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-500'}`}>
                       {isPhone ? <Smartphone className="w-4 h-4" /> : <Server className="w-4 h-4" />}
                     </div>
                     <div>
@@ -817,9 +834,13 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                   </div>
 
                   <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
-                    isMaster ? 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30' : 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                    isMaster
+                      ? 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30'
+                      : isNodeActive
+                        ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                        : 'bg-slate-800 text-slate-400 border border-slate-700'
                   }`}>
-                    {node.role}
+                    {isMaster ? 'Master' : isNodeActive ? 'Worker' : 'Offline'}
                   </span>
                 </div>
 
@@ -827,14 +848,14 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                 <div className="rounded-lg bg-[#070A11] p-2.5 border border-slate-800/80 space-y-1.5">
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-slate-400 text-[11px]">Assigned Shard</span>
-                    <span className={`font-mono-num font-bold ${isMaster ? 'text-cyan-400' : 'text-emerald-400'}`}>
-                      L{node.layerStart}–L{node.layerEnd} ({node.allocatedLayers} Layers)
+                    <span className={`font-mono-num font-bold ${isMaster ? 'text-cyan-400' : isNodeActive ? 'text-emerald-400' : 'text-slate-500'}`}>
+                      {isNodeActive ? `L${node.layerStart}–L${node.layerEnd} (${node.allocatedLayers} Layers)` : '0 Layers (Offline)'}
                     </span>
                   </div>
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-slate-400 text-[11px]">Workload Share</span>
                     <span className="font-mono-num font-semibold text-slate-200">
-                      {node.sharePct}% ({node.activeParamsB}B active)
+                      {isNodeActive ? `${node.sharePct}% (${node.activeParamsB}B active)` : `0% (0.00B active · ${node.statusNote})`}
                     </span>
                   </div>
                 </div>

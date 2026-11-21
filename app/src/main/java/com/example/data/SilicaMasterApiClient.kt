@@ -204,9 +204,12 @@ object SilicaMasterApiClient {
                         val parsedNodes = buildList {
                             for (i in 0 until nodesArr.length()) {
                                 val n = nodesArr.optJSONObject(i) ?: continue
+                                val role = n.optString("role")
+                                val isMasterNode = n.optBoolean("isMaster", role.equals("Master", ignoreCase = true) || i == 0)
+                                val nodeId = n.optString("nodeId").ifBlank { n.optString("id", "node_$i") }
                                 add(
                                     RemoteClusterNodeInfo(
-                                        id = n.optString("id", "node_$i"),
+                                        id = nodeId,
                                         label = n.optString("label", "Cluster Node ${i + 1}"),
                                         osType = n.optString("osType", "LAN"),
                                         backendDriver = n.optString("backendDriver", "CPU/RPC"),
@@ -215,7 +218,7 @@ object SilicaMasterApiClient {
                                         allocatedLayers = n.optInt("allocatedLayers", 0),
                                         allocatedMb = n.optLong("allocatedMb", 0L),
                                         estimatedTokPerSec = n.optDouble("estimatedTokPerSec", 0.0).toFloat(),
-                                        isMaster = n.optBoolean("isMaster", i == 0)
+                                        isMaster = isMasterNode
                                     )
                                 )
                             }

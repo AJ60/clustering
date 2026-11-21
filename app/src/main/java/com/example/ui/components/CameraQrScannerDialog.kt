@@ -122,11 +122,11 @@ object ClusterQrCodec {
 
     fun encodeUriTo21x21Matrix(uri: String): Array<BooleanArray> {
         val parsed = RpcService.parseQrPairingPayload(uri)
-        val masterAddr = parsed?.first ?: "127.0.0.1:8080"
+        val masterAddr = parsed?.first ?: "127.0.0.1:3000"
         val secret = parsed?.second ?: "clusterd-default-secret"
 
         val hostPart = masterAddr.substringBefore(':')
-        val masterPort = masterAddr.substringAfter(':', "8080").toIntOrNull() ?: 8080
+        val masterPort = masterAddr.substringAfter(':', "3000").toIntOrNull() ?: 3000
         val rpcPort = Regex("rpc=(\\d+)").find(uri)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 50052
 
         val octets = hostPart.split('.').mapNotNull { it.toIntOrNull()?.coerceIn(0, 255) }
@@ -503,7 +503,7 @@ fun CameraQrScannerDialog(
                     FilterChip(
                         selected = qrInput.contains("127.0.0.1"),
                         onClick = {
-                            qrInput = "clusterd://pair?master=127.0.0.1:8080&rpc=50052&secret=${telemetry.clusterSecret}"
+                            qrInput = "clusterd://pair?master=127.0.0.1:3000&rpc=50052&secret=${telemetry.clusterSecret}"
                         },
                         label = { Text("USB Master") },
                         modifier = Modifier
@@ -513,7 +513,7 @@ fun CameraQrScannerDialog(
                     FilterChip(
                         selected = qrInput.contains("192.168."),
                         onClick = {
-                            qrInput = "clusterd://pair?master=192.168.1.10:8080&rpc=50052&secret=${telemetry.clusterSecret}"
+                            qrInput = "clusterd://pair?master=192.168.1.10:3000&rpc=50052&secret=${telemetry.clusterSecret}"
                         },
                         label = { Text("LAN Wi-Fi Master") },
                         modifier = Modifier
