@@ -135,31 +135,41 @@ object SilicaMasterApiClient {
     suspend fun fetchModels(baseUrl: String, secret: String): List<String> =
         withContext(Dispatchers.IO) {
             val normalized = normalizeBaseUrl(baseUrl)
-            runCatching {
-                val conn = (URL("$normalized/v1/models").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 2500
-                    readTimeout = 3000
-                    setRequestProperty("Accept", "application/json")
-                    if (secret.isNotBlank()) {
-                        setRequestProperty("X-Cluster-Secret", secret)
-                    }
-                }
-                try {
-                    if (conn.responseCode !in 200..299) return@runCatching emptyList()
-                    val text = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
-                    val json = JSONObject(text)
-                    val data = json.optJSONArray("data") ?: return@runCatching emptyList()
-                    buildList {
-                        for (i in 0 until data.length()) {
-                            val id = data.optJSONObject(i)?.optString("id").orEmpty()
-                            if (id.isNotBlank()) add(id)
+            val altUrl = when {
+                normalized.contains(":8080") -> normalized.replace(":8080", ":3000")
+                normalized.contains(":3000") -> normalized.replace(":3000", ":8080")
+                else -> "$normalized:3000"
+            }
+            val urls = listOf("$normalized/v1/models", "$altUrl/v1/models").distinct()
+            for (targetUrl in urls) {
+                val list = runCatching {
+                    val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 2500
+                        readTimeout = 3000
+                        setRequestProperty("Accept", "application/json")
+                        if (secret.isNotBlank()) {
+                            setRequestProperty("X-Cluster-Secret", secret)
                         }
                     }
-                } finally {
-                    conn.disconnect()
-                }
-            }.getOrDefault(emptyList())
+                    try {
+                        if (conn.responseCode !in 200..299) return@runCatching emptyList()
+                        val text = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+                        val json = JSONObject(text)
+                        val data = json.optJSONArray("data") ?: return@runCatching emptyList()
+                        buildList {
+                            for (i in 0 until data.length()) {
+                                val id = data.optJSONObject(i)?.optString("id").orEmpty()
+                                if (id.isNotBlank()) add(id)
+                            }
+                        }
+                    } finally {
+                        conn.disconnect()
+                    }
+                }.getOrNull()
+                if (!list.isNullOrEmpty()) return@withContext list
+            }
+            emptyList()
         }
 
     suspend fun fetchClusterState(baseUrl: String, secret: String): MasterClusterSnapshot? =

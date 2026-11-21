@@ -93,7 +93,7 @@ data class DeviceTelemetryState(
     val lastTrimLevel: Int = 0,
     val pairedMasterAddress: String = "Not Paired (USB 127.0.0.1:50052 Ready)",
     val isScanningMaster: Boolean = false,
-    val pairingQrPayload: String = "clusterd://pair?master=127.0.0.1:8080&rpc=50052&secret=clusterd-default-hmac-key",
+    val pairingQrPayload: String = "clusterd://pair?master=127.0.0.1:3000&rpc=50052&secret=clusterd-default-hmac-key",
     val calibration: CalibrationProfile = CalibrationProfile(),
     val diagnosticReport: DiagnosticReport? = null,
     val isDiagnosing: Boolean = false,
@@ -287,7 +287,7 @@ class RpcService : Service(), ComponentCallbacks2 {
             if (trimmed.isEmpty()) return null
             if (trimmed.startsWith("clusterd://", ignoreCase = true)) {
                 val query = trimmed.substringAfter("?", "")
-                var master = "127.0.0.1:8080"
+                var master = "127.0.0.1:3000"
                 var secret = "clusterd-default-hmac-key"
                 for (part in query.split("&")) {
                     val kv = part.split("=", limit = 2)
@@ -302,7 +302,7 @@ class RpcService : Service(), ComponentCallbacks2 {
                 return Triple(master, secret, isUsb)
             }
             // Fallback for plain IP or IP:Port entered or scanned
-            val hostPort = if (trimmed.contains(":")) trimmed else "$trimmed:8080"
+            val hostPort = if (trimmed.contains(":")) trimmed else "$trimmed:3000"
             val isUsb = hostPort.startsWith("127.0.0.1") || hostPort.startsWith("localhost")
             return Triple(hostPort, "clusterd-default-hmac-key", isUsb)
         }
@@ -820,7 +820,7 @@ class RpcService : Service(), ComponentCallbacks2 {
                     if (runCatching { udp.receive(recvPacket) }.isSuccess) {
                         val reply = String(recvPacket.data, 0, recvPacket.length, StandardCharsets.UTF_8)
                         val senderIp = recvPacket.address.hostAddress ?: "127.0.0.1"
-                        var port = "8080"
+                        var port = "3000"
                         for (token in reply.substringAfter(":").split(";")) {
                             val kv = token.split("=", limit = 2)
                             if (kv.size == 2) {
@@ -872,7 +872,7 @@ class RpcService : Service(), ComponentCallbacks2 {
     private fun notifyMasterViaUdpOrHttp(masterHostPort: String, isUsb: Boolean = false) {
         serviceScope.launch {
             val host = masterHostPort.substringBefore(":")
-            val httpPort = masterHostPort.substringAfter(":", "8080").toIntOrNull() ?: 8080
+            val httpPort = masterHostPort.substringAfter(":", "3000").toIntOrNull() ?: 3000
 
             // 1. Send UDP registration beacon to Master :50050
             runCatching {
@@ -888,27 +888,54 @@ class RpcService : Service(), ComponentCallbacks2 {
                 }
             }
 
-            // 2. HTTP POST /api/nodes/add fallback (works even if LAN blocks UDP :50050)
+            // 2. HTTP POST fallback to both :3000 and :8080 across /api/cluster/nodes/register and /api/nodes/add
             runCatching {
                 val advertiseIp = if (isUsb || host == "127.0.0.1") {
                     "127.0.0.1"
                 } else {
                     detectLocalLanIpv4(host)
                 }
-                val jsonBody = """{"addr":"$advertiseIp:50052"}"""
-                val url = java.net.URL("http://$host:$httpPort/api/nodes/add")
-                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    connectTimeout = 1500
-                    readTimeout = 1500
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json")
+                val curTel = _telemetry.value
+                val jsonPayload = org.json.JSONObject().apply {
+                    put("id", "android-redmi-worker")
+                    put("label", "${curTel.deviceModel} (Worker)")
+                    put("platform", "Android")
+                    put("osType", "android")
+                    put("addr", "$advertiseIp:50052")
+                    put("ip", advertiseIp)
+                    put("totalRamMb", curTel.totalRamMb)
+                    put("availableRamMb", curTel.availableRamMb)
+                    put("computeTflops", if (curTel.hasDotProd) 2.2 else 1.4)
+                    put("memBwGbps", 25.6)
+                    put("linkType", if (isUsb || advertiseIp == "127.0.0.1") "USB-C Tunnel" else "Wi-Fi LAN")
+                }.toString()
+
+                val targetUrls = listOf(
+                    "http://$host:$httpPort/api/cluster/nodes/register",
+                    "http://$host:$httpPort/api/nodes/add",
+                    "http://127.0.0.1:3000/api/cluster/nodes/register",
+                    "http://127.0.0.1:3000/api/nodes/add"
+                ).distinct()
+
+                for (u in targetUrls) {
+                    val ok = runCatching {
+                        val url = java.net.URL(u)
+                        val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                            requestMethod = "POST"
+                            connectTimeout = 1500
+                            readTimeout = 1500
+                            doOutput = true
+                            setRequestProperty("Content-Type", "application/json")
+                        }
+                        conn.outputStream.use { os ->
+                            os.write(jsonPayload.toByteArray(StandardCharsets.UTF_8))
+                        }
+                        val code = conn.responseCode
+                        conn.disconnect()
+                        code in 200..299
+                    }.getOrDefault(false)
+                    if (ok) break
                 }
-                conn.outputStream.use { os ->
-                    os.write(jsonBody.toByteArray(StandardCharsets.UTF_8))
-                }
-                conn.responseCode
-                conn.disconnect()
             }
         }
     }

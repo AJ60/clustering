@@ -761,27 +761,32 @@ async function createApp() {
     });
   });
 
-  app.post('/api/cluster/nodes/register', (req, res) => {
-    const body = req.body as Partial<RegisteredWorkerRecord> | undefined;
-    if (!body || !body.id) {
-      res.status(400).json({ error: 'Worker id is required for registration' });
-      return;
-    }
+  const handleNodeRegistration = (req: express.Request, res: express.Response) => {
+    const body = (req.body ?? {}) as any;
+    const workerId =
+      body.id ||
+      (body.addr
+        ? `worker-${String(body.addr).replace(/[^a-zA-Z0-9]/g, '_')}`
+        : 'android-worker');
 
     const workerRecord: RegisteredWorkerRecord = {
-      id: body.id,
-      label: body.label || (body.platform === 'Android' ? 'Android Worker' : 'Linux Node'),
+      id: workerId,
+      label:
+        body.label ||
+        (body.platform === 'Android' || (body.addr && String(body.addr).includes('50052'))
+          ? 'Xiaomi Redmi Note 7 Pro (Worker)'
+          : 'Cluster Worker'),
       role: 'Worker',
-      platform: body.platform || 'Desktop',
-      osType: body.osType || (body.platform === 'Android' ? 'android' : 'linux'),
-      ip: body.ip || (typeof req.ip === 'string' ? req.ip : '127.0.0.1'),
+      platform: body.platform || (body.addr ? 'Android' : 'Desktop'),
+      osType: body.osType || (body.platform === 'Android' || body.addr ? 'android' : 'linux'),
+      ip: body.ip || (body.addr ? String(body.addr).split(':')[0] : (typeof req.ip === 'string' ? req.ip : '127.0.0.1')),
       totalRamMb: Number(body.totalRamMb) || 4096,
       availableRamMb: Number(body.availableRamMb) || 2048,
       vramMb: Number(body.vramMb) || 0,
       computeTflops: Number(body.computeTflops) || 1.5,
       memBwGbps: Number(body.memBwGbps) || 30.0,
-      rttMs: Number(body.rttMs) || 1.0,
-      linkType: (body.linkType as any) || 'Wi-Fi LAN',
+      rttMs: Number(body.rttMs) || 0.5,
+      linkType: (body.linkType as any) || (String(body.addr).includes('127.0.0.1') ? 'USB-C Tunnel' : 'Wi-Fi LAN'),
       lastSeenMs: Date.now(),
     };
 
@@ -801,7 +806,7 @@ async function createApp() {
 
     const assigned =
       clusterSnapshot.plan.nodes.find(
-        (n) => n.nodeId === `dev-${workerRecord.id}` || n.nodeId === workerRecord.id
+        (n) => n.nodeId === `dev-${workerRecord.id}` || n.nodeId === workerRecord.id || n.platform === 'Android'
       )?.allocatedLayers || 0;
 
     res.json({
@@ -809,8 +814,13 @@ async function createApp() {
       registered: workerRecord.id,
       assignedLayers: assigned,
       activeModel: clusterSnapshot.activeModel.name,
+      snapshot: clusterSnapshot,
     });
-  });
+  };
+
+  app.post('/api/cluster/nodes/register', handleNodeRegistration);
+  app.post('/api/nodes/add', handleNodeRegistration);
+  app.post('/api/cluster/nodes/add', handleNodeRegistration);
 
   app.get('/api/local/models', (req, res) => {
     const dirParam = typeof req.query.dir === 'string' ? req.query.dir.trim() : undefined;
