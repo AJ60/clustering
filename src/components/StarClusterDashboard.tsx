@@ -11,6 +11,7 @@ import {
   GgufModelPreset,
   KvCacheQuantOption,
   LinuxAccelerator,
+  LiveHardwareProbe,
   PlannedStarNode,
   StarClusterPlan,
   ThermalState,
@@ -44,6 +45,8 @@ interface StarClusterDashboardProps {
   clusterMode: ClusterMode;
   tuningConfig: BackendTuningConfig;
   clusterPlan: StarClusterPlan;
+  liveHardware?: LiveHardwareProbe;
+  localModels?: GgufModelPreset[];
   onSelectModel: (model: GgufModelPreset) => void;
   onChangeClusterMode: (mode: ClusterMode) => void;
   onUpdateTuningConfig: (patch: Partial<BackendTuningConfig>) => void;
@@ -51,6 +54,7 @@ interface StarClusterDashboardProps {
   onOpenModels?: () => void;
   onOpenChat?: () => void;
   onOpen2DLab?: () => void;
+  onRefreshHardware?: () => void;
 }
 
 function thermalLabel(state: ThermalState): {
@@ -92,6 +96,8 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
   clusterMode,
   tuningConfig,
   clusterPlan,
+  liveHardware,
+  localModels = [],
   onSelectModel,
   onChangeClusterMode,
   onUpdateTuningConfig,
@@ -99,9 +105,18 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
   onOpenModels,
   onOpenChat,
   onOpen2DLab,
+  onRefreshHardware,
 }) => {
-  const [selectedNodeId, setSelectedNodeId] = useState<string>('linux-hub');
-  const [backendOs, setBackendOs] = useState<BackendOsTarget>('windows');
+  const masterNode =
+    clusterPlan.nodes.find((n) => n.role === 'Master') ?? clusterPlan.nodes[0];
+  const workerNodes = clusterPlan.nodes.filter((n) => n.nodeId !== masterNode?.nodeId);
+
+  const [selectedNodeId, setSelectedNodeId] = useState<string>(masterNode?.nodeId ?? 'win-master');
+  const [backendOs, setBackendOs] = useState<BackendOsTarget>(() => {
+    if (liveHardware?.platform === 'windows') return 'windows';
+    if (liveHardware?.platform === 'linux') return 'linux';
+    return 'windows';
+  });
   const [copiedCmd, setCopiedCmd] = useState(false);
   const [copiedAdb, setCopiedAdb] = useState(false);
   const [healthStatus, setHealthStatus] = useState<{
@@ -113,9 +128,10 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
   }>({ tested: false, loading: false, ok: false });
 
   const presetOptions = useMemo(() => {
-    const exists = GGUF_MODEL_PRESETS.some((p) => p.id === activeModel.id);
-    return exists ? GGUF_MODEL_PRESETS : [activeModel, ...GGUF_MODEL_PRESETS];
-  }, [activeModel]);
+    const combined = [...localModels, ...GGUF_MODEL_PRESETS];
+    const exists = combined.some((p) => p.id === activeModel.id);
+    return exists ? combined : [activeModel, ...combined];
+  }, [activeModel, localModels]);
 
   const inspectedNode: PlannedStarNode | undefined = useMemo(() => {
     return (
@@ -128,10 +144,6 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
     () => buildTunedOsBackendProfile(backendOs, activeModel, clusterPlan, tuningConfig),
     [backendOs, activeModel, clusterPlan, tuningConfig]
   );
-
-  const masterNode =
-    clusterPlan.nodes.find((n) => n.role === 'Master') ?? clusterPlan.nodes[0];
-  const workerNodes = clusterPlan.nodes.filter((n) => n.nodeId !== masterNode?.nodeId);
 
   const thermalMeta = thermalLabel(clusterPlan.overallThermalState);
 
@@ -183,6 +195,10 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
     }
   };
 
+  const liveNodeCount = liveHardware
+    ? 1 + (liveHardware.connectedDevices?.length ?? 0)
+    : clusterPlan.nodes.length;
+
   return (
     <div className="space-y-6 pb-8">
       {/* 1. Cluster Toolbar: Model Preset & Mode Switch */}
@@ -204,13 +220,30 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
               }}
               className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#131C31] px-3 py-2 text-xs font-semibold text-slate-900 dark:text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
             >
-              {presetOptions.map((preset) => (
-                <option key={preset.id} value={preset.id}>
-                  {preset.name} ({preset.quant} · {(preset.sizeMb / 1024).toFixed(1)} GB)
-                </option>
-              ))}
+              {localModels.length > 0 && (
+                <optgroup label="📁 Local Models on Disk">
+                  {localModels.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.name} ({preset.quant} · {(preset.sizeMb / 1024).toFixed(1)} GB)
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              <optgroup label="🌐 Hugging Face Presets">
+                {GGUF_MODEL_PRESETS.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name} ({preset.quant} · {(preset.sizeMb / 1024).toFixed(1)} GB)
+                  </option>
+                ))}
+              </optgroup>
             </select>
           </div>
+
+          {activeModel.isLocal && (
+            <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 whitespace-nowrap">
+              📁 Local Disk GGUF
+            </span>
+          )}
 
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
             <span>{activeModel.architecture}</span>
@@ -225,13 +258,23 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
           </div>
 
           {onOpenModels && (
-            <button
-              type="button"
-              onClick={onOpenModels}
-              className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap shrink-0"
-            >
-              Browse HF Catalog →
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={onOpenModels}
+                className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline whitespace-nowrap flex items-center gap-1"
+              >
+                📁 Local Directory & GGUF
+              </button>
+              <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">·</span>
+              <button
+                type="button"
+                onClick={onOpenModels}
+                className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap"
+              >
+                Browse HF Catalog →
+              </button>
+            </div>
           )}
         </div>
 
@@ -245,6 +288,25 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
             <button
               type="button"
               role="tab"
+              aria-selected={clusterMode === 'LIVE_CLUSTER'}
+              onClick={() => onChangeClusterMode('LIVE_CLUSTER')}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
+                clusterMode === 'LIVE_CLUSTER'
+                  ? 'bg-white dark:bg-[#1E293B] text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span>
+                Live Hardware ({liveNodeCount} Node{liveNodeCount !== 1 ? 's' : ''})
+              </span>
+            </button>
+            <button
+              type="button"
+              role="tab"
               aria-selected={clusterMode === 'LOCAL_DEVICE'}
               onClick={() => onChangeClusterMode('LOCAL_DEVICE')}
               className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
@@ -253,7 +315,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
               }`}
             >
-              This Device
+              Host Only
             </button>
             <button
               type="button"
@@ -266,9 +328,20 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
               }`}
             >
-              4-Node Cluster
+              4-Node Simulation (Preview)
             </button>
           </div>
+
+          {onRefreshHardware && (
+            <button
+              type="button"
+              onClick={onRefreshHardware}
+              title="Rescan connected ADB and USB devices"
+              className="p-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#131C31] hover:border-blue-500 text-slate-600 dark:text-slate-400 hover:text-blue-500 transition-colors"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
+          )}
 
           {onOpenChat && (
             <button

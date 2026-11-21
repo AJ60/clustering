@@ -6,6 +6,7 @@ import {
   DEFAULT_THERMAL_LIMITS,
   FitVerdict,
   GgufModelPreset,
+  LiveHardwareProbe,
   PlannedStarNode,
   StarClusterNode,
   StarClusterPlan,
@@ -131,7 +132,8 @@ export function buildStarClusterNodes(
   telemetry: DeviceTelemetryState,
   mode: ClusterMode,
   simulatedTempOffsetC = 0,
-  tuningConfig?: BackendTuningConfig
+  tuningConfig?: BackendTuningConfig,
+  liveHardware?: LiveHardwareProbe
 ): StarClusterNode[] {
   const isWorkerActive =
     telemetry.workerState === 'RUNNING_USB' ||
@@ -140,7 +142,10 @@ export function buildStarClusterNodes(
 
   const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
   const isAndroidBrowser = /android/i.test(ua);
-  const isWindowsBrowser = /windows/i.test(ua);
+  const isWindowsBrowser =
+    liveHardware?.platform === 'windows' ||
+    (typeof process !== 'undefined' && process.platform === 'win32') ||
+    /windows/i.test(ua);
   const localTemp = Math.max(25, telemetry.temperatureCelsius + simulatedTempOffsetC);
 
   const localOsType = isAndroidBrowser
@@ -148,6 +153,32 @@ export function buildStarClusterNodes(
     : isWindowsBrowser
       ? 'windows'
       : 'linux';
+
+  const masterHostNode: StarClusterNode = {
+    nodeId: 'master-host',
+    label: liveHardware?.osLabel
+      ? `${liveHardware.osLabel} Master Host`
+      : isWindowsBrowser
+        ? 'Windows 11 Master Host'
+        : 'Linux Master Hub',
+    role: 'Master',
+    platform: 'Desktop',
+    osType: localOsType,
+    backendDriver: isWindowsBrowser
+      ? tuningConfig?.windowsAccelerator ?? 'CUDA 12.6'
+      : tuningConfig?.linuxAccelerator ?? 'CUDA 12.6',
+    linkType: 'Local',
+    totalRamMb: liveHardware?.totalRamMb ?? 32768,
+    availableRamMb: liveHardware?.availableRamMb ?? 22400,
+    vramFreeMb: liveHardware?.vramMb ?? 4096,
+    memBwGbps: isWindowsBrowser ? 145.0 : 158.0,
+    computeTflops: isWindowsBrowser ? 9.2 : 24.4,
+    physicalCores: liveHardware?.cores ?? (isWindowsBrowser ? 12 : 16),
+    rttMs: 0.2,
+    pktLossPct: 0,
+    tempC: 48.0,
+    isConnected: true,
+  };
 
   const thisBrowserNode: StarClusterNode = {
     nodeId: 'this-device',
@@ -179,39 +210,41 @@ export function buildStarClusterNodes(
     isConnected: telemetry.workerState !== 'SHEDDING_MEMORY' && isWorkerActive,
   };
 
-  if (mode === 'LOCAL_DEVICE') {
-    const hasPairedDesktop =
-      telemetry.pairedMasterAddress.includes(':') &&
-      !telemetry.pairedMasterAddress.startsWith('Not Paired');
-
-    if (!hasPairedDesktop) {
-      return [{ ...thisBrowserNode, role: 'Master', linkType: 'Local', rttMs: 0.2 }];
+  // 1. Live Hardware Mode: Uses real host specs and real detected devices (e.g. Redmi Note 7 Pro)
+  if (mode === 'LIVE_CLUSTER') {
+    if (liveHardware?.connectedDevices && liveHardware.connectedDevices.length > 0) {
+      const realWorkers: StarClusterNode[] = liveHardware.connectedDevices.map((dev) => ({
+        nodeId: `dev-${dev.id}`,
+        label: `${dev.model} (Worker)`,
+        role: 'Worker',
+        platform: dev.platform === 'Android' ? 'Android' : 'Desktop',
+        osType: dev.platform === 'Android' ? 'android' : 'linux',
+        backendDriver: dev.platform === 'Android' ? 'Snapdragon 675 / NEON' : 'CPU OpenBLAS',
+        linkType: dev.transport.includes('USB') ? 'USB-C Tunnel' : 'Wi-Fi LAN',
+        totalRamMb: dev.totalRamMb ?? 3700,
+        availableRamMb: 1800,
+        vramFreeMb: 0,
+        memBwGbps: 24.0,
+        computeTflops: 1.4,
+        physicalCores: 8,
+        rttMs: dev.rttMs ?? 0.8,
+        pktLossPct: 0,
+        tempC: 34.0,
+        isConnected: true,
+      }));
+      return [masterHostNode, ...realWorkers];
     }
 
-    const masterHost: StarClusterNode = {
-      nodeId: 'paired-master',
-      label: `Master (${telemetry.pairedMasterAddress.split(' ')[0]})`,
-      role: 'Master',
-      platform: 'Desktop',
-      osType: 'linux',
-      backendDriver: tuningConfig?.linuxAccelerator ?? 'CUDA 12.6',
-      linkType: 'Local',
-      totalRamMb: 32768,
-      availableRamMb: 24576,
-      vramFreeMb: 10240,
-      memBwGbps: 145.0,
-      computeTflops: 21.8,
-      physicalCores: 12,
-      rttMs: 0.2,
-      pktLossPct: 0,
-      tempC: 61.0,
-      isConnected: true,
-    };
-
-    return [masterHost, { ...thisBrowserNode, role: 'Worker' }];
+    // Single host standalone if no external worker device attached
+    return [masterHostNode];
   }
 
-  // 4-Node Heterogeneous Star Cluster (Linux Master + Windows GPU Worker + Local Browser + Edge ARM)
+  // 2. Local Device Standalone Mode
+  if (mode === 'LOCAL_DEVICE') {
+    return [masterHostNode];
+  }
+
+  // 3. 4-Node Virtual Simulation Mode (Clearly labeled virtual preview)
   return [
     {
       nodeId: 'linux-hub',

@@ -114,9 +114,12 @@ export function buildTunedOsBackendProfile(
       : '';
 
   const modelFileSlug = `${model.name.toLowerCase().replace(/[^a-z0-9.-]+/g, '-')}.${model.quant}.gguf`;
+  const targetModelArg = model.isLocal && model.localPath
+    ? model.localPath
+    : `./models/${modelFileSlug}`;
 
   const cliFlags: string[] = [
-    `--model ./models/${modelFileSlug}`,
+    `--model "${targetModelArg}"`,
     `--alias "${model.name}"`,
     `--host 0.0.0.0`,
     `--port 8080`,

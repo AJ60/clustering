@@ -5,6 +5,7 @@ import {
   ClusterMode,
   GGUF_MODEL_PRESETS,
   GgufModelPreset,
+  LiveHardwareProbe,
 } from './types/starCluster';
 import { createDefaultBackendTuningConfig } from './domain/backendTuner';
 import {
@@ -78,11 +79,13 @@ export function App() {
 
   // Shared Cluster Model, Mode & Windows/Linux Backend Tuning State
   const [activeModel, setActiveModel] = useState<GgufModelPreset>(GGUF_MODEL_PRESETS[0]);
-  const [clusterMode, setClusterMode] = useState<ClusterMode>('VIRTUAL_4NODE');
+  const [clusterMode, setClusterMode] = useState<ClusterMode>('LIVE_CLUSTER');
   const [tuningConfig, setTuningConfig] = useState<BackendTuningConfig>(() =>
     createDefaultBackendTuningConfig(GGUF_MODEL_PRESETS[0])
   );
   const [upstreamBaseUrl, setUpstreamBaseUrl] = useState('');
+  const [liveHardware, setLiveHardware] = useState<LiveHardwareProbe | undefined>(undefined);
+  const [localModels, setLocalModels] = useState<GgufModelPreset[]>([]);
 
   // Dialog States
   const [showSettings, setShowSettings] = useState(false);
@@ -111,15 +114,71 @@ export function App() {
   const { state, currentFrame } = studio;
   const isDevLabActive = state.developerModeEnabled && activeTab === 'LAB';
 
+  const fetchLiveHardware = async () => {
+    try {
+      const res = await fetch('/api/cluster/hardware');
+      if (res.ok) {
+        const data = (await res.json()) as LiveHardwareProbe;
+        setLiveHardware(data);
+      }
+    } catch {
+      // Non-blocking fallback
+    }
+  };
+
+  const fetchLocalModels = async (dir?: string) => {
+    try {
+      const url = dir ? `/api/local/models?dir=${encodeURIComponent(dir)}` : '/api/local/models';
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.models)) {
+          setLocalModels(data.models);
+        }
+      }
+    } catch {
+      // Non-blocking fallback
+    }
+  };
+
+  const handleAddLocalModelPath = async (filePath: string): Promise<GgufModelPreset | null> => {
+    try {
+      const res = await fetch('/api/local/models/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.model) {
+          setLocalModels((prev) => {
+            const exists = prev.some((m) => m.id === data.model.id);
+            return exists ? prev : [data.model, ...prev];
+          });
+          return data.model;
+        }
+      }
+    } catch {
+      // Non-blocking fallback
+    }
+    return null;
+  };
+
+  useEffect(() => {
+    void fetchLiveHardware();
+    void fetchLocalModels();
+  }, []);
+
   const clusterPlan = useMemo(() => {
     const rawNodes = buildStarClusterNodes(
       node.telemetry,
       clusterMode,
       0,
-      tuningConfig
+      tuningConfig,
+      liveHardware
     );
     return planStarCluster(rawNodes, activeModel, undefined, tuningConfig);
-  }, [node.telemetry, clusterMode, tuningConfig, activeModel]);
+  }, [node.telemetry, clusterMode, tuningConfig, activeModel, liveHardware]);
 
   // Sync active model, plan & backend tuning to Express /api/cluster/state
   useEffect(() => {
@@ -369,6 +428,9 @@ export function App() {
             activeModel={activeModel}
             onSelectModel={handleSelectModel}
             onOpenChat={() => setActiveTab('CHAT')}
+            localModels={localModels}
+            onRefreshLocalModels={fetchLocalModels}
+            onAddLocalModelPath={handleAddLocalModelPath}
           />
         ) : activeTab === 'CHAT' ? (
           <ChatAndBrainPage
@@ -513,6 +575,8 @@ export function App() {
             clusterMode={clusterMode}
             tuningConfig={tuningConfig}
             clusterPlan={clusterPlan}
+            liveHardware={liveHardware}
+            localModels={localModels}
             onSelectModel={handleSelectModel}
             onChangeClusterMode={setClusterMode}
             onUpdateTuningConfig={handleUpdateTuningConfig}
@@ -522,6 +586,7 @@ export function App() {
             onOpen2DLab={
               state.developerModeEnabled ? () => setActiveTab('LAB') : undefined
             }
+            onRefreshHardware={fetchLiveHardware}
           />
         )}
       </main>

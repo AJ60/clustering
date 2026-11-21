@@ -2,7 +2,29 @@ export type ThermalState = 'COOL' | 'WARN' | 'SHED_25' | 'EMERGENCY_OFFLOAD';
 
 export type ClusterTierCode = 'S' | 'A' | 'B' | 'C';
 
-export type ClusterMode = 'LOCAL_DEVICE' | 'VIRTUAL_4NODE';
+export type ClusterMode = 'LIVE_CLUSTER' | 'LOCAL_DEVICE' | 'VIRTUAL_4NODE';
+
+export interface ConnectedDeviceInfo {
+  id: string;
+  model: string;
+  platform: 'Android' | 'Linux' | 'Other';
+  transport: string;
+  safeCapMb: number;
+  totalRamMb?: number;
+  rttMs?: number;
+}
+
+export interface LiveHardwareProbe {
+  platform: 'windows' | 'linux' | 'darwin';
+  osLabel: string;
+  totalRamMb: number;
+  availableRamMb: number;
+  vramMb: number;
+  gpuName?: string;
+  cpuModel: string;
+  cores: number;
+  connectedDevices: ConnectedDeviceInfo[];
+}
 
 export type ModelPresetId =
   | 'small-1.5b'
@@ -33,6 +55,8 @@ export interface GgufModelPreset {
   hfUrl: string;
   summary: string;
   tags?: string[];
+  isLocal?: boolean;
+  localPath?: string;
 }
 
 export const GGUF_MODEL_PRESETS: GgufModelPreset[] = [

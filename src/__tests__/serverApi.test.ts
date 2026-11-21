@@ -90,6 +90,49 @@ describe('serverApi Endpoints', () => {
     assert.ok(linuxScript.includes('#!/usr/bin/env bash'));
   });
 
+  it('GET /api/cluster/hardware probes real host specs and returns devices array', async () => {
+    const res = await fetch(`${baseUrl}/api/cluster/hardware`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      platform: string;
+      totalRamMb: number;
+      availableRamMb: number;
+      connectedDevices: Array<{ id: string; model: string }>;
+    };
+    assert.ok(typeof body.platform === 'string');
+    assert.ok(body.totalRamMb > 0);
+    assert.ok(Array.isArray(body.connectedDevices));
+  });
+
+  it('GET /api/local/models scans local directory and returns discovered GGUF files', async () => {
+    const res = await fetch(`${baseUrl}/api/local/models`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      directory: string;
+      count: number;
+      models: Array<{ id: string; isLocal?: boolean }>;
+    };
+    assert.ok(typeof body.directory === 'string');
+    assert.ok(typeof body.count === 'number');
+    assert.ok(Array.isArray(body.models));
+  });
+
+  it('POST /api/local/models/add rejects missing or non-existent file path with 404', async () => {
+    const resMissing = await fetch(`${baseUrl}/api/local/models/add`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(resMissing.status, 400);
+
+    const resNonExistent = await fetch(`${baseUrl}/api/local/models/add`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filePath: 'C:\\non-existent-path\\fake.gguf' }),
+    });
+    assert.equal(resNonExistent.status, 404);
+  });
+
   it('returns structured JSON 404 for unknown /api and /v1 routes', async () => {
     const resApi = await fetch(`${baseUrl}/api/non-existent-route`);
     assert.equal(resApi.status, 404);

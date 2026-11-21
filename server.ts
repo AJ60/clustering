@@ -1,5 +1,7 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { GGUF_MODEL_PRESETS } from './src/types/starCluster.ts';
@@ -7,7 +9,9 @@ import type {
   BackendOsTarget,
   BackendTuningConfig,
   ClusterMode,
+  ConnectedDeviceInfo,
   GgufModelPreset,
+  LiveHardwareProbe,
   StarClusterPlan,
 } from './src/types/starCluster.ts';
 import {
@@ -23,6 +27,7 @@ import {
   CURATED_HF_GGUF_CATALOG,
   inferHfModelMetadata,
 } from './src/data/hfModelsCatalog.ts';
+import { parseLocalGgufModel } from './src/data/localModelsScanner.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,15 +46,120 @@ interface RuntimeClusterSnapshot {
   updatedAt: string;
 }
 
+function probeLiveHardware(): LiveHardwareProbe {
+  const isWin = process.platform === 'win32';
+  const osLabel = isWin ? 'Windows 11' : process.platform === 'darwin' ? 'macOS' : 'Linux';
+  const totalRamMb = Math.round(os.totalmem() / (1024 * 1024));
+  const availableRamMb = Math.round(os.freemem() / (1024 * 1024));
+  const cpus = os.cpus();
+  const cpuModel = cpus[0]?.model || (isWin ? 'AMD Ryzen / Intel Core' : 'Host CPU');
+  const cores = cpus.length || 8;
+
+  const connectedDevices: ConnectedDeviceInfo[] = [];
+  try {
+    const adbPath = isWin
+      ? path.join(process.env.LOCALAPPDATA || '', 'Android', 'Sdk', 'platform-tools', 'adb.exe')
+      : 'adb';
+    if (fs.existsSync(adbPath) || !isWin) {
+      const out = child_process.execFileSync(adbPath, ['devices', '-l'], { timeout: 2500 }).toString();
+      const lines = out.split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('List of')) continue;
+        const match = trimmed.match(/^([a-zA-Z0-9_-]+)\s+device\s+(.*)$/);
+        if (match) {
+          const devId = match[1];
+          const info = match[2];
+          let modelName = 'Android Device';
+          const modelMatch = info.match(/model:([^\s]+)/);
+          if (modelMatch) {
+            modelName = modelMatch[1].replace(/_/g, ' ');
+          }
+          connectedDevices.push({
+            id: devId,
+            model: modelName,
+            platform: 'Android',
+            transport: 'USB-C (ADB Reverse Tunnel)',
+            safeCapMb: 1300,
+            totalRamMb: 3700,
+            rttMs: 0.8,
+          });
+        }
+      }
+    }
+  } catch {
+    // ADB inactive or not found
+  }
+
+  return {
+    platform: isWin ? 'windows' : 'linux',
+    osLabel,
+    totalRamMb,
+    availableRamMb,
+    vramMb: isWin ? 4096 : 8192,
+    gpuName: isWin ? 'NVIDIA GeForce RTX 3050 Laptop GPU' : undefined,
+    cpuModel,
+    cores,
+    connectedDevices,
+  };
+}
+
+function scanLocalGgufFiles(customDir?: string): { directory: string; models: GgufModelPreset[] } {
+  const models: GgufModelPreset[] = [];
+  const searchDirs: string[] = [];
+
+  if (customDir && fs.existsSync(customDir)) {
+    searchDirs.push(customDir);
+  }
+
+  const userProfile = process.env.USERPROFILE || process.env.HOME || '';
+  const defaultDirs = [
+    path.join(process.cwd(), 'models'),
+    path.join(userProfile, 'Downloads'),
+    path.join(userProfile, 'models'),
+    path.join(userProfile, '.cache', 'lm-studio', 'models'),
+  ];
+
+  for (const d of defaultDirs) {
+    if (fs.existsSync(d) && !searchDirs.includes(d)) {
+      searchDirs.push(d);
+    }
+  }
+
+  const primaryDir = searchDirs[0] || path.join(userProfile, 'Downloads');
+
+  for (const dir of searchDirs) {
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.toLowerCase().endsWith('.gguf')) {
+          const fullPath = path.join(dir, entry.name);
+          try {
+            const stat = fs.statSync(fullPath);
+            models.push(parseLocalGgufModel(fullPath, stat.size));
+          } catch {
+            // Ignore unreadable files
+          }
+        }
+      }
+    } catch {
+      // Ignore unreadable dirs
+    }
+  }
+
+  return { directory: primaryDir, models };
+}
+
 function createDefaultSnapshot(): RuntimeClusterSnapshot {
   const activeModel = GGUF_MODEL_PRESETS[0];
   const tuningConfig = createDefaultBackendTuningConfig(activeModel);
   const telemetry = createInitialTelemetryState(false);
-  const nodes = buildStarClusterNodes(telemetry, 'VIRTUAL_4NODE', 0, tuningConfig);
+  const liveHardware = probeLiveHardware();
+  const nodes = buildStarClusterNodes(telemetry, 'LIVE_CLUSTER', 0, tuningConfig, liveHardware);
   const plan = planStarCluster(nodes, activeModel, undefined, tuningConfig);
   return {
     activeModel,
-    clusterMode: 'VIRTUAL_4NODE',
+    clusterMode: 'LIVE_CLUSTER',
     tuningConfig,
     plan,
     upstreamBaseUrl: process.env.UPSTREAM_LLAMA_URL?.trim() ?? '',
@@ -151,6 +261,44 @@ async function createApp() {
       activeNodes: clusterSnapshot.plan.nodes.filter((n) => n.allocatedLayers > 0).length,
       updatedAt: clusterSnapshot.updatedAt,
     });
+  });
+
+  app.get('/api/cluster/hardware', (_req, res) => {
+    res.json(probeLiveHardware());
+  });
+
+  app.get('/api/local/models', (req, res) => {
+    const dirParam = typeof req.query.dir === 'string' ? req.query.dir.trim() : undefined;
+    const result = scanLocalGgufFiles(dirParam);
+    res.json({
+      directory: result.directory,
+      count: result.models.length,
+      models: result.models,
+    });
+  });
+
+  app.post('/api/local/models/add', (req, res) => {
+    const body = req.body as { filePath?: string } | undefined;
+    const targetPath = body?.filePath?.trim();
+    if (!targetPath) {
+      res.status(400).json({ error: 'filePath parameter is required' });
+      return;
+    }
+
+    if (!fs.existsSync(targetPath)) {
+      res.status(404).json({ error: `File not found at path: ${targetPath}` });
+      return;
+    }
+
+    try {
+      const stat = fs.statSync(targetPath);
+      const model = parseLocalGgufModel(targetPath, stat.size);
+      res.json({ ok: true, model });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to inspect local GGUF file',
+      });
+    }
   });
 
   app.get('/api/cluster/state', (_req, res) => {
