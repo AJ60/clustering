@@ -2,6 +2,25 @@
 
 All notable changes to **ClusterLab** are documented in this file.
 
+## [2.1.0] - 2026-11-22
+
+**Author:** AJ60
+
+### Added & Enhanced (Multi-VM End-to-End Simulation & Network Resilience)
+- **Multi-VM End-to-End Verification Suite (`scripts/verify_cluster_environments.py`):**
+  - Added a 9-stage automated integration test suite that spawns isolated virtual nodes with distinct loopback IPs simulating real-world network links.
+  - **Ethernet 2.5G (Linux Workstation VM):** Evaluated at $2{,}500\text{ Mbps}$, $0.35\text{ ms}$ RTT for heavy layer compute.
+  - **USB-C ADB Reverse Tunnel (Android Mobile VM):** Evaluated at $480\text{ Mbps}$, $0.52\text{ ms}$ RTT with strict $\le 50\%$ safe RAM cap and critical thermal shedding at $49.5^\circ\text{C}$ to $0\text{L}$.
+  - **Wi-Fi 5 802.11ac (Windows Worker VM):** Evaluated at $866\text{ Mbps}$, $14.8\text{ ms}$ with dynamic jitter/loss auto-pruning ($>40\text{ ms}$ RTT / $>1.5\%$ packet loss).
+  - **32-Byte Keyed RPC v9 Handshake (`GGUF_PROBE_V9`):** Live TCP handshake verification rejecting rogue nodes with HTTP 502.
+  - **Auto-Boot & Graceful Teardown:** Automatically detects if the Master server is running on `:3000` and boots/shuts down a production instance cleanly.
+- **Cross-Platform Test Command Support:**
+  - Removed shell-specific environment variable prefixes in `package.json` for seamless cross-platform execution on Windows, Linux, and macOS.
+- **Android App Updates (`app/`):**
+  - Updated Robolectric SDK compatibility and theme adaptivity for light/dark modes.
+
+---
+
 ## [2.0.0] - 2026-11-19
 
 **Author:** AJ60

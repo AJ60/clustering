@@ -52,6 +52,38 @@ npm run build    # Compiles client to dist/ and server to dist/server.js
 
 # 6. Run production server
 npm start        # Starts production Express server on port 3000 (or $PORT)
+
+# 7. Run End-to-End Multi-VM Verification Suite
+python scripts/verify_cluster_environments.py
+# Simulates live Windows Master, Linux Workstation (Ethernet 2.5G), Android (USB-C ADB), and Windows (Wi-Fi 5)
+```
+
+---
+
+## Multi-VM Verification Suite & Real-World Network Scenarios
+
+ClusterLab includes an end-to-end multi-VM simulation and fault-injection verification suite (`scripts/verify_cluster_environments.py` and `scripts/vm_cluster_test.sh`). It spawns isolated subprocess or Linux namespace VMs on distinct virtual loopback IPs with live TCP sockets, verifying:
+
+1. **Ethernet 2.5G / 1G (Linux Workstation VM)**:
+   - Tests heavy compute and layer offloading over high-bandwidth ($2{,}500\text{ Mbps}$), ultra-low latency ($0.35\text{ ms}$ RTT, $0\%$ packet loss) wired infrastructure.
+2. **USB-C Tunnel / ADB Reverse (Android Mobile VM)**:
+   - Tests mobile worker layer sharding over high-speed USB ($480\text{ Mbps}$, $0.52\text{ ms}$ RTT).
+   - **Zero-LMK Safe RAM Cap:** Enforces strict allocation bounds ($\le 50\%$ of physical RAM) to prevent Android Low Memory Killer (LMK) aborts.
+   - **Thermal Emergency Offload:** When battery/SoC temperature reaches critical thresholds ($49.5^\circ\text{C}$), the mobile node sheds all layers to $0\text{L}$, which are absorbed dynamically by desktop/workstation nodes without cluster downtime.
+3. **Wi-Fi 5 / 802.11ac (Windows / Edge Worker VM)**:
+   - Tests wireless edge nodes with realistic latency ($14.8\text{ ms}$) and jitter.
+   - **Dynamic Jitter Auto-Pruning:** When Wi-Fi links experience interference ($>40\text{ ms}$ RTT or $>1.5\%$ packet loss), the cluster auto-planner automatically prunes the slow wireless node and consolidates layers onto the low-latency Ethernet and USB tiers to protect generation throughput.
+4. **Keyed 32-Byte RPC v9 Handshake (`GGUF_PROBE_V9`)**:
+   - Master and workers authenticate over raw TCP using 32-byte keyed auth frames. Rogue or unauthenticated nodes are rejected with `HTTP 502 Bad Gateway`.
+5. **SSRF Guard & Internal IP Isolation**:
+   - Strict SSRF guards on `/api/tools/fetch-url` reject loopback, RFC1918 private subnets, and cloud metadata IPs (`169.254.169.254`).
+
+```bash
+# Run the verification suite directly
+python scripts/verify_cluster_environments.py
+
+# Or run with host hypervisor / container auto-detection (Multipass, Docker, Podman, Namespaces)
+bash scripts/vm_cluster_test.sh auto
 ```
 
 ---
