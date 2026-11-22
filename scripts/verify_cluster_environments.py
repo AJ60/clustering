@@ -309,14 +309,13 @@ def spawn_isolated_vm(vm_name: str, python_code: str, args: list[str], use_unsha
             *args,
         ]
     else:
-        cmd = ["python3", "-c", python_code, *args]
+        cmd = [sys.executable, "-c", python_code, *args]
 
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        start_new_session=True,
     )
     deadline = time.time() + 5.0
     while time.time() < deadline:
@@ -333,16 +332,16 @@ def spawn_isolated_vm(vm_name: str, python_code: str, args: list[str], use_unsha
 def stop_proc(proc: subprocess.Popen):
     if proc.poll() is None:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except Exception:
             proc.terminate()
+        except Exception:
+            pass
         try:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except Exception:
                 proc.kill()
+            except Exception:
+                pass
 
 
 def run_suite(base_url: str, hold_seconds: float):
@@ -364,19 +363,66 @@ def run_suite(base_url: str, hold_seconds: float):
 
     print("=" * 78)
     print(" Silica Cluster — Multi-VM Live Integration & Fault-Injection Test Suite")
+    print(" Simulated Scenarios: Ethernet 2.5G (Linux), USB-C Tunnel (Android), Wi-Fi 5 (Windows)")
     print(f" Target Master : {base_url}")
     print(f" VM Isolation  : {isolation_mode}")
     print("=" * 78)
 
     procs: list[subprocess.Popen] = []
     registered_ids: list[str] = []
+    master_proc: subprocess.Popen | None = None
     tmp_dir = tempfile.mkdtemp(prefix="silica-vm-gguf-")
 
     try:
         # ------------------------------------------------------------------
+        # Pre-Flight: Ensure Master Server is Live (Auto-Start if needed)
+        # ------------------------------------------------------------------
+        master_already_up = False
+        try:
+            st, _ = http_json(base_url, "/health", timeout=1.0)
+            if st == 200:
+                master_already_up = True
+                print(f"[Master] Detected existing running Master at {base_url}")
+        except Exception:
+            master_already_up = False
+
+        if not master_already_up:
+            print(f"[Master] No running Master detected on {base_url}. Auto-starting Silica Master...")
+            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            dist_server = os.path.join(root_dir, "dist", "server.js")
+            env = os.environ.copy()
+            env["NODE_ENV"] = "production"
+            if os.path.exists(dist_server):
+                cmd = ["node", dist_server]
+            else:
+                npx_bin = shutil.which("npx.cmd") or shutil.which("npx") or "npx"
+                cmd = [npx_bin, "tsx", "server.ts"]
+            master_proc = subprocess.Popen(
+                cmd,
+                cwd=root_dir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            deadline = time.time() + 15.0
+            while time.time() < deadline:
+                try:
+                    st, _ = http_json(base_url, "/health", timeout=1.0)
+                    if st == 200:
+                        print(f"  [BOOT] Master server online and verified at {base_url} (PID {master_proc.pid})")
+                        break
+                except Exception:
+                    pass
+                if master_proc.poll() is not None:
+                    out = master_proc.stdout.read() if master_proc.stdout else ""
+                    raise RuntimeError(f"Master server exited unexpectedly ({master_proc.returncode}):\n{out}")
+                time.sleep(0.4)
+
+        # ------------------------------------------------------------------
         # Stage 1: Health, Beacon & Honest Offline 503 Gate
         # ------------------------------------------------------------------
-        print("\n[Stage 1/8] Master Health, Beacon (RPC v9), & Honest HTTP 503 Offline Gate")
+        print("\n[Stage 1/9] Master Health, Beacon (RPC v9), & Honest HTTP 503 Offline Gate")
         st, health = http_json(base_url, "/health")
         assert st == 200 and health.get("service") == "Silica Cluster", f"Bad /health: {st} {health}"
         st, beacon = http_json(base_url, "/api/cluster/beacon")
@@ -396,33 +442,35 @@ def run_suite(base_url: str, hold_seconds: float):
         print("  [PASS] Master online, RPC v9 beacon active, /v1/chat/completions honestly returns HTTP 503.")
 
         # ------------------------------------------------------------------
-        # Stage 2: Boot 4 Isolated Worker VMs + Live 32-Byte Handshake Verification
+        # Stage 2: Boot 4 Isolated Worker VMs + Live 32-Byte Keyed TCP Handshakes
         # ------------------------------------------------------------------
-        print("\n[Stage 2/8] Booting 4 Isolated Worker VMs & Live 32-Byte Keyed TCP Handshakes")
+        print("\n[Stage 2/9] Booting 4 Isolated Worker VMs & Live 32-Byte Keyed TCP Handshakes")
         vm_specs = [
             {
-                "id": "vm-linux-gpu",
-                "label": "Ubuntu-24.04 GPU VM",
+                "id": "vm-linux-ethernet",
+                "label": "Ubuntu-24.04 Linux Workstation (Ethernet 2.5G)",
                 "platform": "Linux",
                 "osType": "linux",
                 "ip": "127.0.10.2",
                 "rpcPort": 50061,
                 "linkType": "Ethernet 2.5G",
                 "totalRamMb": 16384,
-                "availableRamMb": 12800,
+                "availableRamMb": 12288,
                 "vramMb": 8192,
                 "computeTflops": 18.5,
                 "memBwGbps": 288,
                 "bigCores": 8,
-                "tempC": 52,
+                "rttMs": 0.35,
+                "pktLossPct": 0.0,
+                "tempC": 48,
                 "cpuUsagePct": 14,
-                "gpuUsagePct": 11,
+                "gpuUsagePct": 12,
                 "flags": (1 << 5) | (1 << 0),
                 "rogue": False,
             },
             {
-                "id": "vm-android-pixel",
-                "label": "Android-15 Worker VM",
+                "id": "vm-android-usb",
+                "label": "Android-15 Phone (USB-C ADB Tunnel)",
                 "platform": "Android",
                 "osType": "android",
                 "ip": "127.0.10.3",
@@ -431,38 +479,42 @@ def run_suite(base_url: str, hold_seconds: float):
                 "totalRamMb": 12288,
                 "availableRamMb": 7800,
                 "vramMb": 0,
-                "computeTflops": 2.4,
-                "memBwGbps": 42,
+                "computeTflops": 3.2,
+                "memBwGbps": 54,
                 "bigCores": 4,
+                "rttMs": 0.52,
+                "pktLossPct": 0.0,
                 "tempC": 34,
-                "cpuUsagePct": 18,
+                "cpuUsagePct": 16,
                 "gpuUsagePct": 0,
                 "flags": (1 << 6) | (1 << 1) | (1 << 2),
                 "rogue": False,
             },
             {
-                "id": "vm-edge-rpi5",
-                "label": "ARM64 Edge-SBC VM",
-                "platform": "Edge ARM",
-                "osType": "edge-arm",
+                "id": "vm-windows-wifi5",
+                "label": "Windows-11 Worker (Wi-Fi 5 802.11ac)",
+                "platform": "Windows",
+                "osType": "windows",
                 "ip": "127.0.10.4",
                 "rpcPort": 50063,
                 "linkType": "Wi-Fi LAN",
-                "totalRamMb": 8192,
-                "availableRamMb": 6200,
-                "vramMb": 0,
-                "computeTflops": 1.1,
-                "memBwGbps": 17,
-                "bigCores": 4,
-                "tempC": 41,
-                "cpuUsagePct": 12,
-                "gpuUsagePct": 0,
-                "flags": (1 << 5) | (1 << 3),
+                "totalRamMb": 12288,
+                "availableRamMb": 8192,
+                "vramMb": 2048,
+                "computeTflops": 4.5,
+                "memBwGbps": 84,
+                "bigCores": 6,
+                "rttMs": 14.8,
+                "pktLossPct": 0.2,
+                "tempC": 50,
+                "cpuUsagePct": 20,
+                "gpuUsagePct": 5,
+                "flags": (1 << 5) | (1 << 0),
                 "rogue": False,
             },
             {
                 "id": "vm-rogue-unauth",
-                "label": "Rogue Unauthenticated VM",
+                "label": "Rogue VM (Wi-Fi Spoof)",
                 "platform": "Linux",
                 "osType": "linux",
                 "ip": "127.0.10.5",
@@ -498,7 +550,7 @@ def run_suite(base_url: str, hold_seconds: float):
                 use_unshare,
             )
             procs.append(p)
-            print(f"  [BOOT] {vm['id']} listening on {vm['ip']}:{vm['rpcPort']} (PID {p.pid})")
+            print(f"  [BOOT] {vm['id']} ({vm['platform']} over {vm['linkType']}) listening on {vm['ip']}:{vm['rpcPort']} (PID {p.pid})")
 
         # Register the 3 legitimate VMs (real TCP 32-byte handshake enforced by server.ts!)
         for vm in vm_specs[:3]:
@@ -517,7 +569,7 @@ def run_suite(base_url: str, hold_seconds: float):
         # ------------------------------------------------------------------
         # Stage 3: Heterogeneous 4-Node Multi-VM Auto-Sharding (`Qwen3-30B-A3B MoE`)
         # ------------------------------------------------------------------
-        print("\n[Stage 3/8] Multi-VM Auto-Sharding & Mathematical Invariants (Qwen3-30B-A3B MoE)")
+        print("\n[Stage 3/9] Multi-VM Auto-Sharding & Mathematical Invariants (Ethernet + USB + Wi-Fi 5)")
         st, act = http_json(base_url, "/api/models/activate", {"modelId": "moe-30b"}, method="POST")
         assert st == 200 and act.get("ok") is True, f"Model activate failed: {st} {act}"
         plan = act["snapshot"]["plan"]
@@ -536,10 +588,10 @@ def run_suite(base_url: str, hold_seconds: float):
                     f"Android >50% RAM cap violated: {n['safeRamMb']} > {n['totalRamMb'] * 0.5}"
                 )
             total_assigned_layers += n["allocatedLayers"]
-            span = f"L{n['layerStart']}-L{n['layerEnd']}" if n["allocatedLayers"] > 0 else "PRUNED/0L"
+            span = f"L{n['layerStart']}-L{n['layerEnd']}" if n["allocatedLayers"] > 0 else f"PRUNED/0L ({n.get('statusNote', '')})"
             tok_s = n.get("estimatedTokPerSec", n.get("estTokPerSec", n.get("tokPerSec", 0)))
             print(
-                f"  [NODE] {n['label']:<24} {n['ip']:<12} {span:<10} "
+                f"  [NODE] {n['label']:<40} {n['ip']:<12} {span:<28} "
                 f"{n['allocatedMb']:>5} / {cap:<5} MB  ({tok_s} tok/s)"
             )
 
@@ -550,9 +602,37 @@ def run_suite(base_url: str, hold_seconds: float):
         st, audit = http_json(base_url, "/api/cluster/network/audit")
         assert st == 200 and audit["summary"]["totalNodes"] == 4, f"Network audit mismatch: {audit}"
         print(
-            f"  [PASS] 4-VM cluster verified: {total_assigned_layers} layers contiguous, "
+            f"  [PASS] 4-VM cluster verified: {total_assigned_layers} layers contiguous across Ethernet, USB & Wi-Fi 5, "
             f"split={plan['tensorSplit']}, rating={audit['summary']['clusterRating']}."
         )
+
+        # ------------------------------------------------------------------
+        # Stage 4: Real-World Wi-Fi 5 Jitter / Latency Spike Dynamic Auto-Pruning
+        # ------------------------------------------------------------------
+        print("\n[Stage 4/9] Real-World Wi-Fi 5 Jitter / Latency Spike (48ms RTT, 2.5% loss) Auto-Pruning")
+        # Activate Small-1.5B (28 layers) where Master + Ethernet + USB comfortably fit
+        st, small_act = http_json(base_url, "/api/models/activate", {"modelId": "small-1.5b"}, method="POST")
+        assert st == 200 and small_act.get("ok") is True
+
+        degraded_wifi = {k: v for k, v in vm_specs[2].items() if k not in ("flags", "rogue")}
+        degraded_wifi["rttMs"] = 48.0
+        degraded_wifi["pktLossPct"] = 2.5
+        st, deg_res = http_json(base_url, "/api/cluster/nodes/register", degraded_wifi, method="POST")
+        assert st == 200 and deg_res.get("ok") is True
+        deg_plan = deg_res["snapshot"]["plan"]
+        wifi_node = next(n for n in deg_plan["nodes"] if n["nodeId"] == "vm-windows-wifi5")
+        assert wifi_node["pruned"] is True, f"Degraded Wi-Fi 5 node should be pruned, got pruned={wifi_node['pruned']}"
+        assert wifi_node["allocatedLayers"] == 0, f"Pruned Wi-Fi 5 node must have 0 layers, got {wifi_node['allocatedLayers']}"
+        small_layers = sum(n["allocatedLayers"] for n in deg_plan["nodes"])
+        assert small_layers == deg_res["snapshot"]["activeModel"]["layers"]
+        print(f"  [PASS] Degraded Wi-Fi 5 node auto-pruned ({wifi_node['statusNote']}); all {small_layers}L preserved on Ethernet & USB.")
+
+        # Recover Wi-Fi 5 back to healthy state and switch back to MoE 30B
+        recovered_wifi = {k: v for k, v in vm_specs[2].items() if k not in ("flags", "rogue")}
+        st, rec_res = http_json(base_url, "/api/cluster/nodes/register", recovered_wifi, method="POST")
+        assert st == 200 and rec_res.get("ok") is True
+        st, act = http_json(base_url, "/api/models/activate", {"modelId": "moe-30b"}, method="POST")
+        assert st == 200 and act.get("ok") is True
 
         # Optional hold for live browser inspection while VMs are active
         if hold_seconds > 0:
@@ -560,9 +640,31 @@ def run_suite(base_url: str, hold_seconds: float):
             time.sleep(hold_seconds)
 
         # ------------------------------------------------------------------
-        # Stage 4: Binary GGUF v3 + Companion mmproj Inspection & Hot-Reload
+        # Stage 5: Mobile Thermal Overload Shedding (49.5°C on Android USB -> 0 Layers)
         # ------------------------------------------------------------------
-        print("\n[Stage 4/8] Binary GGUF v3 Header + Companion mmproj Pairing & Hot-Reload")
+        print("\n[Stage 5/9] Mobile Thermal Overload Shedding (49.5°C on Android USB -> 0 Layers)")
+        hot_android = {k: v for k, v in vm_specs[1].items() if k not in ("flags", "rogue")}
+        hot_android["tempC"] = 49.5
+        st, hot_res = http_json(base_url, "/api/cluster/nodes/register", hot_android, method="POST")
+        assert st == 200 and hot_res.get("ok") is True
+        hot_plan = hot_res["snapshot"]["plan"]
+        android_node = next(n for n in hot_plan["nodes"] if n["nodeId"] == "vm-android-usb")
+        assert android_node["allocatedLayers"] == 0, f"Overheated Android VM must shed to 0L, got {android_node['allocatedLayers']}"
+        assert android_node["thermalStatus"]["state"] == "EMERGENCY_OFFLOAD"
+        preserved_layers = sum(n["allocatedLayers"] for n in hot_plan["nodes"])
+        assert preserved_layers == hot_res["snapshot"]["activeModel"]["layers"]
+        print(f"  [PASS] Android VM shed to 0L ({android_node['thermalStatus']['state']}); all {preserved_layers}L absorbed by Linux Ethernet & Windows Master.")
+
+        # Restore Android phone temperature back to normal (34°C)
+        cool_android = {k: v for k, v in vm_specs[1].items() if k not in ("flags", "rogue")}
+        cool_android["tempC"] = 34.0
+        st, cool_res = http_json(base_url, "/api/cluster/nodes/register", cool_android, method="POST")
+        assert st == 200 and cool_res.get("ok") is True
+
+        # ------------------------------------------------------------------
+        # Stage 6: Binary GGUF v3 + Companion mmproj Inspection & Hot-Reload
+        # ------------------------------------------------------------------
+        print("\n[Stage 6/9] Binary GGUF v3 Header + Companion mmproj Pairing & Hot-Reload")
         gguf_path = os.path.join(tmp_dir, "qwen3-vl-30b-q4_k_m.gguf")
         mmproj_path = os.path.join(tmp_dir, "qwen3-mmproj-f16.gguf")
         with open(gguf_path, "wb") as f:
@@ -583,9 +685,9 @@ def run_suite(base_url: str, hold_seconds: float):
         print(f"  [PASS] GGUF v3 parsed ({model_card['layers']}L MoE), mmproj auto-paired, {len(cli_args)} stock flags validated.")
 
         # ------------------------------------------------------------------
-        # Stage 5: Live Isolated Upstream VM (`image_url` + `--jinja` tools + `reasoning_content`)
+        # Stage 7: Live Isolated Upstream VM (`image_url` + `--jinja` tools + `reasoning_content`)
         # ------------------------------------------------------------------
-        print("\n[Stage 5/8] Live Upstream VM Streaming Proxy (Vision image_url + Tools + Reasoning)")
+        print("\n[Stage 7/9] Live Upstream VM Streaming Proxy (Vision image_url + Tools + Reasoning)")
         upstream_vm = spawn_isolated_vm(
             "vm-upstream-llama", VM_UPSTREAM_SERVER_CODE, ["127.0.10.9", "18080"], use_unshare
         )
@@ -624,25 +726,9 @@ def run_suite(base_url: str, hold_seconds: float):
         print("  [PASS] End-to-end SSE stream verified: image_url, --jinja tool_calls, and reasoning_content intact.")
 
         # ------------------------------------------------------------------
-        # Stage 6: Thermal Overload Shedding & Dynamic Failover Across VMs
+        # Stage 8: SSRF Security Guard Against Internal VM IPs & Cloud Metadata
         # ------------------------------------------------------------------
-        print("\n[Stage 6/8] Thermal Overload Shedding (49.5°C on Android VM -> 0 Layers)")
-        hot_android = {k: v for k, v in vm_specs[1].items() if k not in ("flags", "rogue")}
-        hot_android["tempC"] = 49.5
-        st, hot_res = http_json(base_url, "/api/cluster/nodes/register", hot_android, method="POST")
-        assert st == 200 and hot_res.get("ok") is True
-        hot_plan = hot_res["snapshot"]["plan"]
-        android_node = next(n for n in hot_plan["nodes"] if n["nodeId"] == "vm-android-pixel")
-        assert android_node["allocatedLayers"] == 0, f"Overheated Android VM must shed to 0L, got {android_node['allocatedLayers']}"
-        assert android_node["thermalStatus"]["state"] == "EMERGENCY_OFFLOAD"
-        preserved_layers = sum(n["allocatedLayers"] for n in hot_plan["nodes"])
-        assert preserved_layers == hot_res["snapshot"]["activeModel"]["layers"]
-        print(f"  [PASS] Android VM shed to 0L ({android_node['thermalStatus']['state']}); all {preserved_layers}L preserved on healthy VMs.")
-
-        # ------------------------------------------------------------------
-        # Stage 7: SSRF Security Guard Against Internal VM IPs & EMA History
-        # ------------------------------------------------------------------
-        print("\n[Stage 7/8] SSRF Guard Blocking Internal VM / Cloud Metadata IPs")
+        print("\n[Stage 8/9] SSRF Guard Blocking Internal VM / Cloud Metadata IPs")
         for blocked_url in (
             "http://127.0.10.9:18080/v1/models",
             "http://169.254.169.254/latest/meta-data/",
@@ -653,9 +739,9 @@ def run_suite(base_url: str, hold_seconds: float):
         print("  [PASS] All loopback, private RFC1918, and cloud metadata VM URLs blocked with HTTP 400.")
 
         # ------------------------------------------------------------------
-        # Stage 8: Clean VM Teardown & Zero Ghost Nodes
+        # Stage 9: Clean VM Teardown & Zero Ghost Nodes
         # ------------------------------------------------------------------
-        print("\n[Stage 8/8] Clean Multi-VM Unregister, Upstream Disconnect & Zero Ghost Nodes")
+        print("\n[Stage 9/9] Clean Multi-VM Unregister, Upstream Disconnect & Zero Ghost Nodes")
         for wid in list(registered_ids):
             st, unreg = http_json(base_url, "/api/cluster/nodes/unregister", {"id": wid}, method="POST")
             assert st == 200 and unreg.get("removed") is True, f"Failed unregistering {wid}: {st} {unreg}"
@@ -678,7 +764,7 @@ def run_suite(base_url: str, hold_seconds: float):
         print("  [PASS] Zero ghost workers remain; Master cleanly returned to single-host HTTP 503 offline state.")
 
         print("\n" + "=" * 78)
-        print(" ALL 8 MULTI-VM ISOLATED INTEGRATION STAGES PASSED (0 FAILURES)")
+        print(" ALL 9 MULTI-VM ISOLATED INTEGRATION STAGES PASSED (0 FAILURES)")
         print("=" * 78)
 
     finally:
@@ -694,6 +780,9 @@ def run_suite(base_url: str, hold_seconds: float):
             pass
         for p in procs:
             stop_proc(p)
+        if master_proc:
+            print("[Master] Stopping auto-spawned Master server...")
+            stop_proc(master_proc)
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
@@ -710,5 +799,7 @@ if __name__ == "__main__":
     try:
         run_suite(args.base_url.rstrip("/"), args.hold_seconds)
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         print(f"\n[FAIL] Multi-VM test failed: {exc}", file=sys.stderr)
         sys.exit(1)
