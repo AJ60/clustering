@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Binder
 import android.os.Build
@@ -23,6 +24,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -368,10 +371,21 @@ class RpcService : Service(), ComponentCallbacks2 {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var monitorJob: Job? = null
     private var rpcServerJob: Job? = null
+    private var heartbeatJob: Job? = null
     private var nativeProcess: Process? = null
     private var serverSocket: ServerSocket? = null
+    private var lastPairedMasterHostPort: String? = null
     private var peakPausedTempCelsius: Float = 0f
     private var cooldownStartedEpochMs: Long = 0L
+
+    private fun buildDeviceWorkerId(): String {
+        val raw = "${Build.MANUFACTURER}-${Build.MODEL}-${Build.DEVICE}"
+            .lowercase()
+            .replace(Regex("[^a-z0-9]+"), "-")
+            .trim('-')
+            .take(28)
+        return "android-${raw.ifBlank { "worker" }}"
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -400,6 +414,8 @@ class RpcService : Service(), ComponentCallbacks2 {
                 val usbOnly = intent.getBooleanExtra(EXTRA_USB_ONLY, true)
                 val secret = intent.getStringExtra(EXTRA_CLUSTER_SECRET)
                     ?: _telemetry.value.clusterSecret
+                val wasRunning = _telemetry.value.workerState == WorkerRunState.RUNNING_USB ||
+                    _telemetry.value.workerState == WorkerRunState.RUNNING_WIFI
                 _telemetry.update {
                     it.copy(
                         usbLoopbackOnly = usbOnly,
@@ -414,6 +430,12 @@ class RpcService : Service(), ComponentCallbacks2 {
                         "Switched bind policy to Wi-Fi Proxy with HMAC cluster_secret enforcement"
                     }
                 )
+                if (wasRunning) {
+                    launchNativeOrEmbeddedRpcServer(usbOnly, secret)
+                    lastPairedMasterHostPort?.let { master ->
+                        startMasterHeartbeatLoop(master, usbOnly)
+                    }
+                }
                 return START_STICKY
             }
             ACTION_PAIR_QR_URI -> {
@@ -437,7 +459,9 @@ class RpcService : Service(), ComponentCallbacks2 {
                         // Allow TCP :50052 listener to bind before notifying Master so Master's
                         // immediate handshake probe succeeds without ECONNREFUSED.
                         delay(200L)
+                        lastPairedMasterHostPort = masterAddr
                         notifyMasterViaUdpOrHttp(masterAddr, isUsb)
+                        startMasterHeartbeatLoop(masterAddr, isUsb)
                     }
                 } else {
                     appendLog("Invalid QR pairing code: $rawQr")
@@ -789,12 +813,21 @@ class RpcService : Service(), ComponentCallbacks2 {
      */
     private fun autoDetectMasterNode() {
         _telemetry.update { it.copy(isScanningMaster = true) }
-        appendLog("Auto-Detecting Master Node on Wi-Fi LAN (UDP :50050) & USB ADB (:50052)...")
+        appendLog("Auto-Detecting Master Node on Wi-Fi LAN (UDP :50050 + HTTP /24 beacon) & USB ADB...")
 
         serviceScope.launch {
             var discoveredMaster: String? = null
             var discoveredSecret = _telemetry.value.clusterSecret
             var useUsb = true
+
+            // Acquire WifiManager.MulticastLock so OEM Wi-Fi power savers do not drop UDP broadcast replies
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val multicastLock = runCatching {
+                wifiManager?.createMulticastLock("silica_cluster_udp_discover")?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }.getOrNull()
 
             try {
                 java.net.DatagramSocket().use { udp ->
@@ -835,10 +868,26 @@ class RpcService : Service(), ComponentCallbacks2 {
                     }
                 }
             } catch (_: Exception) {
+            } finally {
+                runCatching {
+                    if (multicastLock?.isHeld == true) multicastLock.release()
+                }
+            }
+
+            // Fallback: parallel /24 HTTP /api/cluster/beacon sweep if UDP broadcast was blocked by AP isolation
+            if (discoveredMaster == null) {
+                val beaconHit = probeSubnetHttpBeaconFallback()
+                if (beaconHit != null) {
+                    discoveredMaster = beaconHit.first
+                    if (beaconHit.second.isNotBlank()) discoveredSecret = beaconHit.second
+                    useUsb = beaconHit.first.startsWith("127.0.0.1")
+                    appendLog("Found Master via HTTP /api/cluster/beacon fallback at ${beaconHit.first}")
+                }
             }
 
             if (discoveredMaster != null) {
                 val master = discoveredMaster!!
+                lastPairedMasterHostPort = master
                 _telemetry.update {
                     it.copy(
                         isScanningMaster = false,
@@ -853,8 +902,10 @@ class RpcService : Service(), ComponentCallbacks2 {
                 startWorkerPipeline(usbOnly = useUsb, clusterSecret = discoveredSecret)
                 delay(200L)
                 notifyMasterViaUdpOrHttp(master, useUsb)
+                startMasterHeartbeatLoop(master, useUsb)
             } else {
                 // Default to plug-and-play USB ADB loopback (127.0.0.1:50052) so adb forward works out of the box
+                lastPairedMasterHostPort = "127.0.0.1:3000"
                 _telemetry.update {
                     it.copy(
                         isScanningMaster = false,
@@ -865,8 +916,100 @@ class RpcService : Service(), ComponentCallbacks2 {
                 }
                 appendLog("Ready on USB ADB Tunnel (127.0.0.1:50052) & Wi-Fi QR Pairing.")
                 startWorkerPipeline(usbOnly = true, clusterSecret = discoveredSecret)
+                delay(200L)
+                notifyMasterViaUdpOrHttp("127.0.0.1:3000", true)
+                startMasterHeartbeatLoop("127.0.0.1:3000", true)
             }
         }
+    }
+
+    private suspend fun probeSubnetHttpBeaconFallback(): Pair<String, String>? {
+        val localIp = detectLocalLanIpv4()
+        val candidates = mutableListOf("127.0.0.1", "10.0.2.2")
+        val parts = localIp.split(".")
+        if (parts.size == 4 && localIp != "127.0.0.1") {
+            val prefix = "${parts[0]}.${parts[1]}.${parts[2]}"
+            val selfOctet = parts[3].toIntOrNull() ?: -1
+            // Probe common gateway & DHCP host octets quickly in parallel batches
+            val priorityOctets = (listOf(1, 2, 10, 20, 50, 100, 101, 102, 103, 104, 105, 110, 120, 150, 200, 254) +
+                (1..64).toList()).distinct().filter { it != selfOctet }
+            priorityOctets.forEach { oct -> candidates.add("$prefix.$oct") }
+        }
+
+        for (batch in candidates.chunked(16)) {
+            val hits = batch.map { host ->
+                serviceScope.async {
+                    runCatching {
+                        val conn = (java.net.URL("http://$host:3000/api/cluster/beacon").openConnection() as java.net.HttpURLConnection).apply {
+                            requestMethod = "GET"
+                            connectTimeout = 280
+                            readTimeout = 350
+                        }
+                        try {
+                            if (conn.responseCode in 200..299) {
+                                val text = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+                                val json = org.json.JSONObject(text)
+                                val port = json.optInt("port", 3000)
+                                val secret = json.optString("secret", "")
+                                "$host:$port" to secret
+                            } else null
+                        } finally {
+                            conn.disconnect()
+                        }
+                    }.getOrNull()
+                }
+            }.awaitAll().filterNotNull()
+            if (hits.isNotEmpty()) return hits.first()
+        }
+        return null
+    }
+
+    private fun startMasterHeartbeatLoop(masterHostPort: String, isUsb: Boolean) {
+        heartbeatJob?.cancel()
+        heartbeatJob = serviceScope.launch {
+            while (isActive) {
+                delay(8000L)
+                val st = _telemetry.value.workerState
+                if (st == WorkerRunState.RUNNING_USB || st == WorkerRunState.RUNNING_WIFI) {
+                    notifyMasterViaUdpOrHttp(masterHostPort, isUsb)
+                }
+            }
+        }
+    }
+
+    private fun unregisterFromMasterAsync() {
+        val master = lastPairedMasterHostPort ?: "127.0.0.1:3000"
+        val host = master.substringBefore(":")
+        val httpPort = master.substringAfter(":", "3000").toIntOrNull() ?: 3000
+        val workerId = buildDeviceWorkerId()
+        val payload = org.json.JSONObject().apply {
+            put("id", workerId)
+        }.toString().toByteArray(StandardCharsets.UTF_8)
+
+        Thread {
+            val urls = listOf(
+                "http://$host:$httpPort/api/cluster/nodes/unregister",
+                "http://127.0.0.1:3000/api/cluster/nodes/unregister"
+            ).distinct()
+            for (u in urls) {
+                val ok = runCatching {
+                    val conn = (java.net.URL(u).openConnection() as java.net.HttpURLConnection).apply {
+                        requestMethod = "POST"
+                        connectTimeout = 800
+                        readTimeout = 800
+                        doOutput = true
+                        setRequestProperty("Content-Type", "application/json")
+                    }
+                    try {
+                        conn.outputStream.use { it.write(payload) }
+                        conn.responseCode in 200..299
+                    } finally {
+                        conn.disconnect()
+                    }
+                }.getOrDefault(false)
+                if (ok) break
+            }
+        }.start()
     }
 
     private fun notifyMasterViaUdpOrHttp(masterHostPort: String, isUsb: Boolean = false) {
@@ -888,7 +1031,7 @@ class RpcService : Service(), ComponentCallbacks2 {
                 }
             }
 
-            // 2. HTTP POST fallback to both :3000 and :8080 across /api/cluster/nodes/register and /api/nodes/add
+            // 2. HTTP POST registration/heartbeat with real hardware telemetry and device-derived worker ID
             runCatching {
                 val advertiseIp = if (isUsb || host == "127.0.0.1") {
                     "127.0.0.1"
@@ -897,17 +1040,21 @@ class RpcService : Service(), ComponentCallbacks2 {
                 }
                 val curTel = _telemetry.value
                 val jsonPayload = org.json.JSONObject().apply {
-                    put("id", "android-redmi-worker")
-                    put("label", "${curTel.deviceModel} (Worker)")
+                    put("id", buildDeviceWorkerId())
+                    put("label", "${curTel.deviceModel.trim()} (Android)")
                     put("platform", "Android")
                     put("osType", "android")
                     put("addr", "$advertiseIp:50052")
                     put("ip", advertiseIp)
+                    put("rpcPort", 50052)
                     put("totalRamMb", curTel.totalRamMb)
                     put("availableRamMb", curTel.availableRamMb)
+                    put("bigCores", curTel.bigCoreCount)
+                    put("tempC", curTel.temperatureCelsius.toDouble())
                     put("computeTflops", if (curTel.hasDotProd) 2.2 else 1.4)
                     put("memBwGbps", 25.6)
                     put("linkType", if (isUsb || advertiseIp == "127.0.0.1") "USB-C Tunnel" else "Wi-Fi LAN")
+                    put("allowHttpRegistration", true)
                 }.toString()
 
                 val targetUrls = listOf(
@@ -927,12 +1074,14 @@ class RpcService : Service(), ComponentCallbacks2 {
                             doOutput = true
                             setRequestProperty("Content-Type", "application/json")
                         }
-                        conn.outputStream.use { os ->
-                            os.write(jsonPayload.toByteArray(StandardCharsets.UTF_8))
+                        try {
+                            conn.outputStream.use { os ->
+                                os.write(jsonPayload.toByteArray(StandardCharsets.UTF_8))
+                            }
+                            conn.responseCode in 200..299
+                        } finally {
+                            conn.disconnect()
                         }
-                        val code = conn.responseCode
-                        conn.disconnect()
-                        code in 200..299
                     }.getOrDefault(false)
                     if (ok) break
                 }
@@ -941,12 +1090,15 @@ class RpcService : Service(), ComponentCallbacks2 {
     }
 
     fun stopWorkerAndFreeRam(reason: String = "Manual Stop") {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
         monitorJob?.cancel()
         rpcServerJob?.cancel()
         runCatching { serverSocket?.close() }
         serverSocket = null
         runCatching { nativeProcess?.destroyForcibly() }
         nativeProcess = null
+        unregisterFromMasterAsync()
         System.gc()
 
         val freshMem = HardwareProbe.readProcMemInfo()
@@ -1021,6 +1173,13 @@ class RpcService : Service(), ComponentCallbacks2 {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val text = "SafeCap: ${snap.safeCapMb}MB (<=50%) • ${snap.bigCoreCount} Big Cores • ${"%.1f".format(snap.temperatureCelsius)}°C"
         nm.notify(NOTIFICATION_ID, buildForegroundNotification(text))
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        stopWorkerAndFreeRam("App swiped from recents")
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {

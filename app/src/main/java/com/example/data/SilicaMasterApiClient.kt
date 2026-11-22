@@ -18,6 +18,8 @@ data class MasterHealthResult(
     val reachable: Boolean,
     val latencyMs: Long = -1L,
     val activeModel: String? = null,
+    val activeModelId: String? = null,
+    val engineRunning: Boolean = false,
     val activeNodes: Int = 0,
     val detail: String = ""
 )
@@ -36,7 +38,10 @@ data class RemoteClusterNodeInfo(
 )
 
 data class MasterClusterSnapshot(
+    val activeModelId: String,
     val activeModelName: String,
+    val hasMmproj: Boolean,
+    val engineRunning: Boolean,
     val totalSafePoolMb: Long,
     val neededMb: Long,
     val fitVerdict: String,
@@ -46,7 +51,8 @@ data class MasterClusterSnapshot(
 
 data class ChatCompletionMessage(
     val role: String,
-    val content: String
+    val content: String,
+    val imageDataUrl: String? = null
 )
 
 /**
@@ -116,13 +122,19 @@ object SilicaMasterApiClient {
                     val activeModel = json?.optString("activeModel").orEmpty().ifBlank {
                         json?.optJSONArray("data")?.optJSONObject(0)?.optString("id")
                     }
+                    val activeModelId = json?.optString("activeModelId").orEmpty().ifBlank {
+                        json?.optJSONArray("data")?.optJSONObject(0)?.optString("id")
+                    }
+                    val engineRunning = json?.optBoolean("engineRunning", true) ?: true
                     val activeNodes = json?.optInt("activeNodes", 0) ?: 0
                     return@withContext MasterHealthResult(
                         reachable = true,
                         latencyMs = latency,
                         activeModel = activeModel,
+                        activeModelId = activeModelId,
+                        engineRunning = engineRunning,
                         activeNodes = activeNodes,
-                        detail = "Online ($latency ms)"
+                        detail = if (engineRunning) "Engine Online ($latency ms)" else "Coordinator Ready · Engine Offline ($latency ms)"
                     )
                 }
             }
@@ -197,8 +209,13 @@ object SilicaMasterApiClient {
                         val text = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
                         val root = JSONObject(text)
                         val activeModelObj = root.optJSONObject("activeModel")
+                        val modelId = activeModelObj?.optString("id").orEmpty()
                         val modelName = activeModelObj?.optString("name").orEmpty()
-                            .ifBlank { activeModelObj?.optString("id").orEmpty() }
+                            .ifBlank { modelId }
+                        val engineStatusObj = root.optJSONObject("engineStatus")
+                        val hasMmproj = engineStatusObj?.optBoolean("hasMmproj", false) == true ||
+                            !activeModelObj?.optString("mmprojPath").isNullOrBlank()
+                        val engineRunning = engineStatusObj?.optBoolean("running", false) == true
                         val plan = root.optJSONObject("plan") ?: return@runCatching null
                         val nodesArr = plan.optJSONArray("nodes") ?: JSONArray()
                         val parsedNodes = buildList {
@@ -224,7 +241,10 @@ object SilicaMasterApiClient {
                             }
                         }
                         MasterClusterSnapshot(
+                            activeModelId = modelId.ifBlank { modelName },
                             activeModelName = modelName,
+                            hasMmproj = hasMmproj,
+                            engineRunning = engineRunning,
                             totalSafePoolMb = plan.optLong("totalSafePoolMb", 0L),
                             neededMb = plan.optLong("neededMb", 0L),
                             fitVerdict = plan.optString("fitVerdict", "READY"),
@@ -303,6 +323,7 @@ object SilicaMasterApiClient {
         temperature: Float,
         systemPrompt: String,
         secret: String,
+        webToolsEnabled: Boolean = false,
         onDelta: suspend (accumulatedText: String, tokenEstimate: Int, tokPerSec: Float) -> Unit
     ): Result<Triple<String, Float, Long>> = withContext(Dispatchers.IO) {
         val candidates = buildList {
@@ -328,8 +349,8 @@ object SilicaMasterApiClient {
                 val url = URL("$candidateBase/v1/chat/completions")
                 conn = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
-                    connectTimeout = 4000
-                    readTimeout = 45000
+                    connectTimeout = 4500
+                    readTimeout = 120_000 // Long prefill tolerance alongside 10s SSE keepalives
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json")
                     setRequestProperty("Accept", "text/event-stream, application/json")
@@ -347,10 +368,23 @@ object SilicaMasterApiClient {
                     })
                 }
                 messages.forEach { msg ->
-                    msgArray.put(JSONObject().apply {
-                        put("role", msg.role)
-                        put("content", msg.content)
-                    })
+                    val obj = JSONObject().apply { put("role", msg.role) }
+                    if (!msg.imageDataUrl.isNullOrBlank()) {
+                        val parts = JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("type", "text")
+                                put("text", msg.content.ifBlank { "Describe this image." })
+                            })
+                            put(JSONObject().apply {
+                                put("type", "image_url")
+                                put("image_url", JSONObject().apply { put("url", msg.imageDataUrl) })
+                            })
+                        }
+                        obj.put("content", parts)
+                    } else {
+                        obj.put("content", msg.content)
+                    }
+                    msgArray.put(obj)
                 }
 
                 val payload = JSONObject().apply {
@@ -358,6 +392,26 @@ object SilicaMasterApiClient {
                     put("stream", true)
                     put("temperature", temperature.toDouble())
                     put("messages", msgArray)
+                    if (webToolsEnabled) {
+                        val toolsArr = JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("type", "function")
+                                put("function", JSONObject().apply {
+                                    put("name", "web_search")
+                                    put("description", "Search public web knowledge")
+                                    put("parameters", JSONObject().apply {
+                                        put("type", "object")
+                                        put("properties", JSONObject().apply {
+                                            put("query", JSONObject().apply { put("type", "string") })
+                                        })
+                                        put("required", JSONArray().put("query"))
+                                    })
+                                })
+                            })
+                        }
+                        put("tools", toolsArr)
+                        put("tool_choice", "auto")
+                    }
                 }
 
                 conn.outputStream.use { os ->
@@ -366,58 +420,82 @@ object SilicaMasterApiClient {
                 }
 
                 val code = conn.responseCode
+                if (code == 503) {
+                    val errBody = conn.errorStream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
+                    val msg = runCatching {
+                        JSONObject(errBody).optJSONObject("error")?.optString("message")
+                    }.getOrNull().orEmpty()
+                    return@withContext Result.failure(
+                        IllegalStateException(
+                            "HTTP 503 ENGINE_OFFLINE: ${msg.ifBlank { "No live inference engine loaded on Master. Load a GGUF model or connect llama-server / Ollama on Desktop." }}"
+                        )
+                    )
+                }
                 if (code !in 200..299) {
                     val errBody = conn.errorStream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
                     throw IllegalStateException("Master HTTP $code at $candidateBase: ${errBody.take(180).ifBlank { "Request failed" }}")
                 }
 
                 val contentType = conn.contentType.orEmpty().lowercase()
-                val accumulated = StringBuilder()
+                val reasoningBuf = StringBuilder()
+                val answerBuf = StringBuilder()
                 var chunkCount = 0
+
+                fun buildCombinedDisplay(): String {
+                    val r = reasoningBuf.toString().trim()
+                    val a = answerBuf.toString()
+                    return if (r.isNotEmpty()) "<think>\n$r\n</think>\n$a" else a
+                }
 
                 if (contentType.contains("text/event-stream")) {
                     BufferedReader(InputStreamReader(conn.inputStream, StandardCharsets.UTF_8)).use { reader ->
                         while (currentCoroutineContext().isActive) {
                             val line = reader.readLine() ?: break
                             val trimmed = line.trim()
+                            if (trimmed.isEmpty() || trimmed.startsWith(":")) continue // SSE keepalive heartbeat
                             if (!trimmed.startsWith("data:")) continue
                             val dataStr = trimmed.removePrefix("data:").trim()
                             if (dataStr == "[DONE]") break
                             val json = runCatching { JSONObject(dataStr) }.getOrNull() ?: continue
                             val choices = json.optJSONArray("choices") ?: continue
                             val choice0 = choices.optJSONObject(0) ?: continue
-                            val delta = choice0.optJSONObject("delta")?.optString("content")
-                                ?: choice0.optJSONObject("message")?.optString("content")
-                                ?: ""
-                            if (delta.isNotEmpty()) {
-                                accumulated.append(delta)
+                            val deltaObj = choice0.optJSONObject("delta")
+                            val rDelta = deltaObj?.optString("reasoning_content").orEmpty()
+                            val cDelta = deltaObj?.optString("content").orEmpty().ifEmpty {
+                                choice0.optJSONObject("message")?.optString("content").orEmpty()
+                            }
+                            if (rDelta.isNotEmpty() || cDelta.isNotEmpty()) {
+                                if (rDelta.isNotEmpty()) reasoningBuf.append(rDelta)
+                                if (cDelta.isNotEmpty()) answerBuf.append(cDelta)
                                 chunkCount++
+                                val combined = buildCombinedDisplay()
                                 val elapsedSec = ((System.currentTimeMillis() - startMs).coerceAtLeast(50L)) / 1000f
-                                val estTokens = (accumulated.length / 4).coerceAtLeast(chunkCount)
+                                val estTokens = (combined.length / 4).coerceAtLeast(chunkCount)
                                 val tps = estTokens / elapsedSec
-                                onDelta(accumulated.toString(), estTokens, tps)
+                                onDelta(combined, estTokens, tps)
                             }
                         }
                     }
                 } else {
                     val body = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
                     val json = JSONObject(body)
-                    val content = json.optJSONArray("choices")
-                        ?.optJSONObject(0)
-                        ?.optJSONObject("message")
-                        ?.optString("content")
-                        .orEmpty()
-                    accumulated.append(content)
+                    val msgObj = json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
+                    val rText = msgObj?.optString("reasoning_content").orEmpty()
+                    val cText = msgObj?.optString("content").orEmpty()
+                    if (rText.isNotEmpty()) reasoningBuf.append(rText)
+                    if (cText.isNotEmpty()) answerBuf.append(cText)
+                    val combined = buildCombinedDisplay()
                     val elapsedSec = ((System.currentTimeMillis() - startMs).coerceAtLeast(50L)) / 1000f
-                    val estTokens = (accumulated.length / 4).coerceAtLeast(1)
+                    val estTokens = (combined.length / 4).coerceAtLeast(1)
                     val tps = estTokens / elapsedSec
-                    onDelta(accumulated.toString(), estTokens, tps)
+                    onDelta(combined, estTokens, tps)
                 }
 
+                val combinedFinal = buildCombinedDisplay()
                 val totalMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
-                val finalTokens = (accumulated.length / 4).coerceAtLeast(chunkCount.coerceAtLeast(1))
+                val finalTokens = (combinedFinal.length / 4).coerceAtLeast(chunkCount.coerceAtLeast(1))
                 val finalTps = finalTokens / (totalMs / 1000f)
-                return@withContext Result.success(Triple(accumulated.toString(), finalTps, totalMs))
+                return@withContext Result.success(Triple(combinedFinal, finalTps, totalMs))
             } catch (e: Exception) {
                 lastError = e
             } finally {

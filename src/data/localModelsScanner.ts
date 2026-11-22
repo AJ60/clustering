@@ -1,4 +1,9 @@
-import { ContextLengthOption, GgufArchitecture, GgufModelPreset } from '../types/starCluster';
+import {
+  ContextLengthOption,
+  GgufArchitecture,
+  GgufModelPreset,
+  LayerMemoryProfile,
+} from '../types/starCluster';
 
 export interface GgufHeaderMetadata {
   magic: string;
@@ -6,112 +11,232 @@ export interface GgufHeaderMetadata {
   tensorCount: number;
   kvCount: number;
   name?: string;
+  basename?: string;
   architecture?: string;
   layers?: number;
   contextLength?: number;
+  embeddingLength?: number;
+  headCount?: number;
+  headCountKv?: number;
   expertCount?: number;
   expertUsedCount?: number;
+  fileType?: number;
+  hasChatTemplate?: boolean;
+  hasNativeMtp?: boolean;
+  vocabSize?: number;
+  vocabHash?: string;
+}
+
+const FNV_OFFSET = 0xcbf29ce484222325n;
+const FNV_PRIME = 0x100000001b3n;
+const MASK_64 = (1n << 64n) - 1n;
+
+function fnv1aUpdate(hash: bigint, bytes: Uint8Array): bigint {
+  let h = hash;
+  for (let i = 0; i < bytes.length; i++) {
+    h ^= BigInt(bytes[i]);
+    h = (h * FNV_PRIME) & MASK_64;
+  }
+  return h;
 }
 
 /**
- * Parses binary GGUF header bytes (first 32KB - 128KB) to read true model card metadata.
- * Works isomorphically in Node.js and in the browser (via Uint8Array / DataView).
+ * Parses binary GGUF v2/v3 header bytes sequentially to extract real model-card metadata,
+ * chat template presence, MoE/MTP attributes, and deterministic vocabulary hash.
+ * Works isomorphically in Node.js and the browser.
  */
 export function parseGgufBinaryHeader(bytes: Uint8Array): GgufHeaderMetadata | null {
   if (bytes.length < 24) return null;
-  // Magic bytes: 'GGUF' (0x47, 0x47, 0x55, 0x46)
   if (bytes[0] !== 0x47 || bytes[1] !== 0x47 || bytes[2] !== 0x55 || bytes[3] !== 0x46) {
     return null;
   }
 
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const decoder = new TextDecoder('utf-8');
   const version = view.getUint32(4, true);
+  if (version < 2 || version > 3) return null;
+
   const tensorCount = Number(view.getBigUint64(8, true));
   const kvCount = Number(view.getBigUint64(16, true));
 
-  let name: string | undefined;
-  let architecture: string | undefined;
-  let layers: number | undefined;
-  let contextLength: number | undefined;
-  let expertCount: number | undefined;
-  let expertUsedCount: number | undefined;
+  let offset = 24;
+  const kv: Record<string, unknown> = {};
+  let vocabSize: number | undefined;
+  let vocabHash: string | undefined;
+  let hasNativeMtp = false;
 
-  const maxSearch = Math.min(bytes.length - 8, 131072);
-  const textDecoder = new TextDecoder('utf-8');
+  const readString = (): string | null => {
+    if (offset + 8 > bytes.length) return null;
+    const len = Number(view.getBigUint64(offset, true));
+    offset += 8;
+    if (len < 0 || len > 4 * 1024 * 1024 || offset + len > bytes.length) return null;
+    const s = decoder.decode(bytes.subarray(offset, offset + len));
+    offset += len;
+    return s;
+  };
 
-  function findSubstr(needle: string): number {
-    const needleBytes = new TextEncoder().encode(needle);
-    outer: for (let i = 24; i <= maxSearch - needleBytes.length; i++) {
-      for (let j = 0; j < needleBytes.length; j++) {
-        if (bytes[i + j] !== needleBytes[j]) continue outer;
-      }
-      return i;
+  const readValue = (vtype: number, key: string): { ok: boolean; value?: unknown } => {
+    switch (vtype) {
+      case 0: // u8
+        if (offset + 1 > bytes.length) return { ok: false };
+        return { ok: true, value: bytes[offset++] };
+      case 1: // i8
+        if (offset + 1 > bytes.length) return { ok: false };
+        return { ok: true, value: view.getInt8(offset++) };
+      case 2: // u16
+        if (offset + 2 > bytes.length) return { ok: false };
+        {
+          const v = view.getUint16(offset, true);
+          offset += 2;
+          return { ok: true, value: v };
+        }
+      case 3: // i16
+        if (offset + 2 > bytes.length) return { ok: false };
+        {
+          const v = view.getInt16(offset, true);
+          offset += 2;
+          return { ok: true, value: v };
+        }
+      case 4: // u32
+        if (offset + 4 > bytes.length) return { ok: false };
+        {
+          const v = view.getUint32(offset, true);
+          offset += 4;
+          return { ok: true, value: v };
+        }
+      case 5: // i32
+        if (offset + 4 > bytes.length) return { ok: false };
+        {
+          const v = view.getInt32(offset, true);
+          offset += 4;
+          return { ok: true, value: v };
+        }
+      case 6: // f32
+        if (offset + 4 > bytes.length) return { ok: false };
+        {
+          const v = view.getFloat32(offset, true);
+          offset += 4;
+          return { ok: true, value: v };
+        }
+      case 7: // bool
+        if (offset + 1 > bytes.length) return { ok: false };
+        return { ok: true, value: bytes[offset++] !== 0 };
+      case 8: // string
+        {
+          const s = readString();
+          return s === null ? { ok: false } : { ok: true, value: s };
+        }
+      case 9: // array
+        {
+          if (offset + 12 > bytes.length) return { ok: false };
+          const elemType = view.getUint32(offset, true);
+          offset += 4;
+          const len = Number(view.getBigUint64(offset, true));
+          offset += 8;
+          const isTokens = key === 'tokenizer.ggml.tokens';
+          let h = FNV_OFFSET;
+          const lenBytes = new Uint8Array(8);
+          new DataView(lenBytes.buffer).setBigUint64(0, BigInt(len), true);
+          h = fnv1aUpdate(h, lenBytes);
+
+          if (elemType === 8) {
+            for (let i = 0; i < len; i++) {
+              if (offset + 8 > bytes.length) {
+                if (isTokens) {
+                  vocabSize = len;
+                  vocabHash = h.toString(16).padStart(16, '0');
+                }
+                return { ok: false };
+              }
+              const slen = Number(view.getBigUint64(offset, true));
+              offset += 8;
+              if (offset + slen > bytes.length) {
+                if (isTokens) {
+                  vocabSize = len;
+                  vocabHash = h.toString(16).padStart(16, '0');
+                }
+                return { ok: false };
+              }
+              if (isTokens && slen <= 1024) {
+                h = fnv1aUpdate(h, bytes.subarray(offset, offset + slen));
+                h = fnv1aUpdate(h, new Uint8Array([0xff]));
+              }
+              offset += slen;
+            }
+            if (isTokens) {
+              vocabSize = len;
+              vocabHash = h.toString(16).padStart(16, '0');
+            }
+            return { ok: true, value: { len } };
+          }
+
+          const elemSize =
+            elemType === 0 || elemType === 1 || elemType === 7
+              ? 1
+              : elemType === 2 || elemType === 3
+                ? 2
+                : elemType === 4 || elemType === 5 || elemType === 6
+                  ? 4
+                  : elemType === 10 || elemType === 11 || elemType === 12
+                    ? 8
+                    : 0;
+          if (elemSize === 0 || offset + len * elemSize > bytes.length) {
+            return { ok: false };
+          }
+          offset += len * elemSize;
+          return { ok: true, value: { len } };
+        }
+      case 10: // u64
+        if (offset + 8 > bytes.length) return { ok: false };
+        {
+          const v = Number(view.getBigUint64(offset, true));
+          offset += 8;
+          return { ok: true, value: v };
+        }
+      case 11: // i64
+        if (offset + 8 > bytes.length) return { ok: false };
+        {
+          const v = Number(view.getBigInt64(offset, true));
+          offset += 8;
+          return { ok: true, value: v };
+        }
+      case 12: // f64
+        if (offset + 8 > bytes.length) return { ok: false };
+        {
+          const v = view.getFloat64(offset, true);
+          offset += 8;
+          return { ok: true, value: v };
+        }
+      default:
+        return { ok: false };
     }
-    return -1;
+  };
+
+  for (let i = 0; i < Math.min(kvCount, 2048); i++) {
+    const key = readString();
+    if (key === null || offset + 4 > bytes.length) break;
+    const vtype = view.getUint32(offset, true);
+    offset += 4;
+    const res = readValue(vtype, key);
+    if (!res.ok) break;
+    kv[key] = res.value;
+    if (key.includes('nextn') || key.includes('mtp')) {
+      hasNativeMtp = true;
+    }
   }
 
-  // 1. Look for block_count (layers)
-  const blockIdx = findSubstr('block_count');
-  if (blockIdx !== -1) {
-    const valOffset = blockIdx + 11 + 4;
-    if (valOffset + 4 <= bytes.length) {
-      const val = view.getUint32(valOffset, true);
-      if (val > 0 && val <= 256) layers = val;
+  const arch = typeof kv['general.architecture'] === 'string' ? kv['general.architecture'] : undefined;
+  const pickNum = (suffix: string): number | undefined => {
+    if (arch && typeof kv[`${arch}.${suffix}`] === 'number') return kv[`${arch}.${suffix}`] as number;
+    for (const [k, v] of Object.entries(kv)) {
+      if (k.endsWith(`.${suffix}`) && typeof v === 'number') return v;
     }
-  }
+    return undefined;
+  };
 
-  // 2. Look for context_length
-  const ctxIdx = findSubstr('context_length');
-  if (ctxIdx !== -1) {
-    const valOffset = ctxIdx + 14 + 4;
-    if (valOffset + 4 <= bytes.length) {
-      const val = view.getUint32(valOffset, true);
-      if (val >= 512 && val <= 1048576) contextLength = val;
-    }
-  }
-
-  // 3. Look for expert_count / expert_used_count (MoE architecture)
-  const expIdx = findSubstr('expert_count');
-  if (expIdx !== -1) {
-    const valOffset = expIdx + 12 + 4;
-    if (valOffset + 4 <= bytes.length) {
-      const val = view.getUint32(valOffset, true);
-      if (val > 0 && val <= 512) expertCount = val;
-    }
-  }
-  const expUsedIdx = findSubstr('expert_used_count');
-  if (expUsedIdx !== -1) {
-    const valOffset = expUsedIdx + 17 + 4;
-    if (valOffset + 4 <= bytes.length) {
-      const val = view.getUint32(valOffset, true);
-      if (val > 0 && val <= 64) expertUsedCount = val;
-    }
-  }
-
-  // 4. Look for general.name
-  const nameIdx = findSubstr('general.name');
-  if (nameIdx !== -1) {
-    const lenOffset = nameIdx + 12 + 4;
-    if (lenOffset + 8 <= bytes.length) {
-      const len = Number(view.getBigUint64(lenOffset, true));
-      const start = lenOffset + 8;
-      if (len > 0 && len < 128 && start + len <= bytes.length) {
-        name = textDecoder.decode(bytes.subarray(start, start + len)).trim();
-      }
-    }
-  }
-
-  // 5. Look for general.architecture
-  const archIdx = findSubstr('general.architecture');
-  if (archIdx !== -1) {
-    const lenOffset = archIdx + 20 + 4;
-    if (lenOffset + 8 <= bytes.length) {
-      const len = Number(view.getBigUint64(lenOffset, true));
-      const start = lenOffset + 8;
-      if (len > 0 && len < 64 && start + len <= bytes.length) {
-        architecture = textDecoder.decode(bytes.subarray(start, start + len)).trim();
-      }
-    }
+  if (!vocabHash) {
+    const seed = new TextEncoder().encode(`${arch ?? 'llama'}:${kv['general.name'] ?? ''}`);
+    vocabHash = fnv1aUpdate(FNV_OFFSET, seed).toString(16).padStart(16, '0');
   }
 
   return {
@@ -119,12 +244,21 @@ export function parseGgufBinaryHeader(bytes: Uint8Array): GgufHeaderMetadata | n
     version,
     tensorCount,
     kvCount,
-    name,
-    architecture,
-    layers,
-    contextLength,
-    expertCount,
-    expertUsedCount,
+    name: typeof kv['general.name'] === 'string' ? kv['general.name'].trim() : undefined,
+    basename: typeof kv['general.basename'] === 'string' ? kv['general.basename'].trim() : undefined,
+    architecture: arch,
+    layers: pickNum('block_count'),
+    contextLength: pickNum('context_length'),
+    embeddingLength: pickNum('embedding_length'),
+    headCount: pickNum('attention.head_count'),
+    headCountKv: pickNum('attention.head_count_kv'),
+    expertCount: pickNum('expert_count'),
+    expertUsedCount: pickNum('expert_used_count'),
+    fileType: typeof kv['general.file_type'] === 'number' ? (kv['general.file_type'] as number) : undefined,
+    hasChatTemplate: typeof kv['tokenizer.chat_template'] === 'string',
+    hasNativeMtp,
+    vocabSize,
+    vocabHash,
   };
 }
 
@@ -136,7 +270,7 @@ export function inferGgufQuantFromFilename(filename: string): string {
   const raw = match[1].replace('-', '_').toUpperCase();
   if (raw === 'FP16') return 'F16';
   if (raw === 'FP32') return 'F32';
-  if (raw.includes('BITNET') || raw.includes('1.58')) return 'BITNET_1.58B';
+  if (raw.includes('BITNET') || raw.includes('1.58')) return 'TQ1_0';
   return raw;
 }
 
@@ -154,6 +288,48 @@ export function estimateBpwFromQuant(quant: string, arch: GgufArchitecture): num
   if (q.includes('F16') || q.includes('BF16')) return 16.0;
   if (q.includes('F32')) return 32.0;
   return 4.5;
+}
+
+export function buildNonUniformLayerProfiles(
+  layers: number,
+  sizeMb: number,
+  architecture: GgufArchitecture,
+  contextLength: number,
+  kvQuant: 'f16' | 'q8_0' | 'q4_0' = 'q8_0',
+  headCount = 32,
+  headCountKv = 8,
+  embeddingLength = 4096
+): { masterPinnedOverheadMb: number; perLayerProfiles: LayerMemoryProfile[] } {
+  const masterEmbedHeadMb = Math.max(96, Math.round(sizeMb * 0.085));
+  const bodyMb = Math.max(100, sizeMb - masterEmbedHeadMb);
+  const avgLayerMb = bodyMb / Math.max(1, layers);
+
+  const headDim = Math.max(64, embeddingLength / Math.max(1, headCount));
+  const kvBpe = kvQuant === 'q4_0' ? 0.5625 : kvQuant === 'q8_0' ? 1.0625 : 2.0;
+  const perLayerKvMb = Number(
+    Math.max(2, (2 * headCountKv * headDim * contextLength * kvBpe) / (1024 * 1024)).toFixed(2)
+  );
+
+  const perLayerProfiles: LayerMemoryProfile[] = [];
+  for (let i = 0; i < layers; i++) {
+    // MoE models often keep dense layer 0 and sparse expert layers on 1..N-1
+    const isDenseFirstInMoe = architecture === 'MoE' && i === 0;
+    const isMoeLayer = architecture === 'MoE' && !isDenseFirstInMoe;
+    const layerWeight = isDenseFirstInMoe ? avgLayerMb * 0.55 : avgLayerMb * (isMoeLayer ? 1.01 : 1.0);
+    const attentionMb = Number((layerWeight * (isMoeLayer ? 0.18 : 0.34)).toFixed(2));
+    const ffnOrExpertMb = Number((layerWeight - attentionMb).toFixed(2));
+
+    perLayerProfiles.push({
+      layerIndex: i,
+      attentionMb,
+      ffnOrExpertMb,
+      totalWeightMb: Number((attentionMb + ffnOrExpertMb).toFixed(2)),
+      kvCacheMb: perLayerKvMb,
+      isMoeLayer,
+    });
+  }
+
+  return { masterPinnedOverheadMb: masterEmbedHeadMb, perLayerProfiles };
 }
 
 export function inferGgufParamsFromFilename(filename: string, sizeMb: number): {
@@ -207,7 +383,6 @@ export function inferGgufParamsFromFilename(filename: string, sizeMb: number): {
   if (paramMatch) {
     totalParamsB = parseFloat(paramMatch[1]);
   } else {
-    // Estimate total parameters from disk size and detected BPW
     const approxBytes = sizeMb * 1024 * 1024;
     totalParamsB = parseFloat(((approxBytes * 8) / (bpw * 1e9)).toFixed(1));
     if (totalParamsB < 1) totalParamsB = 1.5;
@@ -217,11 +392,9 @@ export function inferGgufParamsFromFilename(filename: string, sizeMb: number): {
   if (architecture === 'MoE') {
     activeParamsB = parseFloat(Math.min(totalParamsB, Math.max(1.8, totalParamsB * 0.12)).toFixed(1));
   } else if (architecture === 'Looped') {
-    // In Looped models, active params equal single-pass physical layer weight footprint
     activeParamsB = parseFloat((totalParamsB * 0.5).toFixed(1));
   }
 
-  // Infer layer count from parameter count and architecture
   let layers = 32;
   if (architecture === 'Looped') {
     layers = totalParamsB <= 7 ? 16 : 24;
@@ -239,25 +412,19 @@ export function inferGgufParamsFromFilename(filename: string, sizeMb: number): {
     layers = 80;
   }
 
-  return {
-    totalParamsB,
-    activeParamsB,
-    architecture,
-    layers,
-  };
+  return { totalParamsB, activeParamsB, architecture, layers };
 }
 
 export function parseLocalGgufModel(
   filePath: string,
   sizeBytes: number,
-  headerBytes?: Uint8Array
+  headerBytes?: Uint8Array,
+  mmprojInfo?: { path: string; sizeMb: number } | null
 ): GgufModelPreset {
-  // Extract clean filename from Windows or Unix path
   const filename = filePath.split(/[/\\]/).pop() || 'model.gguf';
   const sizeMb = Math.max(10, Math.round(sizeBytes / (1024 * 1024)));
-  const quant = inferGgufQuantFromFilename(filename);
+  let quant = inferGgufQuantFromFilename(filename);
 
-  // Fallback heuristic estimation
   const inferred = inferGgufParamsFromFilename(filename, sizeMb);
   let totalParamsB = inferred.totalParamsB;
   let activeParamsB = inferred.activeParamsB;
@@ -265,21 +432,45 @@ export function parseLocalGgufModel(
   let layers = inferred.layers;
   let rawName: string | undefined;
   let detectedCtx: number | undefined;
+  let rawArchitecture: string | undefined;
+  let expertCount: number | undefined;
+  let expertUsedCount: number | undefined;
+  let headCount = 32;
+  let headCountKv = 8;
+  let embeddingLength = 4096;
+  let hasChatTemplate = true;
+  let hasNativeMtp = false;
+  let vocabSize: number | undefined;
+  let vocabHash: string | undefined;
 
-  // Try extracting binary header metadata if provided
   if (headerBytes && headerBytes.length >= 24) {
     const meta = parseGgufBinaryHeader(headerBytes);
     if (meta) {
       if (meta.name) rawName = meta.name;
+      if (meta.architecture) rawArchitecture = meta.architecture;
       if (meta.layers && meta.layers > 0) layers = meta.layers;
       if (meta.contextLength && meta.contextLength > 0) detectedCtx = meta.contextLength;
+      if (meta.headCount) headCount = meta.headCount;
+      if (meta.headCountKv) headCountKv = meta.headCountKv;
+      if (meta.embeddingLength) embeddingLength = meta.embeddingLength;
+      if (meta.expertCount) expertCount = meta.expertCount;
+      if (meta.expertUsedCount) expertUsedCount = meta.expertUsedCount;
+      if (meta.hasChatTemplate !== undefined) hasChatTemplate = meta.hasChatTemplate;
+      if (meta.hasNativeMtp !== undefined) hasNativeMtp = meta.hasNativeMtp;
+      if (meta.vocabSize) vocabSize = meta.vocabSize;
+      if (meta.vocabHash) vocabHash = meta.vocabHash;
 
-      // Detect architecture from GGUF metadata
-      if (meta.expertCount && meta.expertCount > 0) {
+      if (meta.fileType === 36 || meta.fileType === 37) {
+        quant = 'TQ1_0';
+        architecture = 'Ternary';
+      } else if (meta.expertCount && meta.expertCount > 1) {
         architecture = 'MoE';
         const activeExperts = meta.expertUsedCount || 8;
         activeParamsB = parseFloat(
-          Math.min(totalParamsB, Math.max(1.5, totalParamsB * (activeExperts / meta.expertCount) * 1.5)).toFixed(1)
+          Math.min(
+            totalParamsB,
+            Math.max(1.5, totalParamsB * (0.12 + 0.88 * (activeExperts / meta.expertCount)))
+          ).toFixed(1)
         );
       } else if (meta.architecture?.includes('moe')) {
         architecture = 'MoE';
@@ -290,14 +481,15 @@ export function parseLocalGgufModel(
     }
   }
 
-  const cleanName = rawName || filename
-    .replace(/\.gguf$/i, '')
-    .replace(/[-_](iq[1-4]|q[0-8]|f16|f32|bf16)[a-z0-9_.-]*/i, '')
-    .replace(/[-_]+/g, ' ')
-    .trim();
+  const cleanName =
+    rawName ||
+    filename
+      .replace(/\.gguf$/i, '')
+      .replace(/[-_](iq[1-4]|q[0-8]|f16|f32|bf16|tq[1-2])[a-z0-9_.-]*/i, '')
+      .replace(/[-_]+/g, ' ')
+      .trim();
 
   const id = `local-${filename.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
-
   const maxContextLength = detectedCtx || (totalParamsB <= 2 ? 32768 : 131072);
   let contextLengthDefault: ContextLengthOption = 16384;
   if (detectedCtx) {
@@ -311,7 +503,20 @@ export function parseLocalGgufModel(
     contextLengthDefault = 8192;
   }
 
+  const { masterPinnedOverheadMb, perLayerProfiles } = buildNonUniformLayerProfiles(
+    layers,
+    sizeMb,
+    architecture,
+    contextLengthDefault,
+    'q8_0',
+    headCount,
+    headCountKv,
+    embeddingLength
+  );
+
+  const mmprojSizeMb = mmprojInfo?.sizeMb ?? 0;
   const archLabel = architecture === 'MoE' ? 'Sparse MoE' : architecture;
+  const visionSuffix = mmprojInfo ? ' · Vision (mmproj)' : '';
 
   return {
     id,
@@ -326,9 +531,28 @@ export function parseLocalGgufModel(
     maxContextLength,
     hfRepo: `local/${filename}`,
     hfUrl: `file://${filePath.replace(/\\/g, '/')}`,
-    summary: `${(sizeMb / 1024).toFixed(2)} GB · ${layers}L · ${archLabel} · Local PC GGUF`,
-    tags: ['local', 'disk', quant.toLowerCase(), architecture.toLowerCase()],
+    summary: `${(sizeMb / 1024).toFixed(2)} GB · ${layers}L · ${archLabel}${visionSuffix}`,
+    tags: [
+      'local',
+      quant.toLowerCase(),
+      architecture.toLowerCase(),
+      ...(mmprojInfo ? ['vision', 'mmproj'] : []),
+    ],
     isLocal: true,
     localPath: filePath,
+    rawArchitecture,
+    expertCount,
+    expertUsedCount,
+    headCount,
+    headCountKv,
+    embeddingLength,
+    hasChatTemplate,
+    hasNativeMtp,
+    vocabSize,
+    vocabHash,
+    mmprojPath: mmprojInfo?.path ?? null,
+    mmprojSizeMb,
+    masterPinnedOverheadMb: masterPinnedOverheadMb + mmprojSizeMb,
+    perLayerProfiles,
   };
 }

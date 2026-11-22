@@ -30,7 +30,10 @@ data class SilicaEngineConfig(
     val clusterSecret: String = "clusterd-default-hmac-key",
     val tensorCacheEnabled: Boolean = true,
     val temperature: Float = 0.7f,
-    val systemPrompt: String = "You are a concise, helpful local AI running across a decentralized Silica Cluster."
+    val systemPrompt: String = "You are a concise, helpful local AI running across a decentralized Silica Cluster.",
+    val darkTheme: Boolean = true,
+    val onboardingCompleted: Boolean = false,
+    val webToolsEnabled: Boolean = false
 )
 
 class SilicaPreferencesRepository(private val context: Context) {
@@ -50,6 +53,9 @@ class SilicaPreferencesRepository(private val context: Context) {
         val TENSOR_CACHE_ENABLED = booleanPreferencesKey("tensor_cache_enabled")
         val TEMPERATURE = floatPreferencesKey("temperature")
         val SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
+        val DARK_THEME = booleanPreferencesKey("dark_theme")
+        val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
+        val WEB_TOOLS_ENABLED = booleanPreferencesKey("web_tools_enabled")
     }
 
     val configFlow: Flow<SilicaEngineConfig> = context.silicaPrefsDataStore.data.map { prefs ->
@@ -68,7 +74,10 @@ class SilicaPreferencesRepository(private val context: Context) {
             tensorCacheEnabled = prefs[Keys.TENSOR_CACHE_ENABLED] ?: true,
             temperature = (prefs[Keys.TEMPERATURE] ?: 0.7f).coerceIn(0f, 1.5f),
             systemPrompt = prefs[Keys.SYSTEM_PROMPT]
-                ?: "You are a concise, helpful local AI running across a decentralized Silica Cluster."
+                ?: "You are a concise, helpful local AI running across a decentralized Silica Cluster.",
+            darkTheme = prefs[Keys.DARK_THEME] ?: true,
+            onboardingCompleted = prefs[Keys.ONBOARDING_COMPLETED] ?: false,
+            webToolsEnabled = prefs[Keys.WEB_TOOLS_ENABLED] ?: false
         )
     }
 
@@ -89,7 +98,10 @@ class SilicaPreferencesRepository(private val context: Context) {
                 tensorCacheEnabled = prefs[Keys.TENSOR_CACHE_ENABLED] ?: true,
                 temperature = (prefs[Keys.TEMPERATURE] ?: 0.7f).coerceIn(0f, 1.5f),
                 systemPrompt = prefs[Keys.SYSTEM_PROMPT]
-                    ?: "You are a concise, helpful local AI running across a decentralized Silica Cluster."
+                    ?: "You are a concise, helpful local AI running across a decentralized Silica Cluster.",
+                darkTheme = prefs[Keys.DARK_THEME] ?: true,
+                onboardingCompleted = prefs[Keys.ONBOARDING_COMPLETED] ?: false,
+                webToolsEnabled = prefs[Keys.WEB_TOOLS_ENABLED] ?: false
             )
             val next = transform(current)
             prefs[Keys.NODE_ROLE] = next.nodeRole
@@ -106,6 +118,9 @@ class SilicaPreferencesRepository(private val context: Context) {
             prefs[Keys.TENSOR_CACHE_ENABLED] = next.tensorCacheEnabled
             prefs[Keys.TEMPERATURE] = next.temperature.coerceIn(0f, 1.5f)
             prefs[Keys.SYSTEM_PROMPT] = next.systemPrompt
+            prefs[Keys.DARK_THEME] = next.darkTheme
+            prefs[Keys.ONBOARDING_COMPLETED] = next.onboardingCompleted
+            prefs[Keys.WEB_TOOLS_ENABLED] = next.webToolsEnabled
         }
     }
 }

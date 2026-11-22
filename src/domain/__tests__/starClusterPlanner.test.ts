@@ -29,13 +29,13 @@ describe('starClusterPlanner', () => {
     const desktopCap = computeDesktopSafeCap(16384, 1024);
     assert.equal(desktopCap, 15360);
 
-    // VRAM <= 8GB must enforce WDDM 450 MB reserve
-    const vram8Gb = computeVramSafeCap(8192, 90);
-    assert.ok(vram8Gb <= 8192 - 450);
+    // Windows VRAM reserves max(512 MB, 12%) for WDDM compositor safety
+    const vram8Gb = computeVramSafeCap(8192, true);
+    assert.ok(vram8Gb <= 8192 - 512);
 
-    // VRAM > 8GB uses percentage cap
-    const vram16Gb = computeVramSafeCap(16384, 90);
-    assert.equal(vram16Gb, Math.floor(16384 * 0.9));
+    // Linux/Vulkan VRAM reserves max(256 MB, 8%)
+    const vram16Gb = computeVramSafeCap(16384, false);
+    assert.equal(vram16Gb, 16384 - Math.floor(16384 * 0.08));
   });
 
   it('calculates comparative node throughput scores', () => {

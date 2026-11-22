@@ -46,6 +46,8 @@ import androidx.compose.material.icons.outlined.BatteryStd
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.DeviceThermostat
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.HealthAndSafety
 import androidx.compose.material.icons.outlined.Hub
@@ -121,7 +123,8 @@ fun SilicaCommandScreen(
     onOpenQr: () -> Unit,
     onSelectLogFilter: (TerminalLogFilter) -> Unit,
     onClearLogs: () -> Unit,
-    onRunDiagnostics: () -> Unit
+    onRunDiagnostics: () -> Unit,
+    onDismissOnboarding: () -> Unit
 ) {
     val context = LocalContext.current
     val cs = MaterialTheme.colorScheme
@@ -192,6 +195,8 @@ fun SilicaCommandScreen(
     }
     var threadsSlider by remember(effectiveThreads) { mutableFloatStateOf(effectiveThreads.toFloat()) }
     var ramPctSlider by remember(cfg.safeRamPercent) { mutableFloatStateOf(cfg.safeRamPercent.toFloat()) }
+    var showAdvancedTuning by remember { mutableStateOf(false) }
+    var showDiagnosticsTerminal by remember { mutableStateOf(false) }
 
     LaunchedEffect(cfg.masterBaseUrl) { masterUrlDraft = cfg.masterBaseUrl }
     LaunchedEffect(cfg.clusterSecret) { secretDraft = cfg.clusterSecret }
@@ -226,6 +231,75 @@ fun SilicaCommandScreen(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // 0. Guided 3-Step Onboarding Card (dismissible)
+        if (!cfg.onboardingCompleted) {
+            item {
+                Surface(
+                    shape = MaterialTheme.shapes.large,
+                    color = cs.primaryContainer.copy(alpha = 0.45f),
+                    border = BorderStroke(1.dp, cs.primary.copy(alpha = 0.45f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Quick Start · Join Silica Cluster",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = cs.onSurface
+                            )
+                            OutlinedButton(
+                                onClick = onDismissOnboarding,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                modifier = Modifier.minimumInteractiveComponentSize()
+                            ) {
+                                Text("Dismiss", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                        Text(
+                            text = "1. Connect via USB-C or 5 GHz Wi-Fi on the same network as your PC.\n" +
+                                "2. Tap Auto-Detect below to link with your Master (<=50% safe RAM cap).\n" +
+                                "3. Open Chat to send text or vision prompts to your loaded GGUF model.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = cs.onSurfaceVariant
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    onAutoDetect()
+                                    onDismissOnboarding()
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = cs.primary,
+                                    contentColor = cs.onPrimary
+                                ),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Icon(Icons.Outlined.Radar, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Auto-Detect Master", style = MaterialTheme.typography.labelSmall)
+                            }
+                            OutlinedButton(
+                                onClick = onOpenQr,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Icon(Icons.Outlined.QrCodeScanner, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text("Scan QR", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 1. Hero Engine Control Card
         item {
             Surface(
@@ -469,6 +543,45 @@ fun SilicaCommandScreen(
             }
         }
 
+        // 3. Collapsible Advanced Engine & Network Disclosure Row
+        item {
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                color = cs.surfaceContainer,
+                border = BorderStroke(1.dp, cs.outlineVariant),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showAdvancedTuning = !showAdvancedTuning }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Outlined.Tune, contentDescription = null, tint = cs.primary, modifier = Modifier.size(18.dp))
+                        Column {
+                            Text("Engine & Network Tuning", style = MaterialTheme.typography.titleSmall, color = cs.onSurface)
+                            Text(
+                                "${if (cfg.usbBridgeOnly) "USB-C ADB" else "Wi-Fi LAN"} · ${effectiveThreads}T · ${cfg.safeRamPercent}% cap",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = cs.onSurfaceVariant
+                            )
+                        }
+                    }
+                    Icon(
+                        imageVector = if (showAdvancedTuning) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        contentDescription = null,
+                        tint = cs.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        if (showAdvancedTuning) {
         // 3. Full Silica Model & Engine Tuning Card
         item {
             SectionSurfaceCard(
@@ -767,7 +880,47 @@ fun SilicaCommandScreen(
                 }
             }
         }
+        } // end if (showAdvancedTuning)
 
+        // 5. Collapsible Diagnostics & Live Terminal Toggle
+        item {
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                color = cs.surfaceContainer,
+                border = BorderStroke(1.dp, cs.outlineVariant),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showDiagnosticsTerminal = !showDiagnosticsTerminal }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Outlined.Terminal, contentDescription = null, tint = cs.secondary, modifier = Modifier.size(18.dp))
+                        Column {
+                            Text("Diagnostics & Live Terminal", style = MaterialTheme.typography.titleSmall, color = cs.onSurface)
+                            Text(
+                                "${tel.eventLogs.size} events · 6-check health probe",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = cs.onSurfaceVariant
+                            )
+                        }
+                    }
+                    Icon(
+                        imageVector = if (showDiagnosticsTerminal) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        contentDescription = null,
+                        tint = cs.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        if (showDiagnosticsTerminal) {
         // 5. Dark Monospace Live Terminal & 6-Check Diagnostics
         item {
             Surface(
@@ -903,6 +1056,7 @@ fun SilicaCommandScreen(
                 }
             }
         }
+        } // end if (showDiagnosticsTerminal)
     }
 }
 

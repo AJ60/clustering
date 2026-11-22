@@ -32,7 +32,9 @@ import androidx.compose.material.icons.filled.ChatBubble
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.Hub
+import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Icon
@@ -92,6 +94,7 @@ fun SilicaAppScreen(
 
     val isOnline = uiState.telemetry.workerState == WorkerRunState.RUNNING_USB ||
         uiState.telemetry.workerState == WorkerRunState.RUNNING_WIFI
+    val isDark = uiState.config.darkTheme
 
     BoxWithConstraints(
         modifier = Modifier
@@ -101,7 +104,7 @@ fun SilicaAppScreen(
                 drawRect(
                     brush = Brush.radialGradient(
                         colors = listOf(
-                            SilicaObsidianGlow.copy(alpha = 0.7f),
+                            if (isDark) SilicaObsidianGlow.copy(alpha = 0.7f) else cs.primaryContainer.copy(alpha = 0.25f),
                             cs.background
                         ),
                         center = Offset(size.width * 0.5f, 0f),
@@ -151,6 +154,8 @@ fun SilicaAppScreen(
                         SilicaTopBar(
                             isOnline = isOnline,
                             activeNodes = uiState.activeNodeCount,
+                            isDarkTheme = isDark,
+                            onToggleTheme = { viewModel.setDarkTheme(!isDark) },
                             onOpenQr = { viewModel.openQrDialog(0) },
                             applyStatusBarPadding = false
                         )
@@ -177,6 +182,8 @@ fun SilicaAppScreen(
                     SilicaTopBar(
                         isOnline = isOnline,
                         activeNodes = uiState.activeNodeCount,
+                        isDarkTheme = isDark,
+                        onToggleTheme = { viewModel.setDarkTheme(!isDark) },
                         onOpenQr = { viewModel.openQrDialog(0) },
                         applyStatusBarPadding = true
                     )
@@ -273,6 +280,8 @@ fun SilicaAppScreen(
 private fun SilicaTopBar(
     isOnline: Boolean,
     activeNodes: Int,
+    isDarkTheme: Boolean,
+    onToggleTheme: () -> Unit,
     onOpenQr: () -> Unit,
     applyStatusBarPadding: Boolean
 ) {
@@ -349,6 +358,16 @@ private fun SilicaTopBar(
                     }
                 }
                 IconButton(
+                    onClick = onToggleTheme,
+                    modifier = Modifier.testTag("topbar_theme_button")
+                ) {
+                    Icon(
+                        imageVector = if (isDarkTheme) Icons.Outlined.LightMode else Icons.Outlined.DarkMode,
+                        contentDescription = if (isDarkTheme) "Switch to Light Mode" else "Switch to Dark Mode",
+                        tint = cs.onSurfaceVariant
+                    )
+                }
+                IconButton(
                     onClick = onOpenQr,
                     modifier = Modifier.testTag("topbar_qr_button")
                 ) {
@@ -399,7 +418,8 @@ private fun SilicaTabBody(
                 onOpenQr = { viewModel.openQrDialog(0) },
                 onSelectLogFilter = viewModel::setLogFilter,
                 onClearLogs = viewModel::clearTerminalLogs,
-                onRunDiagnostics = viewModel::runDiagnostics
+                onRunDiagnostics = viewModel::runDiagnostics,
+                onDismissOnboarding = viewModel::dismissOnboarding
             )
             SilicaTab.CLUSTER -> SilicaClusterScreen(
                 uiState = uiState,
@@ -414,8 +434,9 @@ private fun SilicaTabBody(
             )
             SilicaTab.CHAT -> SilicaChatScreen(
                 uiState = uiState,
-                onSendPrompt = viewModel::sendChatMessage,
+                onSendPrompt = { prompt, imageDataUrl -> viewModel.sendChatMessage(prompt, imageDataUrl) },
                 onStopStreaming = viewModel::stopChatStream,
+                onToggleWebTools = viewModel::setWebToolsEnabled,
                 onOpenModelEndpointSheet = viewModel::openModelEndpointSheet,
                 onOpenSessionsDialog = viewModel::openSessionsDialog,
                 onNewSession = viewModel::createNewChatSession,

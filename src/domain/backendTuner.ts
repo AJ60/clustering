@@ -9,6 +9,59 @@ import {
   TunedOsBackendProfile,
 } from '../types/starCluster';
 
+export const ALLOWED_STOCK_LLAMA_CPP_FLAGS = new Set([
+  '-m',
+  '--model',
+  '--mmproj',
+  '--alias',
+  '--host',
+  '--port',
+  '-c',
+  '--ctx-size',
+  '-ngl',
+  '--n-gpu-layers',
+  '--tensor-split',
+  '--rpc',
+  '--jinja',
+  '-fa',
+  '--flash-attn',
+  '-ctk',
+  '--cache-type-k',
+  '-ctv',
+  '--cache-type-v',
+  '--kv-unified',
+  '-nkvo',
+  '--slot-save-path',
+  '-ot',
+  '-t',
+  '--threads',
+  '--threads-batch',
+  '-b',
+  '--batch-size',
+  '-ub',
+  '--ubatch-size',
+  '--cont-batching',
+  '--cache-reuse',
+  '--no-mmap',
+  '--mlock',
+  '--model-draft',
+  '--draft-max',
+  '--lookup-cache-static',
+  '--ctx-shift',
+]);
+
+export function validateStockLlamaFlags(args: string[]): { ok: boolean; invalidFlag?: string } {
+  for (const token of args) {
+    if (token.startsWith('-')) {
+      const flagName = token.split(/\s+/)[0];
+      if (!ALLOWED_STOCK_LLAMA_CPP_FLAGS.has(flagName)) {
+        return { ok: false, invalidFlag: flagName };
+      }
+    }
+  }
+  return { ok: true };
+}
+
 export function createDefaultBackendTuningConfig(
   model: GgufModelPreset
 ): BackendTuningConfig {
@@ -16,14 +69,29 @@ export function createDefaultBackendTuningConfig(
     windowsAccelerator: 'CUDA 12.6',
     linuxAccelerator: 'CUDA 12.6',
     contextLength: model.contextLengthDefault ?? 16384,
-    kvCacheQuant: model.sizeMb > 14000 || model.totalParamsB >= 20 ? 'q8_0' : 'f16',
+    kvCacheQuant: model.sizeMb > 12000 || model.totalParamsB >= 14 ? 'q8_0' : 'f16',
     enableFlashAttn: model.architecture !== 'Ternary',
     moeCpuOffload: model.architecture === 'MoE',
     windowsNoMmap: model.sizeMb <= 20000,
-    linuxMlock: model.sizeMb <= 22000,
+    linuxMlock: false,
     linuxNumaInterleave: true,
     enableContextShift: true,
     contBatching: true,
+    gpuOffloadLayers: null,
+    manualTensorSplit: '',
+    speculativeMode: model.hasNativeMtp ? 'native_mtp' : 'off',
+    draftModelPath: '',
+    draftMaxTokens: 8,
+    cacheReuse: 256,
+    kvUnified: true,
+    noKvOffload: null, // auto (-nkvo on <=4GB GPUs at >=32K context)
+    slotSavePath: './.silica-kv-cache',
+    forceNoMmap: null, // auto (>=1.15x pool margin)
+    threads: null,
+    batchSize: 1024,
+    ubatchSize: 256,
+    enableJinja: true,
+    mmprojPath: model.mmprojPath ?? '',
   };
 }
 
@@ -31,13 +99,18 @@ export function estimateKvCacheMb(
   layers: number,
   contextLength: ContextLengthOption,
   kvQuant: KvCacheQuantOption,
-  totalParamsB: number
+  totalParamsB: number,
+  headCountKv?: number,
+  headDim = 128
 ): number {
-  // GQA-aware approximation: 2 (K+V) * layers * kvHeads_dim * ctx * bytes
-  const bytesPerElem = kvQuant === 'f16' ? 2 : kvQuant === 'q8_0' ? 1.06 : 0.56;
+  const bytesPerElem = kvQuant === 'f16' ? 2.0 : kvQuant === 'q8_0' ? 1.0625 : 0.5625;
+  if (headCountKv && headCountKv > 0) {
+    const exactMb = (layers * 2 * headCountKv * headDim * contextLength * bytesPerElem) / (1024 * 1024);
+    return Math.max(64, Math.round(exactMb));
+  }
   const gqaScale = totalParamsB >= 50 ? 0.55 : totalParamsB >= 20 ? 0.42 : 0.3;
   const mb = Math.round(((layers * contextLength * gqaScale * bytesPerElem) / 1024) * 0.42);
-  return Math.max(128, mb);
+  return Math.max(64, mb);
 }
 
 export function buildTunedOsBackendProfile(
@@ -55,109 +128,94 @@ export function buildTunedOsBackendProfile(
   const vramFreeMb = targetNode?.safeVramMb ?? 0;
   const ramFreeMb = targetNode?.safeRamMb ?? 8192;
   const physicalCores = targetNode?.physicalCores ?? 8;
-  const recommendedThreads = Math.max(
-    2,
-    Math.min(16, isWindows ? Math.min(physicalCores, 12) : physicalCores)
-  );
+  const recommendedThreads =
+    config.threads && config.threads > 0
+      ? config.threads
+      : Math.max(2, Math.min(16, isWindows ? Math.min(physicalCores, 12) : physicalCores));
 
   const accelerator = isWindows ? config.windowsAccelerator : config.linuxAccelerator;
   const usesGpu = !accelerator.startsWith('CPU');
-  const kvCacheMb = estimateKvCacheMb(
-    model.layers,
-    config.contextLength,
-    config.kvCacheQuant,
-    model.totalParamsB
-  );
+  const kvCacheMb = plan.kvCacheTotalMb;
 
-  // Compute optimal GPU layer count (-ngl) bounded by safe VRAM after KV + WDDM reserve
   const mbPerLayer = model.sizeMb / Math.max(1, model.layers);
-  const wddmOrDriverReserve = isWindows ? 450 : 256;
+  const wddmOrDriverReserve = isWindows ? 512 : 256;
+  const effectiveVramKv = plan.autoNkvo ? 0 : Math.min(kvCacheMb, 1536);
+  const mmprojReserve = model.mmprojSizeMb ?? 0;
   const gpuBudgetMb = usesGpu
-    ? Math.max(0, vramFreeMb - Math.min(kvCacheMb, 1536) - wddmOrDriverReserve)
+    ? Math.max(0, vramFreeMb - effectiveVramKv - mmprojReserve - wddmOrDriverReserve)
     : 0;
-  const gpuOffloadLayers =
+  const autoNgl =
     model.architecture === 'Ternary' && !usesGpu
       ? 0
       : Math.min(model.layers, Math.max(0, Math.floor(gpuBudgetMb / Math.max(1, mbPerLayer))));
+  const gpuOffloadLayers =
+    config.gpuOffloadLayers !== null && config.gpuOffloadLayers !== undefined
+      ? Math.max(0, Math.min(model.layers, config.gpuOffloadLayers))
+      : autoNgl;
 
-  const batchSize = usesGpu ? (model.architecture === 'MoE' ? 2048 : 1024) : 512;
-  const ubatchSize = usesGpu ? 512 : 256;
-
-  // Compute expected tokens/sec based on active params (MoE skips inactive experts)
-  const effectiveBw = usesGpu
-    ? Math.max(targetNode?.memBwGbps ?? 120, 220)
-    : targetNode?.memBwGbps ?? 48;
-  const bitsPerWeight = model.quant.startsWith('TQ1')
-    ? 1.65
-    : model.quant.startsWith('Q4')
-      ? 4.6
-      : model.quant.startsWith('Q5')
-        ? 5.6
-        : 8.1;
-  const activeBytesGb = (model.activeParamsB * bitsPerWeight) / 8;
-  const gpuShare = model.layers > 0 ? gpuOffloadLayers / model.layers : 0;
-  const blendedBw = effectiveBw * (0.35 + 0.65 * gpuShare);
-  const rawTokPerSec = blendedBw / Math.max(0.45, activeBytesGb);
-  const clusterEfficiency = plan.nodes.filter((n) => n.allocatedLayers > 0).length > 1 ? 0.86 : 1.0;
-  const expectedTokPerSec = Number(
-    Math.max(1.2, Math.min(185, rawTokPerSec * clusterEfficiency)).toFixed(1)
-  );
+  const batchSize = config.batchSize ?? (usesGpu ? 1024 : 512);
+  const ubatchSize = config.ubatchSize ?? 256;
 
   const workerRpcAddrs = plan.nodes
-    .filter((n) => n.role === 'Worker' && n.allocatedLayers > 0)
-    .map((_n, idx) => `127.0.0.1:${50052 + idx}`);
-
-  const tensorSplitArg =
-    plan.nodes.filter((n) => n.allocatedLayers > 0).length > 1
-      ? plan.nodes
-          .filter((n) => n.allocatedLayers > 0)
-          .map((n) => Math.max(1, n.sharePct))
-          .join(',')
-      : '';
+    .filter((n) => n.role === 'Worker' && n.allocatedLayers > 0 && !n.pruned)
+    .map((n) => `${n.ip || '127.0.0.1'}:${n.rpcPort || 50052}`);
 
   const modelFileSlug = `${model.name.toLowerCase().replace(/[^a-z0-9.-]+/g, '-')}.${model.quant}.gguf`;
-  const targetModelArg = model.isLocal && model.localPath
-    ? model.localPath
-    : `./models/${modelFileSlug}`;
+  const targetModelArg = model.isLocal && model.localPath ? model.localPath : `./models/${modelFileSlug}`;
+  const effectiveMmproj = config.mmprojPath?.trim() || model.mmprojPath || '';
 
   const cliFlags: string[] = [
-    `--model "${targetModelArg}"`,
-    `--alias "${model.name}"`,
+    `-m "${targetModelArg}"`,
     `--host 0.0.0.0`,
     `--port 8080`,
-    `--ctx-size ${config.contextLength}`,
-    `--threads ${recommendedThreads}`,
-    `--threads-batch ${recommendedThreads}`,
-    `--n-gpu-layers ${gpuOffloadLayers}`,
-    `--batch-size ${batchSize}`,
-    `--ubatch-size ${ubatchSize}`,
-    `--cache-type-k ${config.kvCacheQuant}`,
-    `--cache-type-v ${config.kvCacheQuant}`,
+    `-c ${config.contextLength}`,
+    `-t ${recommendedThreads}`,
+    `-ngl ${gpuOffloadLayers}`,
+    `-b ${batchSize}`,
+    `-ub ${ubatchSize}`,
+    `-ctk ${config.kvCacheQuant}`,
+    `-ctv ${config.kvCacheQuant}`,
   ];
 
+  if (effectiveMmproj) {
+    cliFlags.push(`--mmproj "${effectiveMmproj}"`);
+  }
+  if (config.enableJinja !== false) {
+    cliFlags.push('--jinja');
+  }
   if (config.enableFlashAttn && usesGpu && model.architecture !== 'Ternary') {
-    cliFlags.push('--flash-attn on');
+    cliFlags.push('-fa on');
+  }
+  if (config.kvUnified !== false) {
+    cliFlags.push('--kv-unified');
+  }
+  if (plan.autoNkvo) {
+    cliFlags.push('-nkvo');
+  }
+  if (config.slotSavePath && config.slotSavePath.trim().length > 0) {
+    cliFlags.push(`--slot-save-path "${config.slotSavePath.trim()}"`);
   }
   if (config.moeCpuOffload && model.architecture === 'MoE') {
     cliFlags.push('-ot ".ffn_.*_exps.=CPU"');
   }
-  if (isWindows && config.windowsNoMmap && ramFreeMb > model.sizeMb + 4096) {
+  if (plan.useNoMmap) {
     cliFlags.push('--no-mmap');
-  }
-  if (!isWindows && config.linuxMlock && ramFreeMb > model.sizeMb + 2048) {
-    cliFlags.push('--mlock');
   }
   if (workerRpcAddrs.length > 0) {
     cliFlags.push(`--rpc ${workerRpcAddrs.join(',')}`);
   }
-  if (tensorSplitArg) {
-    cliFlags.push(`--tensor-split ${tensorSplitArg}`);
-  }
-  if (config.enableContextShift !== false) {
-    cliFlags.push('--ctx-shift');
+  if (plan.tensorSplit.length > 1) {
+    cliFlags.push(`--tensor-split ${plan.tensorSplitCsv}`);
   }
   if (config.contBatching !== false) {
     cliFlags.push('--cont-batching');
+  }
+  if ((config.cacheReuse ?? 256) > 0) {
+    cliFlags.push(`--cache-reuse ${config.cacheReuse ?? 256}`);
+  }
+  if (config.speculativeMode === 'external_draft' && config.draftModelPath?.trim()) {
+    cliFlags.push(`--model-draft "${config.draftModelPath.trim()}"`);
+    cliFlags.push(`--draft-max ${config.draftMaxTokens ?? 8}`);
   }
 
   const envVars: Array<{ key: string; value: string; reason: string }> = isWindows
@@ -165,125 +223,84 @@ export function buildTunedOsBackendProfile(
         {
           key: 'GGML_CUDA_NO_PINNED',
           value: ramFreeMb < 16384 ? '1' : '0',
-          reason: 'Prevents WDDM pinned host allocation pressure on <= 16 GB Windows systems',
-        },
-        {
-          key: 'GGML_VK_DISABLE_F16',
-          value: accelerator === 'Vulkan 1.3' ? '0' : '1',
-          reason: 'Controls FP16 coopmat shaders on Vulkan discrete/integrated GPUs',
+          reason: 'Prevents WDDM pinned host allocation pressure on <= 16 GB Windows hosts',
         },
         {
           key: 'OMP_WAIT_POLICY',
           value: 'PASSIVE',
-          reason: 'Eliminates OpenMP spin-wait core contention alongside WDDM DWM compositor',
+          reason: 'Prevents OpenMP spin-wait contention with WDDM compositor',
         },
       ]
     : [
         {
           key: 'GGML_CUDA_ENABLE_UNIFIED_MEMORY',
           value: '0',
-          reason: 'Blocks silent slow PCIe unified-memory thrashing; enforces strict VRAM cap',
-        },
-        {
-          key: 'GGML_OPENBLAS_NUM_THREADS',
-          value: String(recommendedThreads),
-          reason: 'Matches BLAS prefill threads strictly to physical P-cores',
+          reason: 'Enforces strict VRAM cap without slow PCIe thrashing',
         },
         {
           key: 'MALLOC_ARENA_MAX',
           value: '2',
-          reason: 'Tightens glibc heap fragmentation during multi-node tensor shard allocation',
+          reason: 'Reduces glibc heap fragmentation during multi-node shard loading',
         },
       ];
 
   const binaryName = isWindows ? '.\\bin\\llama-server.exe' : './bin/llama-server';
-  const baseLaunch = `${binaryName} \\\n  ${cliFlags.join(' \\\n  ')}`;
   const launchCommand = isWindows
     ? `${binaryName} ${cliFlags.join(' ')}`
-    : `${config.linuxNumaInterleave ? 'numactl --interleave=all ' : ''}${baseLaunch}`;
+    : `${config.linuxNumaInterleave ? 'numactl --interleave=all ' : ''}${binaryName} ${cliFlags.join(' ')}`;
 
-  const scriptFileName = isWindows ? 'run-cluster-win.ps1' : 'run-cluster-linux.sh';
+  const scriptFileName = isWindows ? 'run-silica-win.ps1' : 'run-silica-linux.sh';
 
   const scriptContent = isWindows
     ? [
-        `# ClusterLab Windows Tuned Backend Launcher (${model.name})`,
-        `# Accelerator: ${accelerator} | Safe VRAM Guard: <=90% (-${wddmOrDriverReserve} MB WDDM floor)`,
+        `# Silica Cluster Windows Tuned Backend (${model.name})`,
+        `# Stock llama.cpp v1.0.0 | Accelerator: ${accelerator} | WDDM Guard: -${wddmOrDriverReserve} MB`,
         `$ErrorActionPreference = "Stop"`,
         ...envVars.map((e) => `$env:${e.key} = "${e.value}"  # ${e.reason}`),
         ``,
-        `# Open LAN ports for OpenAI API (:8080), RPC Worker (:50052), and UDP Auto-Discovery (:50050)`,
-        `if (-not (Get-NetFirewallRule -DisplayName "ClusterLab-OpenAI" -ErrorAction SilentlyContinue)) {`,
-        `  New-NetFirewallRule -DisplayName "ClusterLab-OpenAI" -Direction Inbound -Protocol TCP -LocalPort 8080,50052 -Action Allow | Out-Null`,
-        `  New-NetFirewallRule -DisplayName "ClusterLab-UDP" -Direction Inbound -Protocol UDP -LocalPort 50050 -Action Allow | Out-Null`,
-        `}`,
-        ``,
-        `# Launch llama-server with High Priority (avoids Windows Efficiency Mode throttling)`,
-        `$argsList = @(`,
-        ...cliFlags.map((f) => `  "${f.replace(/"/g, '`"')}"`),
-        `)`,
-        `$proc = Start-Process -FilePath "${binaryName}" -ArgumentList $argsList -PassThru -NoNewWindow`,
+        `# Or launch via pure-Rust clusterd master: .\\clusterd.exe master`,
+        `$proc = Start-Process -FilePath "${binaryName}" -ArgumentList '${cliFlags.join(' ')}' -PassThru -NoNewWindow`,
         `$proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High`,
-        `Write-Host "ClusterLab Windows OpenAI API running at http://127.0.0.1:8080/v1 (PID $($proc.Id))"`,
+        `Write-Host "Silica Cluster OpenAI API running at http://127.0.0.1:8080/v1 (PID $($proc.Id))"`,
         `$proc.WaitForExit()`,
       ].join('\n')
     : [
         `#!/usr/bin/env bash`,
-        `# ClusterLab Linux Tuned Backend Launcher (${model.name})`,
-        `# Accelerator: ${accelerator} | MemAvailable - 1024 MB Guard`,
+        `# Silica Cluster Linux Tuned Backend (${model.name})`,
+        `# Stock llama.cpp v1.0.0 | Accelerator: ${accelerator}`,
         `set -euo pipefail`,
         ``,
         ...envVars.map((e) => `export ${e.key}="${e.value}" # ${e.reason}`),
         ``,
-        `# Enable Transparent HugePages madvise for large GGUF shard mappings`,
-        `if [ -w /sys/kernel/mm/transparent_hugepage/enabled ]; then`,
-        `  echo madvise > /sys/kernel/mm/transparent_hugepage/enabled || true`,
-        `fi`,
-        ``,
-        `RUNNER_PREFIX=""`,
-        `if command -v numactl >/dev/null 2>&1; then`,
-        `  RUNNER_PREFIX="numactl --interleave=all"`,
-        `fi`,
-        ``,
-        `echo "Starting ClusterLab Linux OpenAI API at http://0.0.0.0:8080/v1"`,
-        `exec $RUNNER_PREFIX ${binaryName} \\`,
-        `  ${cliFlags.join(' \\\n  ')}`,
+        `# Or launch via pure-Rust clusterd: ./clusterd --auto`,
+        `exec ${launchCommand}`,
       ].join('\n');
 
-  const optimizations: string[] = isWindows
-    ? [
-        `WDDM compositor guard reserves ${wddmOrDriverReserve} MB VRAM to prevent desktop stutter/TDR.`,
-        `Process Priority elevated to HIGH_PRIORITY_CLASS with OMP_WAIT_POLICY=PASSIVE.`,
-        model.architecture === 'MoE' && config.moeCpuOffload
-          ? 'Sparse MoE experts routed to DDR5 system RAM (-ot ".ffn_.*_exps.=CPU"), keeping KV & attention hot in VRAM.'
-          : `KV Cache quantized to ${config.kvCacheQuant.toUpperCase()} (${kvCacheMb} MB) at ${config.contextLength.toLocaleString()} context.`,
-        `Auto-provisions Windows Firewall rules for OpenAI :8080, RPC :50052, and UDP :50050.`,
-      ]
-    : [
-        `Hard Linux MemAvailable - 1024 MB cap with GGML_CUDA_ENABLE_UNIFIED_MEMORY=0 to prevent OOM swapping.`,
-        config.linuxNumaInterleave
-          ? 'NUMA memory interleaving enabled (numactl --interleave=all) for balanced multi-channel RAM throughput.'
-          : 'Single-socket NUMA affinity active.',
-        model.architecture === 'MoE' && config.moeCpuOffload
-          ? `MoE active-expert routing keeps only ${model.activeParamsB}B active parameters hot per token.`
-          : `Physical P-core thread count locked at ${recommendedThreads} with ${config.kvCacheQuant.toUpperCase()} KV cache (${kvCacheMb} MB).`,
-        config.linuxMlock && ramFreeMb > model.sizeMb + 2048
-          ? 'Kernel --mlock pinning enabled to prevent Linux page-cache eviction.'
-          : 'Zero-copy mmap paging tuned with MALLOC_ARENA_MAX=2.',
-      ];
+  const optimizations: string[] = [
+    plan.useNoMmap
+      ? `Safe RAM pool >= 1.15x model need -> --no-mmap active for zero page-fault latency.`
+      : `Pool below 1.15x safety margin -> mmap streaming active to guarantee zero OOM.`,
+    plan.autoNkvo
+      ? `CPU KV offload (-nkvo) active to protect <= 4 GB VRAM at ${config.contextLength.toLocaleString()} context.`
+      : `Unified KV cache (--kv-unified, ${config.kvCacheQuant.toUpperCase()}, ${kvCacheMb} MB) with persistent prefix slots.`,
+    effectiveMmproj
+      ? `Vision projector (--mmproj) pinned strictly on Master host.`
+      : `Stock --jinja tool-calling & reasoning_content streaming enabled.`,
+  ];
 
   return {
     os,
-    title: isWindows ? 'Windows 10/11 Native Backend' : 'Linux Native Backend',
+    title: isWindows ? 'Windows Native Backend (llama.cpp v1.0.0)' : 'Linux Native Backend (llama.cpp v1.0.0)',
     accelerator,
     recommendedThreads,
     gpuOffloadLayers,
     vramSafetyReserveMb: wddmOrDriverReserve,
-    ramSafetyReserveMb: isWindows ? 1024 : 1024,
+    ramSafetyReserveMb: 1024,
     batchSize,
     ubatchSize,
     kvCacheMb,
     contextShiftEnabled: config.enableContextShift !== false,
-    expectedTokPerSec,
+    expectedTokPerSec: plan.estimatedClusterTokPerSec,
     envVars,
     cliFlags,
     launchCommand,

@@ -253,6 +253,24 @@ class SilicaViewModel(
         statusBanner.value = null
     }
 
+    fun setDarkTheme(dark: Boolean) {
+        viewModelScope.launch {
+            repository.updateEngineConfig { it.copy(darkTheme = dark) }
+        }
+    }
+
+    fun dismissOnboarding() {
+        viewModelScope.launch {
+            repository.updateEngineConfig { it.copy(onboardingCompleted = true) }
+        }
+    }
+
+    fun setWebToolsEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            repository.updateEngineConfig { it.copy(webToolsEnabled = enabled) }
+        }
+    }
+
     fun openQrDialog(initialTab: Int = 0) {
         qrInitialTab.value = initialTab
         showQrDialog.value = true
@@ -663,21 +681,22 @@ class SilicaViewModel(
         liveStreamingTokPerSec.value = 0f
     }
 
-    fun sendChatMessage(rawPrompt: String) {
+    fun sendChatMessage(rawPrompt: String, imageDataUrl: String? = null) {
         val prompt = rawPrompt.trim()
-        if (prompt.isEmpty() || isStreamingChat.value) return
+        if ((prompt.isEmpty() && imageDataUrl.isNullOrBlank()) || isStreamingChat.value) return
 
         val state = uiState.value
         val cfg = state.config
-        val modelId = clusterSnapshot.value?.activeModelName?.trim()?.ifBlank { null }
-            ?: masterHealth.value.activeModel?.trim()?.ifBlank { null }
+        // Always send exact model ID (never human-readable display name) to OpenAI-compatible endpoints
+        val modelId = clusterSnapshot.value?.activeModelId?.trim()?.ifBlank { null }
+            ?: masterHealth.value.activeModelId?.trim()?.ifBlank { null }
             ?: cfg.selectedModelId
 
         activeStreamJob = viewModelScope.launch {
             var sessionId = activeSessionId.value
             if (sessionId <= 0L) {
                 sessionId = repository.createSession(
-                    title = prompt.take(36),
+                    title = prompt.ifBlank { "Image query" }.take(36),
                     modelId = modelId
                 )
                 activeSessionId.value = sessionId
@@ -687,16 +706,22 @@ class SilicaViewModel(
             if (existing.isEmpty()) {
                 repository.updateSessionMeta(
                     sessionId = sessionId,
-                    title = prompt.take(40),
+                    title = prompt.ifBlank { "Image query" }.take(40),
                     modelId = modelId
                 )
+            }
+
+            val storedUserContent = if (!imageDataUrl.isNullOrBlank()) {
+                "[Image attached] ${prompt.ifBlank { "Describe this image." }}"
+            } else {
+                prompt
             }
 
             repository.insertMessage(
                 ChatMessageEntity(
                     sessionId = sessionId,
                     role = "user",
-                    content = prompt,
+                    content = storedUserContent,
                     modelId = modelId
                 )
             )
@@ -713,13 +738,17 @@ class SilicaViewModel(
 
             val historyPayload = (existing.takeLast(12).filter { !it.isError }
                 .map { ChatCompletionMessage(role = it.role, content = it.content) }) +
-                ChatCompletionMessage(role = "user", content = prompt)
+                ChatCompletionMessage(
+                    role = "user",
+                    content = prompt.ifBlank { "Describe this image." },
+                    imageDataUrl = imageDataUrl
+                )
 
             isStreamingChat.value = true
             liveStreamingTokPerSec.value = 0f
 
             val phoneLayers = clusterSnapshot.value?.nodes?.firstOrNull { !it.isMaster }?.allocatedLayers ?: 3
-            RpcService.logEngineEvent("[FORWARD] Step started: prompt \"${prompt.take(28)}...\"")
+            RpcService.logEngineEvent("[FORWARD] Step started: model=$modelId (${if (imageDataUrl != null) "vision" else "text"})")
             RpcService.logEngineEvent("[COMPUTE] Offloading $phoneLayers layer(s) to local ARM NEON pipeline")
 
             var lastLoggedTokenCount = 0
@@ -730,6 +759,7 @@ class SilicaViewModel(
                 temperature = cfg.temperature,
                 systemPrompt = cfg.systemPrompt,
                 secret = cfg.clusterSecret,
+                webToolsEnabled = cfg.webToolsEnabled,
                 onDelta = { text, count, tps ->
                     liveStreamingTokPerSec.value = tps
                     if (count - lastLoggedTokenCount >= 30) {
@@ -761,13 +791,21 @@ class SilicaViewModel(
                 masterHealth.value = MasterHealthResult(
                     reachable = true,
                     latencyMs = latencyMs,
-                    activeModel = modelId,
+                    activeModel = clusterSnapshot.value?.activeModelName ?: modelId,
+                    activeModelId = modelId,
+                    engineRunning = true,
                     activeNodes = uiState.value.activeNodeCount.coerceAtLeast(1),
-                    detail = "Online"
+                    detail = "Engine Online"
                 )
             }.onFailure { err ->
-                RpcService.logEngineEvent("[ERROR] Forward pass failed: ${err.message ?: "Connection error"}")
-                val cleanError = "Could not reach Master OpenAI endpoint (${cfg.masterBaseUrl}/v1/chat/completions).\n\n${err.message ?: "Connection failed"}"
+                val msg = err.message ?: "Connection error"
+                RpcService.logEngineEvent("[ERROR] Forward pass failed: $msg")
+                val isEngineOffline = msg.contains("ENGINE_OFFLINE", ignoreCase = true) || msg.contains("503")
+                val cleanError = if (isEngineOffline) {
+                    "Engine Offline (HTTP 503)\n\nNo live LLM engine is loaded on your Master yet. Open Silica Cluster on Desktop to load a .gguf model or connect llama-server / Ollama."
+                } else {
+                    "Could not reach Master OpenAI endpoint (${cfg.masterBaseUrl}/v1/chat/completions).\n\n$msg"
+                }
                 repository.updateMessage(
                     messageId = assistantMsgId,
                     content = cleanError,
@@ -776,9 +814,10 @@ class SilicaViewModel(
                     activeNodes = 0,
                     isError = true
                 )
-                masterHealth.value = MasterHealthResult(
-                    reachable = false,
-                    detail = err.message ?: "Connection failed"
+                masterHealth.value = masterHealth.value.copy(
+                    reachable = isEngineOffline,
+                    engineRunning = false,
+                    detail = if (isEngineOffline) "Engine Offline (HTTP 503)" else msg
                 )
             }
 

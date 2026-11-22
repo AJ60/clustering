@@ -1,971 +1,441 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  CURATED_HF_GGUF_CATALOG,
-  catalogModelToPreset,
-  evaluateModelAgainstCluster,
-} from '../data/hfModelsCatalog';
+  CheckCircle2,
+  Eye,
+  FolderOpen,
+  HardDrive,
+  Search,
+  SlidersHorizontal,
+  Upload,
+} from 'lucide-react';
 import {
   GgufModelPreset,
   HfCatalogModel,
   StarClusterPlan,
 } from '../types/starCluster';
+import { catalogModelToPreset, CURATED_HF_GGUF_CATALOG } from '../data/hfModelsCatalog';
 import { parseLocalGgufModel } from '../data/localModelsScanner';
-import {
-  ArrowRight,
-  Check,
-  CheckCircle2,
-  Copy,
-  Cpu,
-  Download,
-  ExternalLink,
-  FileText,
-  Folder,
-  FolderOpen,
-  HardDrive,
-  Layers,
-  Plus,
-  RefreshCw,
-  Search,
-  Sparkles,
-  Zap,
-} from 'lucide-react';
 
 interface ModelsHubPageProps {
-  clusterPlan: StarClusterPlan;
   activeModel: GgufModelPreset;
-  onSelectModel: (preset: GgufModelPreset) => void;
-  onOpenChat: () => void;
-  localModels?: GgufModelPreset[];
-  onRefreshLocalModels?: (dir?: string) => Promise<void>;
-  onAddLocalModelPath?: (filePath: string) => Promise<GgufModelPreset | null>;
+  plan: StarClusterPlan;
+  onActivateModel: (model: GgufModelPreset) => Promise<void> | void;
+  onOpenLoadConfig: () => void;
 }
 
-type ModelHubTab = 'local' | 'hf';
-type CatalogFilter = 'all' | 'fits' | 'moe' | 'coding' | 'ternary' | 'turboquant' | 'looped';
-type SortMode = 'fit' | 'downloads';
+const UNIVERSAL_SCAN_PRESETS = [
+  { label: './models', path: './models' },
+  { label: 'Downloads', path: '~/Downloads' },
+  { label: 'LM Studio Default', path: '~/.cache/lm-studio/models' },
+  { label: 'Ollama Models', path: '~/.ollama/models' },
+];
 
 export const ModelsHubPage: React.FC<ModelsHubPageProps> = ({
-  clusterPlan,
   activeModel,
-  onSelectModel,
-  onOpenChat,
-  localModels = [],
-  onRefreshLocalModels,
-  onAddLocalModelPath,
+  plan,
+  onActivateModel,
+  onOpenLoadConfig,
 }) => {
-  // Navigation & Sub-views: default to 'hf' so catalog is immediately visible, or 'local' if local files are present
-  const [hubTab, setHubTab] = useState<ModelHubTab>(() => (localModels.length > 0 ? 'local' : 'hf'));
+  const [sourceTab, setSourceTab] = useState<'local' | 'huggingface'>('local');
+  const [scanDir, setScanDir] = useState('./models');
+  const [localModels, setLocalModels] = useState<GgufModelPreset[]>([]);
+  const [scanning, setScanning] = useState(false);
+  const [manualFilePath, setManualFilePath] = useState('');
+  const [statusMsg, setStatusMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
-  // Local Models Directory Scan & File Picker State
-  const [scanDirInput, setScanDirInput] = useState('');
-  const [manualPathInput, setManualPathInput] = useState('');
-  const [isScanningLocal, setIsScanningLocal] = useState(false);
-  const [localScanMessage, setLocalScanMessage] = useState<string | null>(null);
-  const [copiedPath, setCopiedPath] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [hfQuery, setHfQuery] = useState('');
+  const [hfModels, setHfModels] = useState<HfCatalogModel[]>(CURATED_HF_GGUF_CATALOG);
+  const [searchingHf, setSearchingHf] = useState(false);
 
-  // Hugging Face Catalog State
-  const [searchQuery, setSearchQuery] = useState('');
-  const [filter, setFilter] = useState<CatalogFilter>('all');
-  const [sortMode, setSortMode] = useState<SortMode>('fit');
-  const [models, setModels] = useState<HfCatalogModel[]>(CURATED_HF_GGUF_CATALOG);
-  const [selectedQuants, setSelectedQuants] = useState<Record<string, string>>({});
-  const [isLoading, setIsLoading] = useState(false);
-  const [syncSource, setSyncSource] = useState<'curated' | 'huggingface' | 'curated-fallback'>('curated');
-  const [syncMessage, setSyncMessage] = useState<string | null>(null);
-
-  const fetchHuggingFaceModels = async (query: string) => {
-    setIsLoading(true);
-    setSyncMessage(null);
+  const scanLocalDirectory = async (dir = scanDir) => {
+    setScanning(true);
+    setStatusMsg(null);
     try {
-      const res = await fetch(`/api/hf/models?q=${encodeURIComponent(query)}&limit=18`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as {
-        source: 'huggingface' | 'curated-fallback';
-        warning?: string;
-        models: HfCatalogModel[];
-      };
-
-      const incoming = Array.isArray(data.models) ? data.models : [];
-      if (query.trim()) {
-        setModels(incoming.length > 0 ? incoming : CURATED_HF_GGUF_CATALOG);
-      } else {
-        const seen = new Set(CURATED_HF_GGUF_CATALOG.map((m) => m.hfRepo.toLowerCase()));
-        const extras = incoming.filter((m) => !seen.has(m.hfRepo.toLowerCase()));
-        setModels([...CURATED_HF_GGUF_CATALOG, ...extras]);
-      }
-
-      setSyncSource(data.source);
-      if (data.warning) {
-        setSyncMessage(`Using offline GGUF catalog (${data.warning})`);
-      } else if (data.source === 'huggingface') {
-        setSyncMessage(`Synced ${incoming.length} GGUF repos from Hugging Face Hub`);
+      const res = await fetch(`/api/local/models?dir=${encodeURIComponent(dir)}`);
+      if (res.ok) {
+        const data = (await res.json()) as { directory: string; models: GgufModelPreset[] };
+        setLocalModels(data.models);
+        setStatusMsg({
+          ok: true,
+          text:
+            data.models.length > 0
+              ? `Found ${data.models.length} GGUF model(s) in ${data.directory}`
+              : `No .gguf files found in ${data.directory}. Pick a file directly or enter a full path below.`,
+        });
       }
     } catch {
-      setSyncSource('curated-fallback');
-      setModels(CURATED_HF_GGUF_CATALOG);
-      setSyncMessage('Hugging Face unreachable — showing verified offline GGUF catalog.');
+      setStatusMsg({ ok: false, text: 'Unable to scan local directory.' });
     } finally {
-      setIsLoading(false);
+      setScanning(false);
     }
   };
 
   useEffect(() => {
-    void fetchHuggingFaceModels('');
+    scanLocalDirectory('./models');
   }, []);
 
-  const handleScanDirectory = async (dirToScan?: string) => {
-    if (!onRefreshLocalModels) return;
-    setIsScanningLocal(true);
-    setLocalScanMessage(null);
+  const handleInspectManualPath = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manualFilePath.trim()) return;
+    setStatusMsg(null);
     try {
-      await onRefreshLocalModels(dirToScan || scanDirInput.trim() || undefined);
-      setLocalScanMessage(`Scanned successfully.`);
-    } catch (err) {
-      setLocalScanMessage(err instanceof Error ? err.message : 'Directory scan failed');
-    } finally {
-      setIsScanningLocal(false);
-    }
-  };
-
-  const handleAddManualPath = async () => {
-    const trimmed = manualPathInput.trim();
-    if (!trimmed) return;
-    setIsScanningLocal(true);
-    setLocalScanMessage(null);
-    try {
-      if (onAddLocalModelPath) {
-        const added = await onAddLocalModelPath(trimmed);
-        if (added) {
-          onSelectModel(added);
-          setLocalScanMessage(`Loaded "${added.name}" into cluster.`);
-          setManualPathInput('');
-        }
-      } else {
-        const res = await fetch('/api/local/models/add', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filePath: trimmed }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.model) {
-            onSelectModel(data.model);
-            setLocalScanMessage(`Loaded "${data.model.name}" into cluster.`);
-            setManualPathInput('');
-            if (onRefreshLocalModels) void onRefreshLocalModels();
-          }
-        } else {
-          const err = await res.json();
-          setLocalScanMessage(err.error || 'Failed to add model path');
-        }
-      }
-    } catch (err) {
-      setLocalScanMessage(err instanceof Error ? err.message : 'Error adding model');
-    } finally {
-      setIsScanningLocal(false);
-    }
-  };
-
-  const handleFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    // 1. Check if this file is already in our scanned local models
-    const matched = localModels.find(
-      (m) =>
-        m.localPath?.toLowerCase().endsWith(file.name.toLowerCase()) ||
-        m.name.toLowerCase() === file.name.replace(/\.gguf$/i, '').toLowerCase() ||
-        (m.localPath && m.localPath.split(/[/\\]/).pop()?.toLowerCase() === file.name.toLowerCase())
-    );
-
-    if (matched && matched.localPath) {
-      onSelectModel(matched);
-      setLocalScanMessage(`Loaded local model: ${matched.name} (${(matched.sizeMb / 1024).toFixed(2)} GB)`);
-      e.target.value = '';
-      return;
-    }
-
-    // 2. Try reading binary header directly from browser File object slice (isomorphic GGUF parser)
-    let headerBytes: Uint8Array | undefined;
-    try {
-      const slice = await file.slice(0, 131072).arrayBuffer();
-      headerBytes = new Uint8Array(slice);
-    } catch {
-      // Non-blocking
-    }
-
-    // 3. Ask server to resolve absolute path for this filename across all model directories
-    try {
-      const res = await fetch('/api/local/models/add', {
+      const res = await fetch('/api/models/inspect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filePath: file.name }),
+        body: JSON.stringify({ filePath: manualFilePath.trim() }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.model) {
-          onSelectModel(data.model);
-          setLocalScanMessage(`Loaded "${data.model.name}" (${(data.model.sizeMb / 1024).toFixed(2)} GB)`);
-          e.target.value = '';
-          if (onRefreshLocalModels) void onRefreshLocalModels();
-          return;
-        }
+      const data = (await res.json()) as { ok?: boolean; model?: GgufModelPreset; error?: string };
+      if (!res.ok || !data.model) {
+        setStatusMsg({ ok: false, text: data.error || 'Could not inspect GGUF file' });
+        return;
       }
+      setLocalModels((prev) => [data.model!, ...prev.filter((m) => m.id !== data.model!.id)]);
+      await onActivateModel(data.model);
+      setStatusMsg({
+        ok: true,
+        text: `Parsed ${data.model.name} (${data.model.architecture} · ${data.model.layers}L${data.model.mmprojPath ? ' · Companion mmproj paired' : ''})`,
+      });
+      setManualFilePath('');
     } catch {
-      // Fallback to local parsing
+      setStatusMsg({ ok: false, text: 'Failed to contact server for GGUF inspection.' });
     }
-
-    const preset = parseLocalGgufModel(file.name, file.size, headerBytes);
-    onSelectModel(preset);
-    setLocalScanMessage(`Loaded: ${preset.name} (${(file.size / (1024 * 1024 * 1024)).toFixed(2)} GB)`);
-    e.target.value = '';
   };
 
-  const handleCopyPath = (path: string) => {
-    void navigator.clipboard?.writeText(path);
-    setCopiedPath(path);
-    window.setTimeout(() => setCopiedPath(null), 1500);
-  };
-
-  // Evaluated Hugging Face Models
-  const evaluatedList = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    const rows = models
-      .map((model) => {
-        const chosenQuant = selectedQuants[model.id] ?? model.defaultQuant;
-        const variant =
-          model.quantOptions.find((v) => v.quant === chosenQuant) ??
-          model.quantOptions[0] ?? {
-            quant: model.defaultQuant,
-            sizeMb: model.sizeMb,
-            bpw: 4.8,
-          };
-        const fit = evaluateModelAgainstCluster(model, variant.sizeMb, clusterPlan);
-        return { model, variant, fit };
-      })
-      .filter(({ model, fit }) => {
-        if (q) {
-          const hay = `${model.name} ${model.hfRepo} ${model.architecture} ${model.tags.join(' ')}`.toLowerCase();
-          if (!hay.includes(q)) return false;
-        }
-        if (filter === 'fits') return fit.canLoadCleanly;
-        if (filter === 'moe') return model.architecture === 'MoE';
-        if (filter === 'ternary') return model.architecture === 'Ternary';
-        if (filter === 'turboquant') return model.architecture === 'TurboQuant';
-        if (filter === 'looped') return model.architecture === 'Looped';
-        if (filter === 'coding') {
-          return (
-            model.tags.some((t) => /code|coding|hermes|opencode|tool/i.test(t)) ||
-            /coder|code/i.test(model.name)
-          );
-        }
-        return true;
+  const handleBrowserFilePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const slice = file.slice(0, Math.min(file.size, 131072));
+      const buf = new Uint8Array(await slice.arrayBuffer());
+      const parsed = parseLocalGgufModel(file.name, file.size, buf, null);
+      setLocalModels((prev) => [parsed, ...prev.filter((m) => m.id !== parsed.id)]);
+      await onActivateModel(parsed);
+      setStatusMsg({
+        ok: true,
+        text: `Inspected binary GGUF header for ${parsed.name} (${parsed.architecture} · ${parsed.layers}L · vocab ${parsed.vocabHash?.slice(0, 8) || 'ok'})`,
       });
+    } catch {
+      setStatusMsg({ ok: false, text: 'Could not read binary GGUF header from selected file.' });
+    }
+  };
 
-    rows.sort((a, b) => {
-      if (sortMode === 'downloads') {
-        return b.model.downloads - a.model.downloads;
+  const handleSearchHf = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSearchingHf(true);
+    try {
+      const res = await fetch(`/api/hf/models?q=${encodeURIComponent(hfQuery.trim())}`);
+      if (res.ok) {
+        const data = (await res.json()) as { models: HfCatalogModel[] };
+        setHfModels(data.models);
       }
-      const rank = { Fast: 3, 'Best Fit': 2, Streaming: 1, 'Too Large': 0 };
-      const diff = rank[b.fit.fitStatus] - rank[a.fit.fitStatus];
-      if (diff !== 0) return diff;
-      return b.fit.estimatedTokPerSec - a.fit.estimatedTokPerSec;
-    });
+    } finally {
+      setSearchingHf(false);
+    }
+  };
 
-    return rows;
-  }, [models, selectedQuants, clusterPlan, searchQuery, filter, sortMode]);
-
-  const activeNodeCount = clusterPlan.nodes.filter((n) => n.effectiveCapMb > 0).length;
+  const poolGb = (plan.totalSafePoolMb / 1024).toFixed(1);
 
   return (
-    <div className="space-y-6 pb-8">
-      {/* 1. Main Hub Header & Top Navigation Tabs */}
-      <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-5 space-y-4">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-              <span className="font-semibold text-slate-700 dark:text-slate-300">ClusterLab Model Hub</span>
-              <span aria-hidden="true">·</span>
-              <span className="font-mono-num">{activeNodeCount} active node(s)</span>
-              <span aria-hidden="true">·</span>
-              <span className="font-mono-num">
-                {(clusterPlan.totalSafePoolMb / 1024).toFixed(1)} GB safe RAM/VRAM pool
-              </span>
-              <span aria-hidden="true">·</span>
-              <span className="font-mono-num text-emerald-600 dark:text-emerald-400 font-semibold">
-                Active: {activeModel.name} ({activeModel.quant})
-              </span>
-            </div>
-            <h1 className="font-display text-xl font-bold text-slate-900 dark:text-slate-100">
-              Load & Shard Models Across Your Nodes
-            </h1>
-          </div>
-
-          {/* Top Tabs: Local Directory vs Hugging Face */}
-          <div className="flex items-center gap-2 self-start lg:self-auto">
-            <div
-              role="tablist"
-              aria-label="Model Catalog Source"
-              className="inline-flex items-center p-1 rounded-lg bg-slate-100 dark:bg-[#0B1120] border border-slate-200 dark:border-slate-800"
-            >
-              <button
-                type="button"
-                role="tab"
-                aria-selected={hubTab === 'local'}
-                onClick={() => setHubTab('local')}
-                className={`px-3 py-1.5 rounded-md text-xs font-semibold whitespace-nowrap shrink-0 transition-colors flex items-center gap-1.5 ${
-                  hubTab === 'local'
-                    ? 'bg-white dark:bg-[#1E293B] text-slate-900 dark:text-white shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-                }`}
-              >
-                <Folder className="w-3.5 h-3.5 text-amber-500" />
-                <span>Local Directory & GGUF ({localModels.length})</span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={hubTab === 'hf'}
-                onClick={() => setHubTab('hf')}
-                className={`px-3 py-1.5 rounded-md text-xs font-semibold whitespace-nowrap shrink-0 transition-colors flex items-center gap-1.5 ${
-                  hubTab === 'hf'
-                    ? 'bg-white dark:bg-[#1E293B] text-slate-900 dark:text-white shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-                }`}
-              >
-                <Sparkles className="w-3.5 h-3.5 text-blue-500" />
-                <span>Hugging Face Catalog</span>
-              </button>
-            </div>
-          </div>
+    <div className="space-y-5">
+      {/* Header & Source Switcher */}
+      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827] p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+            Models & GGUF Inspector
+          </h1>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+            Point to any <code className="font-mono-num">.gguf</code> to parse its binary header, auto-pair{' '}
+            <code className="font-mono-num">*mmproj*</code> on Master, and compute zero-OOM layer sharding for your{' '}
+            <span className="font-mono-num text-slate-800 dark:text-slate-200">{poolGb} GB</span> safe pool.
+          </p>
         </div>
 
-        {/* TAB 1: LOCAL DIRECTORY & GGUF MODELS */}
-        {hubTab === 'local' && (
-          <div className="space-y-4 pt-2 border-t border-slate-200 dark:border-slate-800/80">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-              <div>
-                <p className="text-xs text-slate-600 dark:text-slate-300">
-                  Scan local folders, pick `.gguf` weights directly from disk, or paste an absolute file path.
-                  No internet download required.
-                </p>
-              </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1424] p-0.5 text-xs">
+            <button
+              type="button"
+              onClick={() => setSourceTab('local')}
+              className={`px-3 py-1.5 rounded-md font-medium transition-colors ${
+                sourceTab === 'local'
+                  ? 'bg-white dark:bg-[#1A2438] text-slate-900 dark:text-slate-100 shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              Local GGUF
+            </button>
+            <button
+              type="button"
+              onClick={() => setSourceTab('huggingface')}
+              className={`px-3 py-1.5 rounded-md font-medium transition-colors ${
+                sourceTab === 'huggingface'
+                  ? 'bg-white dark:bg-[#1A2438] text-slate-900 dark:text-slate-100 shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              Hugging Face
+            </button>
+          </div>
 
-              {/* Hidden file picker input */}
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".gguf"
-                className="hidden"
-                onChange={handleFilePicked}
-              />
+          <button
+            type="button"
+            onClick={onOpenLoadConfig}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5" />
+            Load Config
+          </button>
+        </div>
+      </div>
 
-              <div className="flex items-center gap-2 self-start md:self-auto shrink-0">
+      {/* Active Model Card Summary */}
+      <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/[0.05] dark:bg-emerald-500/[0.07] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-emerald-700 dark:text-emerald-400">
+            Active Model
+          </p>
+          <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+            {activeModel.name} · {activeModel.quant} · {activeModel.architecture}
+          </p>
+          <p className="text-xs font-mono-num text-slate-600 dark:text-slate-300">
+            {(activeModel.sizeMb / 1024).toFixed(2)} GB · {activeModel.layers} layers ·{' '}
+            {activeModel.activeParamsB}B active / {activeModel.totalParamsB}B total
+            {activeModel.vocabHash ? ` · vocab ${activeModel.vocabHash.slice(0, 10)}` : ''}
+            {activeModel.mmprojPath ? ' · Vision mmproj paired' : ''}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onOpenLoadConfig}
+          className="px-3.5 py-2 rounded-lg border border-emerald-600/40 bg-white dark:bg-[#111827] text-xs font-medium text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 shrink-0"
+        >
+          Tune & Hot-Reload
+        </button>
+      </div>
+
+      {statusMsg && (
+        <div
+          className={`rounded-lg border px-4 py-2.5 text-xs ${
+            statusMsg.ok
+              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300'
+              : 'border-rose-500/40 bg-rose-500/10 text-rose-800 dark:text-rose-300'
+          }`}
+        >
+          {statusMsg.text}
+        </div>
+      )}
+
+      {sourceTab === 'local' ? (
+        <div className="space-y-4">
+          {/* Universal OS-agnostic Directory Scan + Direct File Inspect */}
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827] p-5 space-y-4">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-slate-500 dark:text-slate-400 font-medium">Quick folders:</span>
+              {UNIVERSAL_SCAN_PRESETS.map((preset) => (
                 <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0B1120] hover:border-blue-500 px-3 py-1.5 text-xs font-semibold text-slate-800 dark:text-slate-100 whitespace-nowrap transition-colors"
-                >
-                  <FolderOpen className="w-3.5 h-3.5 text-blue-500" />
-                  <span>Browse .gguf File</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleScanDirectory()}
-                  disabled={isScanningLocal}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white px-3 py-1.5 text-xs font-semibold whitespace-nowrap transition-colors"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isScanningLocal ? 'animate-spin' : ''}`} />
-                  <span>{isScanningLocal ? 'Scanning...' : 'Rescan Folders'}</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Folder Scanner & Path Inputs */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 pt-1">
-              <div className="lg:col-span-6 flex gap-2">
-                <div className="relative flex-1">
-                  <Folder className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                  <input
-                    type="text"
-                    value={scanDirInput}
-                    onChange={(e) => setScanDirInput(e.target.value)}
-                    placeholder="Custom folder to scan (e.g. C:\AI\models or ~/models)..."
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B1120] pl-9 pr-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-blue-500 font-mono-num"
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleScanDirectory(scanDirInput.trim())}
-                  disabled={isScanningLocal || !scanDirInput.trim()}
-                  className="rounded-lg border border-slate-300 dark:border-slate-700 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-blue-500 disabled:opacity-50 whitespace-nowrap"
-                >
-                  Scan Dir
-                </button>
-              </div>
-
-              <div className="lg:col-span-6 flex gap-2">
-                <div className="relative flex-1">
-                  <FileText className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                  <input
-                    type="text"
-                    value={manualPathInput}
-                    onChange={(e) => setManualPathInput(e.target.value)}
-                    placeholder="Direct .gguf file path (e.g. C:\Downloads\model.gguf)..."
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B1120] pl-9 pr-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-blue-500 font-mono-num"
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={handleAddManualPath}
-                  disabled={isScanningLocal || !manualPathInput.trim()}
-                  className="rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-3 py-2 text-xs font-semibold whitespace-nowrap flex items-center gap-1"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Add File</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Quick folder chips */}
-            <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-              <span className="text-[11px] font-semibold text-slate-600 dark:text-slate-400">Quick Scan Locations:</span>
-              {[
-                { label: 'Downloads Folder', path: '' },
-                { label: './models', path: './models' },
-                { label: 'LM Studio Cache', path: 'C:\\Users\\alojy\\.cache\\lm-studio\\models' },
-              ].map((chip) => (
-                <button
-                  key={chip.label}
+                  key={preset.label}
                   type="button"
                   onClick={() => {
-                    setScanDirInput(chip.path);
-                    void handleScanDirectory(chip.path);
+                    setScanDir(preset.path);
+                    scanLocalDirectory(preset.path);
                   }}
-                  className="rounded-md border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-[#0B1120] px-2 py-0.5 text-[11px] font-medium text-slate-700 dark:text-slate-300 hover:border-blue-500 transition-colors"
+                  className="px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 font-mono-num"
                 >
-                  {chip.label}
+                  {preset.label}
                 </button>
               ))}
             </div>
 
-            {localScanMessage && (
-              <div className="text-xs text-slate-600 dark:text-slate-300 flex items-center gap-1.5 bg-slate-50 dark:bg-[#0B1120] p-2 rounded-lg border border-slate-200 dark:border-slate-800">
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                <span>{localScanMessage}</span>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  aria-label="Local GGUF folder path"
+                  value={scanDir}
+                  onChange={(e) => setScanDir(e.target.value)}
+                  placeholder="./models"
+                  className="flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1424] px-3 py-2 text-xs font-mono-num text-slate-900 dark:text-slate-100"
+                />
+                <button
+                  type="button"
+                  disabled={scanning}
+                  onClick={() => scanLocalDirectory(scanDir)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                >
+                  <FolderOpen className="w-3.5 h-3.5" />
+                  {scanning ? 'Scanning...' : 'Scan Folder'}
+                </button>
               </div>
-            )}
-          </div>
-        )}
 
-        {/* TAB 2: HUGGING FACE SEARCH CONTROLS */}
-        {hubTab === 'hf' && (
-          <div className="space-y-4 pt-2 border-t border-slate-200 dark:border-slate-800/80">
-            <div className="flex flex-col lg:flex-row gap-3">
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void fetchHuggingFaceModels(searchQuery);
-                }}
-                className="flex-1 flex gap-2"
-              >
-                <div className="relative flex-1">
-                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search Hugging Face GGUF (e.g. Qwen3, Llama-3.3, DeepSeek, BitNet, Coder)..."
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B1120] pl-9 pr-3 py-2 text-xs text-slate-900 dark:text-slate-100 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
+              <form onSubmit={handleInspectManualPath} className="flex gap-2">
+                <input
+                  type="text"
+                  aria-label="Full path to local .gguf file"
+                  value={manualFilePath}
+                  onChange={(e) => setManualFilePath(e.target.value)}
+                  placeholder="/path/to/model.gguf (auto-pairs *mmproj*)"
+                  className="flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1424] px-3 py-2 text-xs font-mono-num text-slate-900 dark:text-slate-100"
+                />
                 <button
                   type="submit"
-                  disabled={isLoading}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white px-4 py-2 text-xs font-semibold whitespace-nowrap shrink-0"
+                  className="px-3.5 py-2 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-xs font-medium whitespace-nowrap"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-                  <span>{isLoading ? 'Syncing...' : 'Search HF'}</span>
+                  Inspect GGUF
                 </button>
               </form>
+            </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="inline-flex items-center p-1 rounded-lg bg-slate-100 dark:bg-[#0B1120] border border-slate-200 dark:border-slate-800">
-                  {(
-                    [
-                      ['all', 'All'],
-                      ['fits', 'Fits Cluster'],
-                      ['moe', 'MoE'],
-                      ['coding', 'Coding'],
-                      ['ternary', 'Ternary'],
-                      ['turboquant', 'TurboQuant'],
-                      ['looped', 'Looped'],
-                    ] as const
-                  ).map(([key, label]) => (
+            <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between flex-wrap gap-2">
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                Or pick a local <code className="font-mono-num">.gguf</code> file directly in your browser to inspect its binary header immediately:
+              </span>
+              <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer">
+                <Upload className="w-3.5 h-3.5" />
+                Pick .gguf Header
+                <input
+                  type="file"
+                  accept=".gguf"
+                  onChange={handleBrowserFilePick}
+                  className="hidden"
+                />
+              </label>
+            </div>
+          </div>
+
+          {/* Discovered Local Models Grid */}
+          {localModels.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              {localModels.map((model) => {
+                const isActive = activeModel.id === model.id;
+                return (
+                  <div
+                    key={model.id}
+                    className={`rounded-xl border p-4 bg-white dark:bg-[#111827] flex flex-col justify-between gap-3 ${
+                      isActive
+                        ? 'border-emerald-500/70'
+                        : 'border-slate-200 dark:border-slate-800'
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
+                        <span className="inline-flex items-center gap-1.5 font-mono-num">
+                          <HardDrive className="w-3.5 h-3.5" />
+                          {model.quant} · {model.architecture}
+                        </span>
+                        {model.mmprojPath && (
+                          <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
+                            <Eye className="w-3.5 h-3.5" />
+                            Vision
+                          </span>
+                        )}
+                      </div>
+                      <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 mt-1.5">
+                        {model.name}
+                      </h3>
+                      <p className="text-xs font-mono-num text-slate-500 dark:text-slate-400 mt-1">
+                        {(model.sizeMb / 1024).toFixed(2)} GB · {model.layers} layers ·{' '}
+                        {model.contextLengthDefault.toLocaleString()} ctx
+                      </p>
+                    </div>
                     <button
-                      key={key}
                       type="button"
-                      onClick={() => setFilter(key)}
-                      className={`px-2.5 py-1 rounded-md text-xs font-semibold whitespace-nowrap shrink-0 transition-colors ${
-                        filter === key
-                          ? 'bg-white dark:bg-[#1E293B] text-slate-900 dark:text-white shadow-xs'
-                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                      onClick={() => onActivateModel(model)}
+                      className={`w-full py-2 rounded-lg text-xs font-medium transition-colors ${
+                        isActive
+                          ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+                          : 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:opacity-90'
                       }`}
                     >
-                      {label}
+                      {isActive ? 'Active on Cluster' : 'Load on Cluster'}
                     </button>
-                  ))}
-                </div>
-
-                <select
-                  value={sortMode}
-                  onChange={(e) => setSortMode(e.target.value as SortMode)}
-                  aria-label="Sort models"
-                  className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#0B1120] px-2.5 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200"
-                >
-                  <option value="fit">Sort: Cluster Fit & Speed</option>
-                  <option value="downloads">Sort: HF Downloads</option>
-                </select>
-
-                <a
-                  href="https://huggingface.co/models?library=gguf&sort=downloads"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 px-2.5 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-blue-500 whitespace-nowrap shrink-0"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  <span>Hugging Face Hub</span>
-                </a>
-              </div>
-            </div>
-
-            {syncMessage && (
-              <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center justify-between gap-2">
-                <span>{syncMessage}</span>
-                <span className="font-mono-num">
-                  Source: {syncSource === 'huggingface' ? 'huggingface.co/api' : 'Local Verified Catalog'}
-                </span>
-              </div>
-            )}
-          </div>
-        )}
-      </section>
-
-      {/* 2. TAB CONTENT: LOCAL MODELS GRID */}
-      {hubTab === 'local' && (
-        <section className="space-y-4">
-          <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-            <span>
-              Showing {localModels.length} local `.gguf` file(s) available on this machine
-            </span>
-            <span>Real safe RAM/VRAM capacity: {(clusterPlan.totalSafePoolMb / 1024).toFixed(1)} GB</span>
-          </div>
-
-          {localModels.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-slate-300 dark:border-slate-700 bg-white dark:bg-[#131C31] p-10 text-center space-y-4">
-              <div className="w-12 h-12 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center mx-auto text-slate-400">
-                <FolderOpen className="w-6 h-6" />
-              </div>
-              <div className="space-y-1">
-                <h3 className="font-display text-base font-bold text-slate-800 dark:text-slate-200">
-                  No local .gguf models discovered yet
-                </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
-                  Click below to browse your hard drive for any downloaded `.gguf` file, or enter a folder path to scan.
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="rounded-lg bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 text-xs font-semibold flex items-center gap-2"
-                >
-                  <FolderOpen className="w-4 h-4" />
-                  <span>Browse .gguf File from Disk</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleScanDirectory('')}
-                  className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#131C31] px-4 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-blue-500"
-                >
-                  Scan Downloads Folder
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {localModels.map((model) => {
-                const isSelected =
-                  activeModel.id === model.id ||
-                  (model.localPath && activeModel.localPath === model.localPath);
-                const sizeGb = (model.sizeMb / 1024).toFixed(1);
-                const poolGb = (clusterPlan.totalSafePoolMb / 1024).toFixed(1);
-                const canFit = model.sizeMb <= clusterPlan.totalSafePoolMb;
-                const coveragePct = Math.min(100, Math.round((model.sizeMb / clusterPlan.totalSafePoolMb) * 100));
-
-                return (
-                  <article
-                    key={model.id}
-                    className={`rounded-xl border p-5 flex flex-col justify-between gap-4 bg-white dark:bg-[#131C31] transition-colors ${
-                      isSelected
-                        ? 'border-emerald-500 ring-1 ring-emerald-500/30'
-                        : 'border-slate-200 dark:border-slate-800'
-                    }`}
-                  >
-                    <div className="space-y-3">
-                      {/* Top status */}
-                      <div className="flex items-center justify-between gap-2 text-xs">
-                        <div className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400 truncate">
-                          <span className="font-semibold text-amber-600 dark:text-amber-400">Disk Weight</span>
-                          <span aria-hidden="true"> · </span>
-                          <span>{model.architecture}</span>
-                          <span aria-hidden="true"> · </span>
-                          <span className="font-mono-num font-semibold text-slate-700 dark:text-slate-300">
-                            {model.quant}
-                          </span>
-                        </div>
-                        <span
-                          className={`font-semibold whitespace-nowrap shrink-0 ${
-                            canFit
-                              ? 'text-emerald-600 dark:text-emerald-400'
-                              : 'text-amber-600 dark:text-amber-400'
-                          }`}
-                        >
-                          {canFit ? 'Fits Cleanly' : 'High Memory'}
-                        </span>
-                      </div>
-
-                      {/* Model Title */}
-                      <div>
-                        <h2 className="font-display text-base font-bold text-slate-900 dark:text-slate-100 leading-snug">
-                          {model.name}
-                        </h2>
-                        {model.localPath && (
-                          <div className="mt-1 flex items-center justify-between gap-1 rounded bg-slate-50 dark:bg-[#0B1120] p-1.5 border border-slate-200 dark:border-slate-800 text-[11px] font-mono-num text-slate-600 dark:text-slate-400">
-                            <span className="truncate" title={model.localPath}>
-                              {model.localPath}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => handleCopyPath(model.localPath || '')}
-                              title="Copy local path"
-                              className="text-slate-400 hover:text-blue-500 p-0.5"
-                            >
-                              {copiedPath === model.localPath ? (
-                                <Check className="w-3.5 h-3.5 text-emerald-500" />
-                              ) : (
-                                <Copy className="w-3.5 h-3.5" />
-                              )}
-                            </button>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Specs Row */}
-                      <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-100 dark:border-slate-800 text-xs">
-                        <div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                            <Sparkles className="w-3 h-3" /> Active Params
-                          </div>
-                          <div className="font-mono-num font-bold text-slate-900 dark:text-slate-100 mt-0.5">
-                            {model.activeParamsB}B / {model.totalParamsB}B
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                            <HardDrive className="w-3 h-3" /> Disk Size
-                          </div>
-                          <div className="font-mono-num font-bold text-slate-900 dark:text-slate-100 mt-0.5">
-                            {sizeGb} GB
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                            <Layers className="w-3 h-3" /> Layers
-                          </div>
-                          <div className="font-mono-num font-bold text-slate-900 dark:text-slate-100 mt-0.5">
-                            {model.layers}L
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Cluster Pool Bar */}
-                      <div className="space-y-1.5 pt-1">
-                        <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 font-mono-num">
-                          <span>Pool Coverage: {coveragePct}%</span>
-                          <span>
-                            {sizeGb} GB / {poolGb} GB Safe Pool
-                          </span>
-                        </div>
-                        <div className="h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
-                          <div
-                            className={`h-full transition-all ${
-                              canFit ? 'bg-emerald-500' : 'bg-amber-500'
-                            }`}
-                            style={{ width: `${coveragePct}%` }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Card Actions */}
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
-                      <span className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-num">
-                        {isSelected ? 'Currently Sharded' : 'Ready to Load'}
-                      </span>
-
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => onSelectModel(model)}
-                          className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold whitespace-nowrap transition-colors ${
-                            isSelected
-                              ? 'bg-emerald-600 text-white'
-                              : 'bg-blue-600 hover:bg-blue-500 text-white'
-                          }`}
-                        >
-                          <Cpu className="w-3.5 h-3.5" />
-                          <span>{isSelected ? 'Loaded in Cluster ✓' : 'Load into Cluster'}</span>
-                        </button>
-
-                        {isSelected && (
-                          <button
-                            type="button"
-                            onClick={onOpenChat}
-                            title="Open Chat & Brain Window"
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 px-2.5 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-blue-500 whitespace-nowrap shrink-0"
-                          >
-                            <span>Chat</span>
-                            <ArrowRight className="w-3.5 h-3.5" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </article>
+                  </div>
                 );
               })}
             </div>
-          )}
-        </section>
-      )}
-
-      {/* 3. TAB CONTENT: HUGGING FACE CATALOG GRID */}
-      {hubTab === 'hf' && (
-        <>
-          {isLoading && evaluatedList.length === 0 ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {Array.from({ length: 6 }).map((_, idx) => (
-                <div
-                  key={idx}
-                  className="h-56 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] animate-pulse p-5"
-                />
-              ))}
-            </div>
-          ) : evaluatedList.length === 0 ? (
-            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131C31] p-8 text-center space-y-3">
-              <div className="text-sm font-semibold text-slate-800 dark:text-slate-200">
-                No models matched &ldquo;{searchQuery}&rdquo; under the selected filter.
-              </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-slate-300 dark:border-slate-700 p-8 text-center text-xs text-slate-500 dark:text-slate-400">
+              No local GGUF models found in <code className="font-mono-num">{scanDir}</code>. Switch to{' '}
               <button
                 type="button"
-                onClick={() => {
-                  setSearchQuery('');
-                  setFilter('all');
-                  void fetchHuggingFaceModels('');
-                }}
-                className="rounded-lg bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 text-xs font-semibold"
+                onClick={() => setSourceTab('huggingface')}
+                className="text-emerald-700 dark:text-emerald-400 font-medium underline"
               >
-                Reset Filters & Show All GGUF Models
-              </button>
+                Hugging Face
+              </button>{' '}
+              or pick a local <code className="font-mono-num">.gguf</code> file above.
             </div>
-          ) : (
-            <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {evaluatedList.map(({ model, variant, fit }) => {
-                const isSelected =
-                  activeModel.hfRepo.toLowerCase() === model.hfRepo.toLowerCase() ||
-                  activeModel.id === model.id;
+          )}
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <form onSubmit={handleSearchHf} className="flex gap-2">
+            <div className="relative flex-1">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                aria-label="Search Hugging Face GGUF models"
+                value={hfQuery}
+                onChange={(e) => setHfQuery(e.target.value)}
+                placeholder="Search Hugging Face GGUF models (e.g. Qwen3, Llama-3.3, BitNet, Gemma)..."
+                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#111827] pl-9 pr-3 py-2 text-xs text-slate-900 dark:text-slate-100"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={searchingHf}
+              className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium"
+            >
+              {searchingHf ? 'Searching...' : 'Search'}
+            </button>
+          </form>
 
-                const fitColor =
-                  fit.fitStatus === 'Fast'
-                    ? 'text-emerald-600 dark:text-emerald-400'
-                    : fit.fitStatus === 'Best Fit'
-                      ? 'text-blue-600 dark:text-blue-400'
-                      : fit.fitStatus === 'Streaming'
-                        ? 'text-amber-600 dark:text-amber-400'
-                        : 'text-red-600 dark:text-red-400';
-
-                return (
-                  <article
-                    key={model.id}
-                    className={`rounded-xl border p-5 flex flex-col justify-between gap-4 bg-white dark:bg-[#131C31] transition-colors ${
-                      isSelected
-                        ? 'border-blue-500 ring-1 ring-blue-500/30'
-                        : 'border-slate-200 dark:border-slate-800'
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+            {hfModels.map((item) => {
+              const isActive = activeModel.id === item.id;
+              const fitsPool = item.sizeMb <= plan.totalSafePoolMb;
+              return (
+                <div
+                  key={item.id}
+                  className={`rounded-xl border p-4 bg-white dark:bg-[#111827] flex flex-col justify-between gap-3 ${
+                    isActive
+                      ? 'border-emerald-500/70'
+                      : 'border-slate-200 dark:border-slate-800'
+                  }`}
+                >
+                  <div>
+                    <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 font-mono-num">
+                      <span>{item.architecture} · {item.defaultQuant}</span>
+                      <span className={fitsPool ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}>
+                        {fitsPool ? 'Fits Pool' : 'mmap stream'}
+                      </span>
+                    </div>
+                    <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 mt-1">
+                      {item.name}
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">
+                      {item.summary}
+                    </p>
+                    <p className="text-xs font-mono-num text-slate-600 dark:text-slate-300 mt-2">
+                      {(item.sizeMb / 1024).toFixed(1)} GB · {item.layers}L · {item.activeParamsB}B active
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onActivateModel(catalogModelToPreset(item))}
+                    className={`w-full py-2 rounded-lg text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors ${
+                      isActive
+                        ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+                        : 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:opacity-90'
                     }`}
                   >
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between gap-2 text-xs">
-                        <div className="text-slate-500 dark:text-slate-400 truncate">
-                          <span>{model.author}</span>
-                          <span aria-hidden="true"> · </span>
-                          <span>{model.architecture}</span>
-                          {model.downloads > 0 && (
-                            <>
-                              <span aria-hidden="true"> · </span>
-                              <span className="font-mono-num">
-                                {model.downloads >= 1000
-                                  ? `${Math.round(model.downloads / 1000)}k dl`
-                                  : `${model.downloads} dl`}
-                              </span>
-                            </>
-                          )}
-                        </div>
-                        <span className={`font-semibold whitespace-nowrap shrink-0 ${fitColor}`}>
-                          {fit.fitStatus}
-                        </span>
-                      </div>
-
-                      <div className="flex items-start justify-between gap-2">
-                        <h2 className="font-display text-base font-bold text-slate-900 dark:text-slate-100 leading-snug">
-                          {model.name}
-                        </h2>
-                        <a
-                          href={model.hfUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          title={`Open ${model.hfRepo} on Hugging Face`}
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-blue-500 hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
-                        >
-                          <ExternalLink className="w-4 h-4" />
-                        </a>
-                      </div>
-
-                      <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-                        {model.summary}
-                      </p>
-
-                      <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-100 dark:border-slate-800 text-xs">
-                        <div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                            <Sparkles className="w-3 h-3" /> Active / Total
-                          </div>
-                          <div className="font-mono-num font-bold text-slate-900 dark:text-slate-100 mt-0.5">
-                            {model.activeParamsB}B / {model.totalParamsB}B
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                            <HardDrive className="w-3 h-3" /> Size / Pool
-                          </div>
-                          <div className="font-mono-num font-bold text-slate-900 dark:text-slate-100 mt-0.5">
-                            {(variant.sizeMb / 1024).toFixed(1)} GB
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1">
-                            <Zap className="w-3 h-3" /> Est. Speed
-                          </div>
-                          <div className="font-mono-num font-bold text-slate-900 dark:text-slate-100 mt-0.5">
-                            ~{fit.estimatedTokPerSec} tok/s
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="space-y-2 pt-1">
-                        <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 font-mono-num">
-                          <span className="flex items-center gap-1">
-                            <Layers className="w-3 h-3" />
-                            {model.layers}L · Pool coverage {fit.coveragePct}%
-                          </span>
-                          <span>
-                            {fit.headroomMb >= 0
-                              ? `+${(fit.headroomMb / 1024).toFixed(1)} GB free`
-                              : `${Math.abs(fit.headroomMb / 1024).toFixed(1)} GB over cap`}
-                          </span>
-                        </div>
-                        <div className="h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
-                          <div
-                            className={`h-full transition-all ${
-                              fit.fitStatus === 'Fast'
-                                ? 'bg-emerald-500'
-                                : fit.fitStatus === 'Best Fit'
-                                  ? 'bg-blue-500'
-                                  : fit.fitStatus === 'Streaming'
-                                    ? 'bg-amber-500'
-                                    : 'bg-red-500'
-                            }`}
-                            style={{ width: `${fit.coveragePct}%` }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
-                      <select
-                        value={variant.quant}
-                        onChange={(e) =>
-                          setSelectedQuants((prev) => ({
-                            ...prev,
-                            [model.id]: e.target.value,
-                          }))
-                        }
-                        aria-label={`Quantization for ${model.name}`}
-                        className="rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B1120] px-2.5 py-1.5 text-xs font-mono-num font-semibold text-slate-800 dark:text-slate-200"
-                      >
-                        {model.quantOptions.map((opt) => (
-                          <option key={opt.quant} value={opt.quant}>
-                            {opt.quant} ({(opt.sizeMb / 1024).toFixed(1)} GB)
-                          </option>
-                        ))}
-                      </select>
-
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onSelectModel(catalogModelToPreset(model, variant.quant));
-                          }}
-                          className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-semibold whitespace-nowrap shrink-0 transition-colors ${
-                            isSelected
-                              ? 'bg-emerald-600 text-white'
-                              : 'bg-blue-600 hover:bg-blue-500 text-white'
-                          }`}
-                        >
-                          <Cpu className="w-3.5 h-3.5" />
-                          <span>{isSelected ? 'Loaded in Cluster' : 'Load & Tune'}</span>
-                        </button>
-
-                        {isSelected && (
-                          <button
-                            type="button"
-                            onClick={onOpenChat}
-                            title="Open Chat & Brain Window"
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 px-2.5 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-blue-500 whitespace-nowrap shrink-0"
-                          >
-                            <span>Chat</span>
-                            <ArrowRight className="w-3.5 h-3.5" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </article>
-                );
-              })}
-            </section>
-          )}
-        </>
+                    {isActive && <CheckCircle2 className="w-3.5 h-3.5" />}
+                    {isActive ? 'Active on Cluster' : 'Select & Auto-Configure'}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       )}
-
-      {/* Quiet Footer Note */}
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
-        <span className="flex items-center gap-1.5">
-          <Download className="w-3.5 h-3.5" />
-          Models are evaluated against your active Safe RAM + VRAM pool ({(clusterPlan.totalSafePoolMb / 1024).toFixed(1)} GB).
-        </span>
-        <span className="font-mono-num truncate max-w-xs">{activeModel.name} · {activeModel.hfRepo}</span>
-      </div>
     </div>
   );
 };

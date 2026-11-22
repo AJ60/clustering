@@ -6,10 +6,12 @@ export type ClusterMode = 'LIVE_CLUSTER' | 'LOCAL_DEVICE' | 'VIRTUAL_4NODE';
 
 export type GgufArchitecture = 'MoE' | 'Ternary' | 'TurboQuant' | 'Looped' | 'Dense';
 
+export type SpeculativeMode = 'off' | 'native_mtp' | 'prompt_lookup' | 'external_draft';
+
 export interface ConnectedDeviceInfo {
   id: string;
   model: string;
-  platform: 'Android' | 'Linux' | 'Other';
+  platform: 'Android' | 'Linux' | 'Windows' | 'Edge ARM' | 'Other';
   transport: string;
   safeCapMb: number;
   totalRamMb?: number;
@@ -17,9 +19,16 @@ export interface ConnectedDeviceInfo {
   vramMb?: number;
   computeTflops?: number;
   rttMs?: number;
+  pktLossPct?: number;
   bandwidthMbps?: number;
+  tempC?: number;
+  cpuUsagePct?: number;
+  gpuUsagePct?: number;
+  bigCores?: number;
   ip?: string;
+  rpcPort?: number;
   lastHeartbeatMs?: number;
+  handshakeVerified?: boolean;
   isOnline?: boolean;
   isWorkerRunning?: boolean;
   workerStatus?: 'Running' | 'Not Installed' | 'Stopped' | 'Offline';
@@ -30,7 +39,7 @@ export interface NodeNetworkAudit {
   label: string;
   role: 'Master' | 'Worker';
   ip: string;
-  linkType: 'Local' | 'USB-C Tunnel' | 'Ethernet 2.5G' | 'Wi-Fi LAN';
+  linkType: 'Local' | 'USB-C Tunnel' | 'USB RNDIS' | 'Ethernet 2.5G' | 'Wi-Fi LAN';
   rttMs: number;
   bandwidthMbps: number;
   packetLossPct: number;
@@ -60,12 +69,19 @@ export interface ClusterNetworkAuditReport {
 export interface LiveHardwareProbe {
   platform: 'windows' | 'linux' | 'darwin';
   osLabel: string;
+  hostname?: string;
+  hostIp?: string;
   totalRamMb: number;
   availableRamMb: number;
   vramMb: number;
   gpuName?: string;
   cpuModel: string;
   cores: number;
+  bigCores?: number;
+  cpuTempC?: number;
+  gpuTempC?: number;
+  cpuUsagePct?: number;
+  gpuUsagePct?: number;
   connectedDevices: ConnectedDeviceInfo[];
 }
 
@@ -84,6 +100,15 @@ export type BackendOsTarget = 'windows' | 'linux';
 export type WindowsAccelerator = 'CUDA 12.6' | 'Vulkan 1.3' | 'DirectML' | 'CPU AVX2';
 export type LinuxAccelerator = 'CUDA 12.6' | 'ROCm 6.3' | 'Vulkan 1.3' | 'CPU OpenBLAS';
 
+export interface LayerMemoryProfile {
+  layerIndex: number;
+  attentionMb: number;
+  ffnOrExpertMb: number;
+  totalWeightMb: number;
+  kvCacheMb: number;
+  isMoeLayer: boolean;
+}
+
 export interface GgufModelPreset {
   id: string;
   name: string;
@@ -101,6 +126,21 @@ export interface GgufModelPreset {
   tags?: string[];
   isLocal?: boolean;
   localPath?: string;
+  // Extended GGUF model-card & vision fields
+  rawArchitecture?: string;
+  expertCount?: number;
+  expertUsedCount?: number;
+  headCount?: number;
+  headCountKv?: number;
+  embeddingLength?: number;
+  hasChatTemplate?: boolean;
+  hasNativeMtp?: boolean;
+  vocabSize?: number;
+  vocabHash?: string;
+  mmprojPath?: string | null;
+  mmprojSizeMb?: number;
+  masterPinnedOverheadMb?: number;
+  perLayerProfiles?: LayerMemoryProfile[];
 }
 
 export const GGUF_MODEL_PRESETS: GgufModelPreset[] = [
@@ -114,10 +154,17 @@ export const GGUF_MODEL_PRESETS: GgufModelPreset[] = [
     totalParamsB: 1.54,
     activeParamsB: 1.54,
     contextLengthDefault: 8192,
+    maxContextLength: 32768,
     hfRepo: 'Qwen/Qwen2.5-1.5B-Instruct-GGUF',
     hfUrl: 'https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF',
-    summary: '1.15 GB · 28 layers · Ultra-lightweight edge & multi-device test model',
-    tags: ['small', 'fast', 'edge', 'testing'],
+    summary: '1.15 GB · 28 layers · Ultra-lightweight edge & multi-device model',
+    tags: ['small', 'fast', 'edge'],
+    hasChatTemplate: true,
+    headCount: 12,
+    headCountKv: 2,
+    embeddingLength: 1536,
+    vocabSize: 151936,
+    vocabHash: 'a91f4d20c3b81e04',
   },
   {
     id: 'moe-30b',
@@ -128,11 +175,21 @@ export const GGUF_MODEL_PRESETS: GgufModelPreset[] = [
     layers: 48,
     totalParamsB: 30.5,
     activeParamsB: 3.3,
-    contextLengthDefault: 16384,
+    contextLengthDefault: 32768,
+    maxContextLength: 131072,
     hfRepo: 'Qwen/Qwen3-30B-A3B-GGUF',
     hfUrl: 'https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF',
-    summary: '18.5 GB · 48 layers · 3.3B active / 30.5B total MoE',
-    tags: ['moe', 'chat', 'fast'],
+    summary: '18.5 GB · 48 layers · 3.3B active / 30.5B total Sparse MoE',
+    tags: ['moe', 'chat', 'reasoning'],
+    expertCount: 128,
+    expertUsedCount: 8,
+    headCount: 32,
+    headCountKv: 4,
+    embeddingLength: 2048,
+    hasChatTemplate: true,
+    hasNativeMtp: true,
+    vocabSize: 151936,
+    vocabHash: 'a91f4d20c3b81e04',
   },
   {
     id: 'ternary-27b',
@@ -143,11 +200,18 @@ export const GGUF_MODEL_PRESETS: GgufModelPreset[] = [
     layers: 36,
     totalParamsB: 27.0,
     activeParamsB: 27.0,
-    contextLengthDefault: 8192,
+    contextLengthDefault: 16384,
+    maxContextLength: 65536,
     hfRepo: 'microsoft/BitNet-b1.58-2B-4T-gguf',
     hfUrl: 'https://huggingface.co/microsoft/BitNet-b1.58-2B-4T-gguf',
-    summary: '6.4 GB · 36 layers · Compact 1.58-bit LUT weights',
+    summary: '6.4 GB · 36 layers · Compact 1.58-bit TQ1_0 weights',
     tags: ['ternary', 'edge', 'cpu'],
+    hasChatTemplate: true,
+    headCount: 32,
+    headCountKv: 8,
+    embeddingLength: 4096,
+    vocabSize: 128256,
+    vocabHash: '3e80b2917f01c41a',
   },
   {
     id: 'dense-32b',
@@ -158,11 +222,18 @@ export const GGUF_MODEL_PRESETS: GgufModelPreset[] = [
     layers: 64,
     totalParamsB: 32.5,
     activeParamsB: 32.5,
-    contextLengthDefault: 16384,
+    contextLengthDefault: 32768,
+    maxContextLength: 131072,
     hfRepo: 'Qwen/Qwen2.5-Coder-32B-Instruct-GGUF',
     hfUrl: 'https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct-GGUF',
-    summary: '19.8 GB · 64 layers · Dense coding & tool-use model',
+    summary: '19.8 GB · 64 layers · Dense coding & tool-calling model',
     tags: ['coding', 'dense', 'tools'],
+    hasChatTemplate: true,
+    headCount: 40,
+    headCountKv: 8,
+    embeddingLength: 5120,
+    vocabSize: 152064,
+    vocabHash: '84c710f29a5e6b31',
   },
   {
     id: 'dense-70b',
@@ -173,11 +244,18 @@ export const GGUF_MODEL_PRESETS: GgufModelPreset[] = [
     layers: 80,
     totalParamsB: 70.6,
     activeParamsB: 70.6,
-    contextLengthDefault: 8192,
+    contextLengthDefault: 16384,
+    maxContextLength: 131072,
     hfRepo: 'bartowski/Llama-3.3-70B-Instruct-GGUF',
     hfUrl: 'https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF',
     summary: '40.5 GB · 80 layers · Multi-node flagship cluster model',
     tags: ['dense', 'reasoning', 'multi-node'],
+    hasChatTemplate: true,
+    headCount: 64,
+    headCountKv: 8,
+    embeddingLength: 8192,
+    vocabSize: 128256,
+    vocabHash: '3e80b2917f01c41a',
   },
 ];
 
@@ -224,17 +302,25 @@ export interface StarClusterNode {
   role: 'Master' | 'Worker';
   platform: 'Desktop' | 'Android' | 'Edge ARM';
   osType: NodeOsType;
+  ip: string;
+  rpcPort?: number;
   backendDriver: string;
-  linkType: 'Local' | 'USB-C Tunnel' | 'Ethernet 2.5G' | 'Wi-Fi LAN';
+  linkType: 'Local' | 'USB-C Tunnel' | 'USB RNDIS' | 'Ethernet 2.5G' | 'Wi-Fi LAN';
   totalRamMb: number;
   availableRamMb: number;
   vramFreeMb: number;
+  vramTotalMb?: number;
   memBwGbps: number;
   computeTflops: number;
   physicalCores: number;
   rttMs: number;
   pktLossPct: number;
+  bandwidthMbps?: number;
   tempC: number;
+  cpuUsagePct?: number;
+  gpuUsagePct?: number;
+  handshakeVerified?: boolean;
+  heartbeatAgeS?: number;
   isConnected: boolean;
   statusNote?: string;
 }
@@ -256,6 +342,8 @@ export interface PlannedStarNode extends StarClusterNode {
   nglLayers: number;
   tuningFlags: string[];
   sharePct: number;
+  pruned?: boolean;
+  pruneReason?: string;
   statusNote: string;
 }
 
@@ -276,7 +364,15 @@ export interface StarClusterPlan {
   activeParamsPerTokenB: number;
   totalParamsB: number;
   nodes: PlannedStarNode[];
+  tensorSplit: number[];
   tensorSplitLabel: string;
+  tensorSplitCsv: string;
+  useNoMmap: boolean;
+  mmapStreaming: boolean;
+  autoNkvo: boolean;
+  masterMmprojPath?: string | null;
+  cliArgs: string[];
+  emaLearnedRuns?: number;
 }
 
 export interface BackendTuningConfig {
@@ -291,6 +387,22 @@ export interface BackendTuningConfig {
   linuxNumaInterleave: boolean;
   enableContextShift?: boolean;
   contBatching?: boolean;
+  // LM Studio / Unsloth / Long-Agent controls
+  gpuOffloadLayers?: number | null;
+  manualTensorSplit?: string;
+  speculativeMode?: SpeculativeMode;
+  draftModelPath?: string;
+  draftMaxTokens?: number;
+  cacheReuse?: number;
+  kvUnified?: boolean;
+  noKvOffload?: boolean | null; // null = auto (-nkvo on <=4GB GPUs at >=32K ctx)
+  slotSavePath?: string;
+  forceNoMmap?: boolean | null; // null = smart >=1.15x switch
+  threads?: number | null;
+  batchSize?: number;
+  ubatchSize?: number;
+  enableJinja?: boolean;
+  mmprojPath?: string;
 }
 
 export interface TunedOsBackendProfile {
@@ -341,11 +453,39 @@ export interface HfCatalogModel {
   source: 'curated' | 'huggingface';
 }
 
+export interface EngineRuntimeStatus {
+  running: boolean;
+  draining: boolean;
+  activeTurns: number;
+  upstreamUrl: string | null;
+  serverType: 'llama-server' | 'ollama' | 'lm-studio' | 'offline';
+  hasMmproj: boolean;
+  mmprojPath: string | null;
+  lastEvent: string;
+  reloadProgressPct: number;
+}
+
+export interface LearnedEmaProfile {
+  runs: number;
+  emaTokPerSec: number;
+  emaTtftMs: number;
+  emaPeakVramMb: number;
+  recommendedBatch: number;
+  recommendedUbatch: number;
+  learnedKvOffload: boolean;
+  nodeEfficiency: Record<string, number>;
+  throttleEvents: number;
+  oomEvents: number;
+  lastUpdatedEpochS: number;
+}
+
 export interface RuntimeClusterSnapshot {
   activeModel: GgufModelPreset;
   clusterMode: ClusterMode;
   tuningConfig: BackendTuningConfig;
   plan: StarClusterPlan;
   upstreamBaseUrl: string;
+  engineStatus?: EngineRuntimeStatus;
+  learnedProfile?: LearnedEmaProfile | null;
   updatedAt: string;
 }

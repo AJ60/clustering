@@ -3,6 +3,12 @@ package com.example.ui.silica
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.util.Base64
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -31,10 +37,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.AddComment
+import androidx.compose.material.icons.outlined.AddPhotoAlternate
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Radar
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Stop
@@ -42,6 +54,8 @@ import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
+import java.io.ByteArrayOutputStream
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -73,8 +87,9 @@ import com.example.data.ChatMessageEntity
 @Composable
 fun SilicaChatScreen(
     uiState: SilicaUiState,
-    onSendPrompt: (String) -> Unit,
+    onSendPrompt: (String, String?) -> Unit,
     onStopStreaming: () -> Unit,
+    onToggleWebTools: (Boolean) -> Unit,
     onOpenModelEndpointSheet: () -> Unit,
     onOpenSessionsDialog: () -> Unit,
     onNewSession: () -> Unit,
@@ -83,7 +98,21 @@ fun SilicaChatScreen(
     val cs = MaterialTheme.colorScheme
     val context = LocalContext.current
     var promptText by rememberSaveable { mutableStateOf("") }
+    var attachedImageDataUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    var attachedImageName by rememberSaveable { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
+
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val encoded = encodeImageUriToDataUrl(context, uri)
+            if (encoded != null) {
+                attachedImageDataUrl = encoded
+                attachedImageName = uri.lastPathSegment?.substringAfterLast('/') ?: "image.jpg"
+            }
+        }
+    }
 
     LaunchedEffect(uiState.messages.size, uiState.messages.lastOrNull()?.content?.length) {
         if (uiState.messages.isNotEmpty()) {
@@ -182,8 +211,41 @@ fun SilicaChatScreen(
             }
         }
 
-        // 2. Actionable Offline Master Diagnostic Banner (Zero mock replies!)
-        AnimatedVisibility(visible = !uiState.masterHealth.reachable) {
+        // 1b. Multimodal Vision & Web Tools Toolbar Row
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            FilterChip(
+                selected = uiState.config.webToolsEnabled,
+                onClick = { onToggleWebTools(!uiState.config.webToolsEnabled) },
+                label = { Text("Web Tools", style = MaterialTheme.typography.labelSmall) },
+                leadingIcon = {
+                    Icon(Icons.Outlined.Language, contentDescription = null, modifier = Modifier.size(15.dp))
+                }
+            )
+            if (uiState.clusterSnapshot?.hasMmproj == true) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = cs.primaryContainer.copy(alpha = 0.7f)
+                ) {
+                    Text(
+                        text = "Vision mmproj Ready",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = cs.onPrimaryContainer,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                    )
+                }
+            }
+        }
+
+        // 2. Actionable Offline Master / HTTP 503 Engine Offline Banner (Zero mock replies!)
+        val showOfflineBanner = !uiState.masterHealth.reachable ||
+            (uiState.clusterSnapshot != null && !uiState.clusterSnapshot.engineRunning)
+        AnimatedVisibility(visible = showOfflineBanner) {
             Surface(
                 shape = MaterialTheme.shapes.medium,
                 color = cs.errorContainer.copy(alpha = 0.55f),
@@ -204,13 +266,21 @@ fun SilicaChatScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Text(
-                            text = stringResource(R.string.chat_offline_title),
+                            text = if (uiState.masterHealth.reachable) {
+                                "Engine Offline (HTTP 503)"
+                            } else {
+                                stringResource(R.string.chat_offline_title)
+                            },
                             style = MaterialTheme.typography.titleSmall,
                             color = cs.onErrorContainer
                         )
                     }
                     Text(
-                        text = stringResource(R.string.chat_offline_body),
+                        text = if (uiState.masterHealth.reachable) {
+                            "Master coordinator is connected, but no live LLM engine is loaded yet. Load a GGUF model or connect llama-server / Ollama on Desktop."
+                        } else {
+                            stringResource(R.string.chat_offline_body)
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = cs.onErrorContainer.copy(alpha = 0.9f)
                     )
@@ -297,7 +367,7 @@ fun SilicaChatScreen(
                     )
                     starters.forEachIndexed { idx, starter ->
                         AssistChip(
-                            onClick = { onSendPrompt(starter) },
+                            onClick = { onSendPrompt(starter, null) },
                             label = { Text(starter, style = MaterialTheme.typography.labelSmall) },
                             modifier = Modifier.testTag("starter_chip_$idx")
                         )
@@ -325,7 +395,7 @@ fun SilicaChatScreen(
                         onRetry = if (msg.isError) {
                             {
                                 val lastUser = uiState.messages.lastOrNull { it.role == "user" }?.content
-                                if (!lastUser.isNullOrBlank()) onSendPrompt(lastUser)
+                                if (!lastUser.isNullOrBlank()) onSendPrompt(lastUser, null)
                             }
                         } else null
                     )
@@ -333,86 +403,164 @@ fun SilicaChatScreen(
             }
         }
 
-        // 4. Bottom Composer Bar
+        // 4. Bottom Composer Bar (with Vision Image Upload)
         Surface(
             color = cs.surfaceContainer,
             border = BorderStroke(1.dp, cs.outlineVariant),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedTextField(
-                    value = promptText,
-                    onValueChange = { promptText = it },
-                    placeholder = {
-                        Text(
-                            text = stringResource(R.string.chat_composer_placeholder),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = cs.onSurfaceVariant
-                        )
-                    },
-                    maxLines = 4,
-                    shape = MaterialTheme.shapes.medium,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = cs.secondary,
-                        unfocusedBorderColor = cs.outlineVariant,
-                        focusedContainerColor = cs.surfaceContainerLow,
-                        unfocusedContainerColor = cs.surfaceContainerLow
-                    ),
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("chat_composer_input")
-                )
-
-                if (uiState.isStreamingChat) {
-                    FilledIconButton(
-                        onClick = onStopStreaming,
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = cs.error,
-                            contentColor = cs.onError
-                        ),
+            Column(modifier = Modifier.fillMaxWidth()) {
+                if (attachedImageDataUrl != null) {
+                    Row(
                         modifier = Modifier
-                            .size(48.dp)
-                            .testTag("chat_stop_button")
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Image attached: ${attachedImageName ?: "photo.jpg"}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = cs.primary
+                        )
+                        IconButton(
+                            onClick = {
+                                attachedImageDataUrl = null
+                                attachedImageName = null
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(Icons.Outlined.Close, contentDescription = "Remove image", modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.Bottom,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    IconButton(
+                        onClick = { imagePickerLauncher.launch("image/*") },
+                        modifier = Modifier
+                            .size(46.dp)
+                            .testTag("chat_attach_image_button")
                     ) {
                         Icon(
-                            imageVector = Icons.Outlined.Stop,
-                            contentDescription = stringResource(R.string.chat_stop)
+                            imageVector = Icons.Outlined.AddPhotoAlternate,
+                            contentDescription = "Attach image for Vision model",
+                            tint = if (attachedImageDataUrl != null) cs.primary else cs.onSurfaceVariant
                         )
                     }
-                } else {
-                    FilledIconButton(
-                        onClick = {
-                            if (promptText.isNotBlank()) {
-                                val outgoing = promptText
-                                promptText = ""
-                                onSendPrompt(outgoing)
-                            }
+
+                    OutlinedTextField(
+                        value = promptText,
+                        onValueChange = { promptText = it },
+                        placeholder = {
+                            Text(
+                                text = stringResource(R.string.chat_composer_placeholder),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = cs.onSurfaceVariant
+                            )
                         },
-                        enabled = promptText.isNotBlank(),
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = cs.primary,
-                            contentColor = cs.onPrimary,
-                            disabledContainerColor = cs.surfaceContainerHigh,
-                            disabledContentColor = cs.onSurfaceVariant
+                        maxLines = 4,
+                        shape = MaterialTheme.shapes.medium,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = cs.secondary,
+                            unfocusedBorderColor = cs.outlineVariant,
+                            focusedContainerColor = cs.surfaceContainerLow,
+                            unfocusedContainerColor = cs.surfaceContainerLow
                         ),
                         modifier = Modifier
-                            .size(48.dp)
-                            .testTag("chat_send_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Outlined.Send,
-                            contentDescription = stringResource(R.string.chat_send)
-                        )
+                            .weight(1f)
+                            .testTag("chat_composer_input")
+                    )
+
+                    if (uiState.isStreamingChat) {
+                        FilledIconButton(
+                            onClick = onStopStreaming,
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = cs.error,
+                                contentColor = cs.onError
+                            ),
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("chat_stop_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Stop,
+                                contentDescription = stringResource(R.string.chat_stop)
+                            )
+                        }
+                    } else {
+                        val canSend = promptText.isNotBlank() || attachedImageDataUrl != null
+                        FilledIconButton(
+                            onClick = {
+                                if (canSend) {
+                                    val outgoing = promptText
+                                    val img = attachedImageDataUrl
+                                    promptText = ""
+                                    attachedImageDataUrl = null
+                                    attachedImageName = null
+                                    onSendPrompt(outgoing, img)
+                                }
+                            },
+                            enabled = canSend,
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = cs.primary,
+                                contentColor = cs.onPrimary,
+                                disabledContainerColor = cs.surfaceContainerHigh,
+                                disabledContentColor = cs.onSurfaceVariant
+                            ),
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("chat_send_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Outlined.Send,
+                                contentDescription = stringResource(R.string.chat_send)
+                            )
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+private fun encodeImageUriToDataUrl(context: Context, uri: Uri): String? {
+    return runCatching {
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            val original = BitmapFactory.decodeStream(stream) ?: return null
+            val maxDim = 1024
+            val scaled = if (original.width > maxDim || original.height > maxDim) {
+                val scale = maxDim.toFloat() / maxOf(original.width, original.height).toFloat()
+                Bitmap.createScaledBitmap(
+                    original,
+                    (original.width * scale).toInt().coerceAtLeast(1),
+                    (original.height * scale).toInt().coerceAtLeast(1),
+                    true
+                )
+            } else original
+            val out = ByteArrayOutputStream()
+            scaled.compress(Bitmap.CompressFormat.JPEG, 82, out)
+            val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+            "data:image/jpeg;base64,$b64"
+        }
+    }.getOrNull()
+}
+
+private fun splitThinkBlocks(raw: String): Pair<String, String> {
+    val startIdx = raw.indexOf("<think>")
+    if (startIdx < 0) return "" to raw
+    val endIdx = raw.indexOf("</think>", startIdx + 7)
+    return if (endIdx >= 0) {
+        val reasoning = raw.substring(startIdx + 7, endIdx).trim()
+        val answer = (raw.substring(0, startIdx) + raw.substring(endIdx + 8)).trim()
+        reasoning to answer
+    } else {
+        raw.substring(startIdx + 7).trim() to raw.substring(0, startIdx).trim()
     }
 }
 
@@ -455,20 +603,79 @@ private fun ChatMessageBubble(
                 modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                val displayText = if (message.content.isBlank() && isStreamingTail) {
+                val (reasoningText, answerText) = if (!isUser) {
+                    splitThinkBlocks(message.content)
+                } else {
+                    "" to message.content
+                }
+                var reasoningExpanded by rememberSaveable(message.id) { mutableStateOf(false) }
+
+                if (!isUser && reasoningText.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = cs.surfaceContainerLow,
+                        border = BorderStroke(1.dp, cs.outlineVariant),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { reasoningExpanded = !reasoningExpanded }
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Psychology,
+                                        contentDescription = null,
+                                        tint = cs.secondary,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Text(
+                                        text = "Reasoning",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = cs.secondary
+                                    )
+                                }
+                                Icon(
+                                    imageVector = if (reasoningExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                                    contentDescription = null,
+                                    tint = cs.onSurfaceVariant,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            if (reasoningExpanded) {
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    text = reasoningText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = cs.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                val displayText = if (answerText.isBlank() && reasoningText.isBlank() && isStreamingTail) {
                     "Streaming from cluster…"
                 } else {
-                    message.content
+                    answerText.ifBlank { if (isStreamingTail) "Thinking…" else "" }
                 }
-                Text(
-                    text = displayText,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = when {
-                        message.isError -> cs.onErrorContainer
-                        isUser -> cs.onPrimaryContainer
-                        else -> cs.onSurface
-                    }
-                )
+                if (displayText.isNotBlank()) {
+                    Text(
+                        text = displayText,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = when {
+                            message.isError -> cs.onErrorContainer
+                            isUser -> cs.onPrimaryContainer
+                            else -> cs.onSurface
+                        }
+                    )
+                }
 
                 if (!isUser) {
                     Row(

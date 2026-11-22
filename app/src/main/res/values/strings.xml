@@ -3,7 +3,7 @@
     <string name="silica_tagline">Decentralized Mobile AI Cluster</string>
 
     <!-- Navigation Tabs -->
-    <string name="tab_command">Command</string>
+    <string name="tab_command">Node</string>
     <string name="tab_cluster">Cluster</string>
     <string name="tab_chat">Chat</string>
 
