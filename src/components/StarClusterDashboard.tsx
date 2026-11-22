@@ -6,6 +6,8 @@ import {
   Copy,
   Check,
   Download,
+  Loader2,
+  Play,
   RefreshCw,
   SlidersHorizontal,
   Terminal,
@@ -41,6 +43,7 @@ interface StarClusterDashboardProps {
   onOpenLoadConfig: () => void;
   onOpenChat: () => void;
   onOpenHud: () => void;
+  onApplyAndReload?: (spawnLocalBinary: boolean) => Promise<{ ok: boolean; message: string }>;
 }
 
 export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
@@ -59,9 +62,12 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
   onOpenLoadConfig,
   onOpenChat,
   onOpenHud,
+  onApplyAndReload,
 }) => {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(plan.nodes[0]?.nodeId ?? null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [reloadingEngine, setReloadingEngine] = useState(false);
+  const [engineMsg, setEngineMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [scriptOs, setScriptOs] = useState<BackendOsTarget>(
     liveHardware?.platform === 'windows' ? 'windows' : 'linux'
   );
@@ -141,11 +147,50 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
 
           <button
             type="button"
+            disabled={reloadingEngine}
+            onClick={async () => {
+              if (onApplyAndReload) {
+                setReloadingEngine(true);
+                setEngineMsg(null);
+                try {
+                  const res = await onApplyAndReload(true);
+                  setEngineMsg({ ok: res.ok, text: res.message });
+                } finally {
+                  setReloadingEngine(false);
+                }
+              } else {
+                onOpenLoadConfig();
+              }
+            }}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0 shadow-xs"
+            title="Load local weights & spawn inference engine"
+          >
+            {reloadingEngine ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Starting...
+              </>
+            ) : engineStatus?.running ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5" />
+                Reload Model
+              </>
+            ) : (
+              <>
+                <Play className="w-3.5 h-3.5 fill-current" />
+                Load & Start Engine
+              </>
+            )}
+          </button>
+
+          <button
+            type="button"
             onClick={onOpenLoadConfig}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors whitespace-nowrap shrink-0"
+            title="Configure context length, KV cache, and speculative decoding"
+            className="p-2 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors shrink-0"
+            aria-label="Open model load config"
           >
             <SlidersHorizontal className="w-3.5 h-3.5" />
-            Load Config & Reload
           </button>
 
           <button
@@ -205,6 +250,25 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
           </button>
         </div>
       </div>
+
+      {engineMsg && (
+        <div
+          className={`rounded-xl border p-3 text-xs flex items-center justify-between gap-3 ${
+            engineMsg.ok
+              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300'
+              : 'border-rose-500/40 bg-rose-500/10 text-rose-800 dark:text-rose-300'
+          }`}
+        >
+          <span>{engineMsg.text}</span>
+          <button
+            type="button"
+            onClick={() => setEngineMsg(null)}
+            className="text-[11px] underline opacity-75 hover:opacity-100"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* 4-KPI Strip */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">

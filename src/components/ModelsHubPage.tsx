@@ -25,6 +25,7 @@ interface ModelsHubPageProps {
 
 const UNIVERSAL_SCAN_PRESETS = [
   { label: './models', path: './models' },
+  { label: 'Hermes Models', path: '~/AppData/Local/hermes/models' },
   { label: 'Downloads', path: '~/Downloads' },
   { label: 'LM Studio Default', path: '~/.cache/lm-studio/models' },
   { label: 'Ollama Models', path: '~/.ollama/models' },

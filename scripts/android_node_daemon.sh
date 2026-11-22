@@ -6,8 +6,8 @@
 # ==============================================================================
 
 MASTER_URL="${1:-http://127.0.0.1:3000}"
-NODE_ID="redmi-note-7-pro"
-LABEL="Redmi Note 7 Pro"
+NODE_ID="android-redmi-note-7-pro"
+LABEL="Xiaomi Redmi Note 7 Pro (Android)"
 INTERVAL=5
 
 echo "=================================================================="
@@ -41,7 +41,7 @@ while true; do
   [ -z "$BATTERY_LVL" ] && BATTERY_LVL=85
 
   # Build JSON registration payload
-  PAYLOAD="{\"id\":\"${NODE_ID}\",\"label\":\"${LABEL}\",\"platform\":\"Android\",\"osType\":\"android\",\"ip\":\"127.0.10.3\",\"rpcPort\":50052,\"linkType\":\"USB-C Tunnel\",\"totalRamMb\":${MEM_TOTAL_MB},\"availableRamMb\":${MEM_AVAIL_MB},\"vramMb\":0,\"computeTflops\":1.8,\"memBwGbps\":28,\"bigCores\":${BIG_CORES},\"tempC\":${TEMP_C},\"allowHttpRegistration\":true}"
+  PAYLOAD="{\"id\":\"${NODE_ID}\",\"label\":\"${LABEL}\",\"platform\":\"Android\",\"osType\":\"android\",\"ip\":\"127.0.0.1\",\"rpcPort\":50052,\"linkType\":\"USB-C Tunnel\",\"totalRamMb\":${MEM_TOTAL_MB},\"availableRamMb\":${MEM_AVAIL_MB},\"vramMb\":0,\"computeTflops\":1.8,\"memBwGbps\":28,\"bigCores\":${BIG_CORES},\"tempC\":${TEMP_C},\"allowHttpRegistration\":true}"
 
   # Send registration / heartbeat to Master
   RESP=$(curl -s -X POST "${MASTER_URL}/api/cluster/nodes/register" \

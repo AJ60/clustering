@@ -390,6 +390,7 @@ export function App() {
             onOpenLoadConfig={() => setLoadConfigOpen(true)}
             onOpenChat={() => setActiveTab('chat')}
             onOpenHud={() => setHudOpen((v) => !v)}
+            onApplyAndReload={handleApplyAndReload}
           />
         )}
 

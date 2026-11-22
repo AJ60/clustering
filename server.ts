@@ -22,7 +22,7 @@ import {
   RuntimeClusterSnapshot,
 } from './src/types/starCluster';
 import { createInitialTelemetryState } from './src/service/nodeClusterService';
-import { buildStarClusterNodes, planStarCluster } from './src/domain/starClusterPlanner';
+import { buildStarClusterNodes, planStarCluster, isSameAndroidWorker } from './src/domain/starClusterPlanner';
 import {
   buildTunedOsBackendProfile,
   createDefaultBackendTuningConfig,
@@ -373,8 +373,13 @@ async function probeLiveHardware(): Promise<LiveHardwareProbe> {
   const [gpu, _adbSerials] = await Promise.all([probeGpuCached(), setupAdbTunnelsCached()]);
 
   const connectedDevices: ConnectedDeviceInfo[] = [];
-  for (const w of registeredWorkers.values()) {
+  const sortedWorkers = Array.from(registeredWorkers.values()).sort((a, b) => b.lastSeenMs - a.lastSeenMs);
+  for (const w of sortedWorkers) {
     if (!w.handshakeVerified) continue;
+    const isDup = connectedDevices.some((existing) =>
+      isSameAndroidWorker(existing, w) || (existing.ip === w.ip && existing.rpcPort === w.rpcPort)
+    );
+    if (isDup) continue;
     const safeCapMb =
       w.platform === 'Android'
         ? Math.floor(Math.min(w.totalRamMb * 0.5, w.availableRamMb * 0.8))
@@ -482,30 +487,153 @@ function inspectGgufPathSync(filePath: string): GgufModelPreset {
   );
 }
 
-function scanLocalGgufFiles(directory?: string): { directory: string; models: GgufModelPreset[] } {
-  const targetDir = directory?.trim()
-    ? path.resolve(directory.trim())
-    : path.resolve(process.cwd(), 'models');
-  const models: GgufModelPreset[] = [];
-  if (!fs.existsSync(targetDir)) {
-    return { directory: targetDir, models };
+function expandHome(p: string): string {
+  if (p.startsWith('~/') || p === '~') {
+    return path.join(os.homedir(), p.slice(1));
   }
-  try {
-    const entries = fs.readdirSync(targetDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isFile() && entry.name.toLowerCase().endsWith('.gguf') && !entry.name.toLowerCase().includes('mmproj')) {
-        const full = path.join(targetDir, entry.name);
-        try {
-          const parsed = inspectGgufPathSync(full);
-          customModelsRegistry.set(parsed.id, parsed);
-          models.push(parsed);
-        } catch {
-          // skip unreadable file
+  return p;
+}
+
+function resolveLlamaServerBinary(userSpecified?: string): string {
+  if (userSpecified && fs.existsSync(userSpecified)) return userSpecified;
+  const localWin = path.join(process.cwd(), 'llama-b11429', 'llama-server.exe');
+  if (fs.existsSync(localWin)) return localWin;
+  const localLinux = path.join(process.cwd(), 'llama-b11429', 'llama-server');
+  if (fs.existsSync(localLinux)) return localLinux;
+  return process.platform === 'win32' ? 'llama-server.exe' : 'llama-server';
+}
+
+function resolveGgufModelPath(model: GgufModelPreset): string | null {
+  if (model.localPath && fs.existsSync(model.localPath)) {
+    return model.localPath;
+  }
+  const searchDirs = [
+    path.resolve(process.cwd(), 'models'),
+    path.resolve(process.cwd()),
+    path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'models'),
+    path.join(os.homedir(), 'Downloads'),
+    path.join(os.homedir(), '.ollama', 'models'),
+    path.join(os.homedir(), '.cache', 'lm-studio', 'models'),
+  ];
+  for (const d of searchDirs) {
+    if (!fs.existsSync(d)) continue;
+    try {
+      const entries = fs.readdirSync(d);
+      for (const e of entries) {
+        if (!e.toLowerCase().endsWith('.gguf') || e.toLowerCase().includes('mmproj')) continue;
+        const normE = e.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const normName = model.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const normId = model.id.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (normE.includes(normName) || normName.includes(normE) || normE.includes(normId)) {
+          return path.join(d, e);
         }
       }
+    } catch {
+      // ignore
     }
-  } catch {
-    // non-fatal
+  }
+  // Best-effort fallback to any available .gguf on disk
+  for (const d of [
+    path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'models'),
+    path.resolve(process.cwd(), 'models'),
+    path.join(os.homedir(), 'Downloads'),
+  ]) {
+    if (fs.existsSync(d)) {
+      try {
+        const files = fs
+          .readdirSync(d)
+          .filter((f) => f.toLowerCase().endsWith('.gguf') && !f.toLowerCase().includes('mmproj'));
+        if (files.length > 0) return path.join(d, files[0]);
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return null;
+}
+
+function probeTcpPort(host: string, port: number, timeoutMs = 800): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = net.createConnection({ host, port });
+    const timer = setTimeout(() => {
+      s.destroy();
+      resolve(false);
+    }, timeoutMs);
+    s.once('connect', () => {
+      clearTimeout(timer);
+      s.destroy();
+      resolve(true);
+    });
+    s.once('error', () => {
+      clearTimeout(timer);
+      s.destroy();
+      resolve(false);
+    });
+  });
+}
+
+async function waitForServerHealth(
+  baseUrl: string,
+  maxWaitMs = 7000,
+  child?: ChildProcess | null
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    if (child && child.exitCode !== null) return false;
+    try {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 400);
+      const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
+      clearTimeout(t);
+      if (res.ok) return true;
+    } catch {
+      // not yet up
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return false;
+}
+
+function scanLocalGgufFiles(directory?: string): { directory: string; models: GgufModelPreset[] } {
+  const targetDir = directory?.trim()
+    ? path.resolve(expandHome(directory.trim()))
+    : path.resolve(process.cwd(), 'models');
+  const models: GgufModelPreset[] = [];
+
+  const dirsToScan = [targetDir];
+  if (!directory || directory === './models' || directory === 'models') {
+    const hermesDir = path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'models');
+    if (fs.existsSync(hermesDir)) dirsToScan.push(hermesDir);
+    const downloadsDir = path.join(os.homedir(), 'Downloads');
+    if (fs.existsSync(downloadsDir)) dirsToScan.push(downloadsDir);
+  }
+
+  const seenPaths = new Set<string>();
+  for (const dir of dirsToScan) {
+    if (!fs.existsSync(dir)) continue;
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (
+          entry.isFile() &&
+          entry.name.toLowerCase().endsWith('.gguf') &&
+          !entry.name.toLowerCase().includes('mmproj')
+        ) {
+          const full = path.join(dir, entry.name);
+          if (seenPaths.has(full)) continue;
+          seenPaths.add(full);
+          try {
+            const parsed = inspectGgufPathSync(full);
+            customModelsRegistry.set(parsed.id, parsed);
+            models.push(parsed);
+          } catch {
+            // skip unreadable file
+          }
+        }
+      }
+    } catch {
+      // non-fatal
+    }
   }
   return { directory: targetDir, models };
 }
@@ -818,10 +946,15 @@ export async function createApp() {
         .replace(/[^a-z0-9]+/g, '-')
         .slice(0, 24)}`;
 
-    // Deduplicate Android worker entries by IP/loopback so ghost duplicates never occur
+    // Deduplicate Android worker entries by IP/loopback and hardware signature so ghost duplicates never occur
     if (platform === 'Android') {
       for (const [existingId, existing] of registeredWorkers.entries()) {
-        if (existing.platform === 'Android' && (existing.ip === ip || existingId === id)) {
+        if (
+          existing.platform === 'Android' &&
+          (existingId === id ||
+            existing.ip === ip ||
+            isSameAndroidWorker(existing, { platform, ip, id, label }))
+        ) {
           registeredWorkers.delete(existingId);
         }
       }
@@ -1079,23 +1212,100 @@ export async function createApp() {
 
     let spawned = false;
     let spawnNote = 'Configuration & sharding plan validated and applied.';
-    if (body.spawnLocalBinary && activeModel.localPath && fs.existsSync(activeModel.localPath)) {
-      const bin = body.binaryPath?.trim() || 'llama-server';
-      try {
-        const child = spawn(bin, snap.plan.cliArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
-        await new Promise<void>((resolve, reject) => {
-          child.once('error', reject);
-          setTimeout(() => resolve(), 300);
-        });
-        spawnedLlamaChild = child;
-        spawned = true;
-        upstreamBaseUrl = 'http://127.0.0.1:8080';
-        engineStatus.running = true;
-        engineStatus.upstreamUrl = upstreamBaseUrl;
-        engineStatus.serverType = 'llama-server';
-        spawnNote = `Spawned stock ${bin} on http://127.0.0.1:8080`;
-      } catch (err) {
-        spawnNote = `Plan applied cleanly (${bin} not installed in this environment: ${err instanceof Error ? err.message : 'ENOENT'})`;
+    const modelLocalPath = resolveGgufModelPath(activeModel);
+    if (modelLocalPath) {
+      activeModel.localPath = modelLocalPath;
+      activeModel.isLocal = true;
+    }
+
+    if (body.spawnLocalBinary) {
+      const bin = resolveLlamaServerBinary(body.binaryPath);
+      if (modelLocalPath && fs.existsSync(modelLocalPath)) {
+        // Prepare CLI args with resolved local model path
+        let finalCliArgs = [...snap.plan.cliArgs];
+        const mIdx = finalCliArgs.indexOf('-m');
+        if (mIdx >= 0 && mIdx + 1 < finalCliArgs.length) {
+          finalCliArgs[mIdx + 1] = modelLocalPath;
+        }
+
+        // Test RPC targets before passing --rpc so llama-server doesn't crash on unconnectable endpoints
+        const rpcIdx = finalCliArgs.indexOf('--rpc');
+        if (rpcIdx >= 0 && rpcIdx + 1 < finalCliArgs.length) {
+          const rawRpcs = finalCliArgs[rpcIdx + 1].split(',').map((s) => s.trim()).filter(Boolean);
+          const verifiedRpcs: string[] = [];
+          for (const target of rawRpcs) {
+            const [rHost, rPortStr] = target.split(':');
+            const rPort = Number(rPortStr || 50052);
+            const live = await probeTcpPort(rHost, rPort, 800);
+            if (live) verifiedRpcs.push(target);
+          }
+          if (verifiedRpcs.length === 0) {
+            // Remove --rpc and --tensor-split flags if no RPC endpoints are actively listening
+            const tsIdx = finalCliArgs.indexOf('--tensor-split');
+            if (tsIdx >= 0) finalCliArgs.splice(tsIdx, 2);
+            const newRpcIdx = finalCliArgs.indexOf('--rpc');
+            if (newRpcIdx >= 0) finalCliArgs.splice(newRpcIdx, 2);
+          } else if (verifiedRpcs.length < rawRpcs.length) {
+            finalCliArgs[rpcIdx + 1] = verifiedRpcs.join(',');
+          }
+        }
+
+        try {
+          emitEngineEvent(`Launching ${path.basename(bin)} with local weights (${path.basename(modelLocalPath)})...`);
+          const child = spawn(bin, finalCliArgs, {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true,
+          });
+
+          let earlyStderr = '';
+          child.stderr?.on('data', (c: Buffer) => {
+            if (earlyStderr.length < 2048) earlyStderr += c.toString('utf8');
+          });
+
+          // Poll http://127.0.0.1:8080/health for ready state
+          const ready = await waitForServerHealth('http://127.0.0.1:8080', 7000, child);
+          if (ready) {
+            spawnedLlamaChild = child;
+            spawned = true;
+            upstreamBaseUrl = 'http://127.0.0.1:8080';
+            engineStatus.running = true;
+            engineStatus.upstreamUrl = upstreamBaseUrl;
+            engineStatus.serverType = 'llama-server';
+            spawnNote = `Live stock llama-server running on http://127.0.0.1:8080 (${path.basename(modelLocalPath)})`;
+          } else if (child.exitCode !== null) {
+            // If it crashed, check if it was an RPC error and retry without RPC
+            if (finalCliArgs.includes('--rpc')) {
+              emitEngineEvent('RPC connection failed, falling back to local Master direct inference...');
+              const retryArgs = finalCliArgs.filter((a, idx, arr) => {
+                if (a === '--rpc' || arr[idx - 1] === '--rpc') return false;
+                if (a === '--tensor-split' || arr[idx - 1] === '--tensor-split') return false;
+                return true;
+              });
+              const fallbackChild = spawn(bin, retryArgs, {
+                stdio: ['ignore', 'pipe', 'pipe'],
+                windowsHide: true,
+              });
+              const fbReady = await waitForServerHealth('http://127.0.0.1:8080', 6000, fallbackChild);
+              if (fbReady) {
+                spawnedLlamaChild = fallbackChild;
+                spawned = true;
+                upstreamBaseUrl = 'http://127.0.0.1:8080';
+                engineStatus.running = true;
+                engineStatus.upstreamUrl = upstreamBaseUrl;
+                engineStatus.serverType = 'llama-server';
+                spawnNote = `Live llama-server running on Master http://127.0.0.1:8080 (${path.basename(modelLocalPath)})`;
+              } else {
+                spawnNote = `Engine start failed: ${earlyStderr.slice(0, 180)}`;
+              }
+            } else {
+              spawnNote = `Engine start exited (code ${child.exitCode}): ${earlyStderr.slice(0, 180)}`;
+            }
+          }
+        } catch (err) {
+          spawnNote = `Unable to spawn binary: ${err instanceof Error ? err.message : 'ENOENT'}`;
+        }
+      } else {
+        spawnNote = `Local GGUF model file not found on disk. Place .gguf in models/ or specify path.`;
       }
     }
 

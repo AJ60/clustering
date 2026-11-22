@@ -3,6 +3,7 @@ import {
   BackendTuningConfig,
   ClusterMode,
   ClusterTierCode,
+  ConnectedDeviceInfo,
   DEFAULT_THERMAL_LIMITS,
   FitVerdict,
   GgufModelPreset,
@@ -142,6 +143,39 @@ export function evaluateNodeThermal(
  * Builds the Live Cluster node list strictly from real verified hardware.
  * In LIVE_CLUSTER mode, offline or unverified nodes are NEVER shown as connected.
  */
+/**
+ * Identifies whether two worker records belong to the same physical Android device
+ * (e.g. ADB loopback aliases, different daemon registrations, or similar model names).
+ */
+export function isSameAndroidWorker(
+  a: { platform?: string; ip?: string; id?: string; model?: string; label?: string },
+  b: { platform?: string; ip?: string; id?: string; model?: string; label?: string }
+): boolean {
+  // Both nodes MUST be Android
+  if (a.platform !== 'Android' || b.platform !== 'Android') return false;
+  // Distinct simulated test VMs must never be deduplicated
+  if (a.id?.startsWith('vm-') && b.id?.startsWith('vm-') && a.id !== b.id) {
+    return false;
+  }
+  // 1. Direct ID match
+  if (a.id && b.id && a.id === b.id) return true;
+  // 2. Exact IP match
+  if (a.ip && b.ip && a.ip === b.ip) return true;
+  // 3. Both are mapped to the single local ADB loopback tunnel 127.0.0.1
+  const aLocalAdb = a.ip === '127.0.0.1' || a.ip === 'localhost';
+  const bLocalAdb = b.ip === '127.0.0.1' || b.ip === 'localhost';
+  if (aLocalAdb && bLocalAdb) return true;
+  // 4. Normalized label / model similarity (e.g. "Redmi Note 7 Pro" vs "Xiaomi Redmi Note 7 Pro (Android)")
+  const normA = (a.label || a.model || a.id || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const normB = (b.label || b.model || b.id || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (normA && normB) {
+    if (normA === normB || normA.includes(normB) || normB.includes(normA)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function buildStarClusterNodes(
   telemetry: DeviceTelemetryState,
   mode: ClusterMode,
@@ -201,9 +235,16 @@ export function buildStarClusterNodes(
 
   // Strictly Live-Only Verified Workers: only include workers with verified handshake + live heartbeat.
   if (mode === 'LIVE_CLUSTER') {
-    const verifiedWorkers: StarClusterNode[] = (liveHardware?.connectedDevices ?? [])
-      .filter((dev) => Boolean(dev.isOnline && dev.isWorkerRunning && dev.handshakeVerified !== false))
-      .map((dev) => {
+    const rawDevices = (liveHardware?.connectedDevices ?? [])
+      .filter((dev) => Boolean(dev.isOnline && dev.isWorkerRunning && dev.handshakeVerified !== false));
+    const dedupedDevices: ConnectedDeviceInfo[] = [];
+    for (const dev of rawDevices) {
+      const isDup = dedupedDevices.some((existing) =>
+        isSameAndroidWorker(existing, dev) || (existing.ip === dev.ip && existing.rpcPort === dev.rpcPort)
+      );
+      if (!isDup) dedupedDevices.push(dev);
+    }
+    const verifiedWorkers: StarClusterNode[] = dedupedDevices.map((dev) => {
         const osType =
           dev.platform === 'Android'
             ? 'android'
@@ -481,77 +522,113 @@ export function planStarCluster(
       ? effectiveConfig.forceNoMmap
       : totalSafePoolMb >= neededMb * 1.15;
 
-  // Non-uniform greedy cap-bounded layer assignment with Zero-OOM guarantee.
-  const remainingCap = new Map<string, number>();
-  for (const n of active) {
-    remainingCap.set(n.nodeId, n.effectiveCapMb);
+  // Reset layer allocations across all evaluated nodes
+  for (const n of evaluated) {
+    n.allocatedMb = 0;
+    n.allocatedLayers = 0;
+    n.layerStart = 0;
+    n.layerEnd = -1;
+    n.kvCacheMb = 0;
   }
 
-  if (active.length > 0) {
-    const master = active[0];
-    const pinned = Math.min(masterOverheadMb, remainingCap.get(master.nodeId) ?? 0);
-    master.allocatedMb += pinned;
-    remainingCap.set(master.nodeId, Math.max(0, (remainingCap.get(master.nodeId) ?? 0) - pinned));
-  }
+  const totalLayers = Math.max(1, nonUniform.perLayerProfiles.length);
+  const master = active.find((n) => n.role === 'Master') ?? active[0];
+  const workers = active.filter((n) => n.nodeId !== master?.nodeId && !n.pruned);
 
-  const totalScore = active.reduce((acc, n) => acc + n.score, 0) || 1;
-  const totalLayerCostMb = nonUniform.perLayerProfiles.reduce(
-    (acc, l) => acc + l.totalWeightMb + l.kvCacheMb,
-    0
-  );
+  if (master && workers.length === 0) {
+    // Single node: Master takes 100% of layers
+    master.allocatedLayers = totalLayers;
+    master.layerStart = 0;
+    master.layerEnd = totalLayers - 1;
+    let sumWeightMb = 0;
+    let sumKvMb = 0;
+    for (const l of nonUniform.perLayerProfiles) {
+      sumWeightMb += l.totalWeightMb;
+      sumKvMb += l.kvCacheMb;
+    }
+    master.allocatedMb = sumWeightMb + sumKvMb + masterOverheadMb;
+    master.kvCacheMb = sumKvMb;
+  } else if (master && workers.length > 0) {
+    // Multi-node star cluster: strictly contiguous, mutually exclusive layer partitioning
+    const masterPinned = Math.min(masterOverheadMb, master.effectiveCapMb);
+    const mbPerLayer = model.sizeMb / totalLayers;
+    const totalScore = active.reduce((acc, n) => acc + n.score, 0) || 1;
+    const workerLayerMap = new Map<string, number>();
+    let totalWorkerLayers = 0;
 
-  const targetBudget = new Map<string, number>();
-  for (const n of active) {
-    const avail = remainingCap.get(n.nodeId) ?? 0;
-    const share = totalLayerCostMb * (n.score / totalScore);
-    targetBudget.set(n.nodeId, Math.min(avail, share));
-  }
-
-  let cursorNode = 0;
-  let usedForLayersOnCurrent = 0;
-
-  for (const layer of nonUniform.perLayerProfiles) {
-    const layerNeed = layer.totalWeightMb + layer.kvCacheMb;
-    let placed = false;
-
-    while (cursorNode < active.length) {
-      const node = active[cursorNode];
-      const rem = remainingCap.get(node.nodeId) ?? 0;
-      const target = targetBudget.get(node.nodeId) ?? 0;
-      const isLast = cursorNode === active.length - 1;
-      if (rem >= layerNeed && (isLast || usedForLayersOnCurrent + layerNeed <= target * 1.05)) {
-        node.allocatedMb += layerNeed;
-        remainingCap.set(node.nodeId, Math.max(0, rem - layerNeed));
-        usedForLayersOnCurrent += layerNeed;
-        if (node.allocatedLayers === 0) node.layerStart = layer.layerIndex;
-        node.layerEnd = layer.layerIndex;
-        node.allocatedLayers += 1;
-        node.kvCacheMb += layer.kvCacheMb;
-        placed = true;
-        break;
-      }
-      cursorNode += 1;
-      usedForLayersOnCurrent = 0;
+    for (const w of workers) {
+      // Safe cap constraint: worker can hold at most effectiveCapMb / mbPerLayer
+      const maxCapLayers = Math.max(0, Math.floor(w.effectiveCapMb / Math.max(1, mbPerLayer)));
+      // Throughput-proportional share
+      const scoreShare = w.score / totalScore;
+      const targetLayers = Math.round(totalLayers * scoreShare);
+      const allocated = Math.max(0, Math.min(maxCapLayers, targetLayers));
+      workerLayerMap.set(w.nodeId, allocated);
+      totalWorkerLayers += allocated;
     }
 
-    if (!placed && active.length > 0) {
-      let best = active[0];
-      let bestRem = remainingCap.get(best.nodeId) ?? 0;
-      for (const n of active) {
-        const r = remainingCap.get(n.nodeId) ?? 0;
-        if (r > bestRem) {
-          best = n;
-          bestRem = r;
-        }
+    // Master must retain at least layer 0 + embedding
+    if (totalWorkerLayers >= totalLayers) {
+      const allowedWorkerLayers = totalLayers - 1;
+      let excess = totalWorkerLayers - allowedWorkerLayers;
+      for (const w of [...workers].reverse()) {
+        const cur = workerLayerMap.get(w.nodeId) ?? 0;
+        const deduct = Math.min(cur, excess);
+        workerLayerMap.set(w.nodeId, cur - deduct);
+        excess -= deduct;
+        if (excess <= 0) break;
       }
-      const clamped = Math.min(layerNeed, bestRem);
-      if (clamped > 0) {
-        best.allocatedMb += clamped;
-        remainingCap.set(best.nodeId, Math.max(0, bestRem - clamped));
-        if (best.allocatedLayers === 0) best.layerStart = layer.layerIndex;
-        best.layerEnd = layer.layerIndex;
-        best.allocatedLayers += 1;
-        best.kvCacheMb += layer.kvCacheMb;
+      totalWorkerLayers = allowedWorkerLayers;
+    }
+
+    const masterLayers = totalLayers - totalWorkerLayers;
+
+    // Lay out strictly contiguous non-overlapping spans:
+    // Master: [0, masterLayers - 1]
+    master.allocatedLayers = masterLayers;
+    master.layerStart = 0;
+    master.layerEnd = masterLayers - 1;
+
+    let cursorLayer = masterLayers;
+    for (const w of workers) {
+      const count = workerLayerMap.get(w.nodeId) ?? 0;
+      if (count > 0 && cursorLayer < totalLayers) {
+        w.allocatedLayers = count;
+        w.layerStart = cursorLayer;
+        w.layerEnd = cursorLayer + count - 1;
+        cursorLayer += count;
+      } else {
+        w.allocatedLayers = 0;
+        w.layerStart = 0;
+        w.layerEnd = -1;
+      }
+    }
+
+    // Ensure 100% of layers are assigned contiguously
+    if (cursorLayer < totalLayers) {
+      const remaining = totalLayers - cursorLayer;
+      const lastActive = [...workers].reverse().find((w) => w.allocatedLayers > 0) || master;
+      lastActive.allocatedLayers += remaining;
+      lastActive.layerEnd = totalLayers - 1;
+    }
+
+    // Exact per-node allocatedMb & kvCacheMb derived from assigned contiguous slices
+    for (const n of active) {
+      if (n.allocatedLayers > 0) {
+        let weightMb = 0;
+        let kvMb = 0;
+        for (let l = n.layerStart; l <= n.layerEnd; l++) {
+          const prof = nonUniform.perLayerProfiles[l];
+          if (prof) {
+            weightMb += prof.totalWeightMb;
+            kvMb += prof.kvCacheMb;
+          }
+        }
+        n.allocatedMb = weightMb + kvMb + (n.nodeId === master.nodeId ? masterPinned : 0);
+        n.kvCacheMb = kvMb;
+      } else {
+        n.allocatedMb = 0;
+        n.kvCacheMb = 0;
       }
     }
   }
@@ -664,7 +741,7 @@ export function planStarCluster(
       ? Math.min(...activeWithAlloc.map((n) => n.estimatedTokPerSec)) *
         (activeWithAlloc.length > 1 ? 0.92 : 1.0)
       : 0;
-  const master = evaluated.find((n) => n.role === 'Master') ?? evaluated[0];
+  const masterNode = evaluated.find((n) => n.role === 'Master') ?? master ?? evaluated[0];
   const tensorSplitCsv = tensorSplit.map((v) => v.toFixed(1)).join(',');
   const tensorSplitLabel = tensorSplit.length > 0 ? tensorSplit.map((v) => `${v.toFixed(1)}%`).join(' / ') : '0%';
 
@@ -688,7 +765,7 @@ export function planStarCluster(
     '-ctv',
     effectiveConfig.kvCacheQuant,
     '-ngl',
-    String(effectiveConfig.gpuOffloadLayers ?? master?.nglLayers ?? 0),
+    String(effectiveConfig.gpuOffloadLayers ?? masterNode?.nglLayers ?? 0),
     '-b',
     String(learned?.recommendedBatch ?? effectiveConfig.batchSize ?? 1024),
     '-ub',
@@ -714,7 +791,7 @@ export function planStarCluster(
   return {
     tierCode,
     tierLabel,
-    masterId: master?.label ?? 'Local Master',
+    masterId: masterNode?.label ?? 'Local Master',
     fitVerdict,
     totalSafePoolMb,
     totalVramPoolMb,

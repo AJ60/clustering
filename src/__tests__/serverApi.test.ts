@@ -310,27 +310,50 @@ describe('Silica Cluster Server & Systems Verification', () => {
   });
 
   it('registers, deduplicates, and immediately unregisters workers without ghost nodes', async () => {
+    // Register phone via App ID & loopback
     const reg = await fetch(`${baseUrl}/api/cluster/nodes/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        id: 'android-pixel-9-worker',
-        label: 'Google Pixel 9',
+        id: 'android-xiaomi-redmi-note-7-pro',
+        label: 'Xiaomi Redmi Note 7 Pro (Android)',
         platform: 'Android',
         ip: '127.0.0.1',
-        totalRamMb: 12288,
-        availableRamMb: 7400,
+        totalRamMb: 4096,
+        availableRamMb: 2048,
       }),
     });
     assert.equal(reg.status, 200);
     const regBody = (await reg.json()) as { ok: boolean; registered: string };
     assert.equal(regBody.ok, true);
-    assert.equal(regBody.registered, 'android-pixel-9-worker');
+
+    // Register same phone via daemon alias (different ID & loopback alias 127.0.10.3)
+    const regAlias = await fetch(`${baseUrl}/api/cluster/nodes/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: 'redmi-note-7-pro',
+        label: 'Redmi Note 7 Pro',
+        platform: 'Android',
+        ip: '127.0.10.3',
+        totalRamMb: 4096,
+        availableRamMb: 2048,
+        allowHttpRegistration: true,
+      }),
+    });
+    assert.equal(regAlias.status, 200);
+
+    // Hardware probe must strictly deduplicate to a single Android worker
+    const hwRes = await fetch(`${baseUrl}/api/cluster/hardware`);
+    assert.equal(hwRes.status, 200);
+    const hwData = (await hwRes.json()) as { connectedDevices: Array<{ id: string; platform: string }> };
+    const androidWorkers = hwData.connectedDevices.filter((d) => d.platform === 'Android');
+    assert.equal(androidWorkers.length, 1, 'Duplicate registrations for same phone must strictly deduplicate to 1 node');
 
     const unreg = await fetch(`${baseUrl}/api/cluster/nodes/unregister`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: 'android-pixel-9-worker' }),
+      body: JSON.stringify({ id: 'redmi-note-7-pro' }),
     });
     assert.equal(unreg.status, 200);
     const unregBody = (await unreg.json()) as { ok: boolean; removed: boolean };
