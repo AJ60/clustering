@@ -173,62 +173,6 @@ export function App() {
     }
   }, []);
 
-  const handleSelectModel = useCallback(
-    async (model: GgufModelPreset) => {
-      setActiveModel(model);
-      const nextCfg: BackendTuningConfig = {
-        ...createDefaultBackendTuningConfig(model),
-        mmprojPath: model.mmprojPath ?? '',
-      };
-      setTuningConfig(nextCfg);
-      try {
-        const res = await fetch('/api/models/activate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model }),
-        });
-        if (res.ok) {
-          const data = (await res.json()) as { snapshot?: RuntimeClusterSnapshot };
-          if (data.snapshot) applyServerSnapshot(data.snapshot);
-        }
-      } catch {
-        // keep optimistic local state
-      }
-    },
-    [applyServerSnapshot]
-  );
-
-  const handleChangeClusterMode = useCallback(
-    async (mode: ClusterMode) => {
-      setClusterMode(mode);
-      try {
-        const res = await fetch('/api/cluster/state', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ clusterMode: mode }),
-        });
-        if (res.ok) {
-          const snap = (await res.json()) as RuntimeClusterSnapshot;
-          applyServerSnapshot(snap);
-        }
-      } catch {
-        // keep optimistic local state
-      }
-    },
-    [applyServerSnapshot]
-  );
-
-  const handleUpdateConfig = useCallback((patch: Partial<BackendTuningConfig>) => {
-    setTuningConfig((prev) => ({ ...prev, ...patch }));
-  }, []);
-
-  const handleResetDefaults = useCallback(() => {
-    setTuningConfig({
-      ...createDefaultBackendTuningConfig(activeModel),
-      mmprojPath: activeModel.mmprojPath ?? '',
-    });
-  }, [activeModel]);
-
   const handleApplyAndReload = useCallback(
     async (spawnLocalBinary: boolean): Promise<{ ok: boolean; message: string }> => {
       try {
@@ -266,6 +210,85 @@ export function App() {
     },
     [activeModel, tuningConfig, applyServerSnapshot]
   );
+
+  const handleStopEngine = useCallback(async (): Promise<{ ok: boolean; message: string }> => {
+    try {
+      const res = await fetch('/api/engine/stop', { method: 'POST' });
+      const data = (await res.json()) as {
+        ok?: boolean;
+        message?: string;
+        snapshot?: RuntimeClusterSnapshot;
+      };
+      if (data.snapshot) {
+        applyServerSnapshot(data.snapshot);
+      }
+      return { ok: true, message: data.message || 'Engine stopped cleanly.' };
+    } catch (err) {
+      return {
+        ok: false,
+        message: err instanceof Error ? err.message : 'Unable to reach coordinator to stop engine.',
+      };
+    }
+  }, [applyServerSnapshot]);
+
+  const handleSelectModel = useCallback(
+    async (model: GgufModelPreset) => {
+      setActiveModel(model);
+      const nextCfg: BackendTuningConfig = {
+        ...createDefaultBackendTuningConfig(model),
+        mmprojPath: model.mmprojPath ?? '',
+      };
+      setTuningConfig(nextCfg);
+      try {
+        const res = await fetch('/api/models/activate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, reloadIfRunning: engineStatus?.running }),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { snapshot?: RuntimeClusterSnapshot };
+          if (data.snapshot) applyServerSnapshot(data.snapshot);
+        }
+        if (engineStatus?.running) {
+          await handleApplyAndReload(true);
+        }
+      } catch {
+        // keep optimistic local state
+      }
+    },
+    [applyServerSnapshot, engineStatus?.running, handleApplyAndReload]
+  );
+
+  const handleChangeClusterMode = useCallback(
+    async (mode: ClusterMode) => {
+      setClusterMode(mode);
+      try {
+        const res = await fetch('/api/cluster/state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clusterMode: mode }),
+        });
+        if (res.ok) {
+          const snap = (await res.json()) as RuntimeClusterSnapshot;
+          applyServerSnapshot(snap);
+        }
+      } catch {
+        // keep optimistic local state
+      }
+    },
+    [applyServerSnapshot]
+  );
+
+  const handleUpdateConfig = useCallback((patch: Partial<BackendTuningConfig>) => {
+    setTuningConfig((prev) => ({ ...prev, ...patch }));
+  }, []);
+
+  const handleResetDefaults = useCallback(() => {
+    setTuningConfig({
+      ...createDefaultBackendTuningConfig(activeModel),
+      mmprojPath: activeModel.mmprojPath ?? '',
+    });
+  }, [activeModel]);
 
   const handleUpstreamConnected = useCallback(
     async (url: string) => {
@@ -391,6 +414,7 @@ export function App() {
             onOpenChat={() => setActiveTab('chat')}
             onOpenHud={() => setHudOpen((v) => !v)}
             onApplyAndReload={handleApplyAndReload}
+            onStopEngine={handleStopEngine}
           />
         )}
 
@@ -411,6 +435,9 @@ export function App() {
             upstreamUrl={upstreamUrl}
             onUpstreamConnected={handleUpstreamConnected}
             onOpenLoadConfig={() => setLoadConfigOpen(true)}
+            onSelectModel={handleSelectModel}
+            onApplyAndReload={handleApplyAndReload}
+            onStopEngine={handleStopEngine}
           />
         )}
 

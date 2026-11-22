@@ -8,14 +8,17 @@ import {
   Globe,
   ImagePlus,
   Loader2,
+  Play,
   PlugZap,
   Send,
   SlidersHorizontal,
+  Square,
   Trash2,
   X,
 } from 'lucide-react';
 import {
   EngineRuntimeStatus,
+  GGUF_MODEL_PRESETS,
   GgufModelPreset,
   StarClusterPlan,
 } from '../types/starCluster';
@@ -45,6 +48,9 @@ interface ChatAndBrainPageProps {
   upstreamUrl: string;
   onUpstreamConnected: (url: string) => void;
   onOpenLoadConfig: () => void;
+  onSelectModel?: (model: GgufModelPreset) => void;
+  onApplyAndReload?: (spawnLocalBinary: boolean) => Promise<{ ok: boolean; message: string }>;
+  onStopEngine?: () => Promise<{ ok: boolean; message: string }>;
 }
 
 const SERVER_PRESETS = [
@@ -87,6 +93,9 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
   upstreamUrl,
   onUpstreamConnected,
   onOpenLoadConfig,
+  onSelectModel,
+  onApplyAndReload,
+  onStopEngine,
 }) => {
   const [messages, setMessages] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState('');
@@ -356,7 +365,7 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
       {/* Top Engine Status & Connect Local Server Bar */}
       <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827] p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5 text-xs">
+          <div className="flex flex-wrap items-center gap-2.5 text-xs">
             <span
               className={`font-semibold ${
                 isLive
@@ -364,12 +373,30 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
                   : 'text-amber-700 dark:text-amber-400'
               }`}
             >
-              {isLive ? `Live Engine (${engineStatus?.serverType})` : 'Engine Offline (HTTP 503)'}
+              {isLive ? `Live (${engineStatus?.serverType})` : 'Offline (HTTP 503)'}
             </span>
             <span className="text-slate-400">·</span>
-            <span className="font-mono-num text-slate-700 dark:text-slate-300">
-              {activeModel.name}
-            </span>
+            {onSelectModel ? (
+              <select
+                aria-label="Select Model"
+                value={activeModel.id}
+                onChange={(e) => {
+                  const m = GGUF_MODEL_PRESETS.find((x) => x.id === e.target.value);
+                  if (m) onSelectModel(m);
+                }}
+                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1424] px-2 py-1 text-xs font-semibold text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+              >
+                {GGUF_MODEL_PRESETS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name} ({(m.sizeMb / 1024).toFixed(1)} GB · {m.quant})
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="font-mono-num text-slate-700 dark:text-slate-300">
+                {activeModel.name}
+              </span>
+            )}
             {hasVision && (
               <>
                 <span className="text-slate-400">·</span>
@@ -382,13 +409,36 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {isLive ? (
+              onStopEngine && (
+                <button
+                  type="button"
+                  onClick={onStopEngine}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-200 dark:border-rose-900/80 bg-rose-50 dark:bg-rose-950/40 text-xs font-semibold text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition-colors"
+                >
+                  <Square className="w-3.5 h-3.5 fill-current" />
+                  Stop Engine
+                </button>
+              )
+            ) : (
+              onApplyAndReload && (
+                <button
+                  type="button"
+                  onClick={() => onApplyAndReload(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white shadow-xs transition-colors"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  Start Engine
+                </button>
+              )
+            )}
             <button
               type="button"
               onClick={onOpenLoadConfig}
               className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
             >
               <SlidersHorizontal className="w-3.5 h-3.5" />
-              Load Config
+              Config
             </button>
             {messages.length > 0 && (
               <button

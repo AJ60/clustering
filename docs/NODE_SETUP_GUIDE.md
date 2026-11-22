@@ -123,9 +123,9 @@ chmod +x ./scripts/setup_termux_android.sh
 
 ---
 
-### Option C: Standalone Native Android APK (Android Studio Project in `android/`)
+### Option C: Standalone Native Android APK (Android Studio Project in `app/`)
 
-The repository contains a complete, production-ready **Jetpack Compose Android application** located in the [android/](file:///c:/Users/alojy/OneDrive/Desktop/Clustering/android/) folder.
+The repository contains a complete, production-ready **Jetpack Compose Android application** located in the [app/](file:///c:/Users/alojy/OneDrive/Desktop/Clustering/app/) folder.
 
 #### Key Features of the Native Android App:
 - **Foreground Worker Service (`RpcService.kt`)**: Launches `librpc_server_exec.so` inside a `FOREGROUND_SERVICE_DATA_SYNC` lifecycle, holding a `PARTIAL_WAKE_LOCK` and Wi-Fi multicast lock so Android's OS never pauses execution while the screen is off or in background.
@@ -136,11 +136,11 @@ The repository contains a complete, production-ready **Jetpack Compose Android a
 
 #### How to Build the APK in Android Studio:
 1. Open **Android Studio** (Ladybug or newer).
-2. Choose **Open Project** and select the `android/` directory in this repository.
+2. Choose **Open Project** and select this repository root directory (`ClusterLab`).
 3. Allow Gradle to sync.
 4. Connect your Android device or select an emulator.
 5. Click **Run 'app'** (`Shift + F10`) or **Build -> Build Bundle(s) / APK(s) -> Build APK(s)**.
-6. The compiled APK will be output to `android/app/build/outputs/apk/debug/app-debug.apk`.
+6. The compiled APK will be output to `app/build/outputs/apk/debug/app-debug.apk`.
 
 #### What the Termux Setup Does:
 - **16 KB ELF Page Alignment**: Compiles with `-Wl,-z,max-page-size=16384` for full compatibility with Android 15 and Android 16 (API 35/36).

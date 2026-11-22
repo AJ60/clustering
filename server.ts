@@ -348,17 +348,30 @@ async function probeRpcHandshake(
   });
 }
 
-function pruneStaleWorkers(): void {
+async function pruneStaleWorkers(): Promise<void> {
   const now = Date.now();
+  const toDelete: string[] = [];
   for (const [id, worker] of registeredWorkers.entries()) {
     if (now - worker.lastSeenMs > WORKER_TTL_MS) {
-      registeredWorkers.delete(id);
+      toDelete.push(id);
+      continue;
     }
+    // In live runtime, verify that the worker's TCP port is actively listening.
+    // If the app was closed or uninstalled, the TCP connection is refused immediately.
+    if (process.env.NODE_ENV !== 'test') {
+      const alive = await probeTcpPort(worker.ip, worker.rpcPort, 120);
+      if (!alive) {
+        toDelete.push(id);
+      }
+    }
+  }
+  for (const id of toDelete) {
+    registeredWorkers.delete(id);
   }
 }
 
 async function probeLiveHardware(): Promise<LiveHardwareProbe> {
-  pruneStaleWorkers();
+  await pruneStaleWorkers();
   const rawPlatform = os.platform();
   const platform: 'windows' | 'linux' | 'darwin' =
     rawPlatform === 'win32' ? 'windows' : rawPlatform === 'darwin' ? 'darwin' : 'linux';
@@ -530,23 +543,6 @@ function resolveGgufModelPath(model: GgufModelPreset): string | null {
       }
     } catch {
       // ignore
-    }
-  }
-  // Best-effort fallback to any available .gguf on disk
-  for (const d of [
-    path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'models'),
-    path.resolve(process.cwd(), 'models'),
-    path.join(os.homedir(), 'Downloads'),
-  ]) {
-    if (fs.existsSync(d)) {
-      try {
-        const files = fs
-          .readdirSync(d)
-          .filter((f) => f.toLowerCase().endsWith('.gguf') && !f.toLowerCase().includes('mmproj'));
-        if (files.length > 0) return path.join(d, files[0]);
-      } catch {
-        // ignore
-      }
     }
   }
   return null;
@@ -728,6 +724,15 @@ export async function createApp() {
   const app = express();
   app.use(express.json({ limit: '25mb' }));
 
+  // Auto-discover local GGUF weights on startup (models/, hermes, Downloads)
+  if (process.env.NODE_ENV !== 'test') {
+    try {
+      scanLocalGgufFiles();
+    } catch {
+      // non-fatal
+    }
+  }
+
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -738,6 +743,104 @@ export async function createApp() {
     }
     next();
   });
+
+  async function launchLlamaServer(
+    binPath?: string
+  ): Promise<{ ok: boolean; spawned: boolean; message: string }> {
+    const modelLocalPath = resolveGgufModelPath(activeModel);
+    if (!modelLocalPath || !fs.existsSync(modelLocalPath)) {
+      return {
+        ok: false,
+        spawned: false,
+        message: `Local GGUF model file for "${activeModel.name}" was not found on disk. Place .gguf in models/ or Downloads.`,
+      };
+    }
+    activeModel.localPath = modelLocalPath;
+    activeModel.isLocal = true;
+
+    const bin = resolveLlamaServerBinary(binPath);
+    const snap = await computeRuntimeSnapshot();
+    let finalCliArgs = [...snap.plan.cliArgs];
+    const mIdx = finalCliArgs.indexOf('-m');
+    if (mIdx >= 0 && mIdx + 1 < finalCliArgs.length) {
+      finalCliArgs[mIdx + 1] = modelLocalPath;
+    }
+
+    // Verify RPC targets
+    const rpcIdx = finalCliArgs.indexOf('--rpc');
+    if (rpcIdx >= 0 && rpcIdx + 1 < finalCliArgs.length) {
+      const rawRpcs = finalCliArgs[rpcIdx + 1].split(',').map((s) => s.trim()).filter(Boolean);
+      const verifiedRpcs: string[] = [];
+      for (const target of rawRpcs) {
+        const [rHost, rPortStr] = target.split(':');
+        const rPort = Number(rPortStr || 50052);
+        const live = await probeTcpPort(rHost, rPort, 800);
+        if (live) verifiedRpcs.push(target);
+      }
+      if (verifiedRpcs.length === 0) {
+        const tsIdx = finalCliArgs.indexOf('--tensor-split');
+        if (tsIdx >= 0) finalCliArgs.splice(tsIdx, 2);
+        const newRpcIdx = finalCliArgs.indexOf('--rpc');
+        if (newRpcIdx >= 0) finalCliArgs.splice(newRpcIdx, 2);
+      } else if (verifiedRpcs.length < rawRpcs.length) {
+        finalCliArgs[rpcIdx + 1] = verifiedRpcs.join(',');
+      }
+    }
+
+    try {
+      emitEngineEvent(`Launching ${path.basename(bin)} with local weights (${path.basename(modelLocalPath)})...`);
+      const child = spawn(bin, finalCliArgs, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+
+      let earlyStderr = '';
+      child.stderr?.on('data', (c: Buffer) => {
+        if (earlyStderr.length < 2048) earlyStderr += c.toString('utf8');
+      });
+
+      const ready = await waitForServerHealth('http://127.0.0.1:8080', 7000, child);
+      if (ready) {
+        spawnedLlamaChild = child;
+        upstreamBaseUrl = 'http://127.0.0.1:8080';
+        engineStatus.running = true;
+        engineStatus.upstreamUrl = upstreamBaseUrl;
+        engineStatus.serverType = 'llama-server';
+        const msg = `Live stock llama-server running on http://127.0.0.1:8080 (${path.basename(modelLocalPath)})`;
+        return { ok: true, spawned: true, message: msg };
+      }
+
+      if (child.exitCode !== null && finalCliArgs.includes('--rpc')) {
+        emitEngineEvent('RPC connection failed, falling back to local Master direct inference...');
+        const retryArgs = finalCliArgs.filter((a, idx, arr) => {
+          if (a === '--rpc' || arr[idx - 1] === '--rpc') return false;
+          if (a === '--tensor-split' || arr[idx - 1] === '--tensor-split') return false;
+          return true;
+        });
+        const fallbackChild = spawn(bin, retryArgs, {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+        });
+        const fbReady = await waitForServerHealth('http://127.0.0.1:8080', 6000, fallbackChild);
+        if (fbReady) {
+          spawnedLlamaChild = fallbackChild;
+          upstreamBaseUrl = 'http://127.0.0.1:8080';
+          engineStatus.running = true;
+          engineStatus.upstreamUrl = upstreamBaseUrl;
+          engineStatus.serverType = 'llama-server';
+          const msg = `Live llama-server running on Master http://127.0.0.1:8080 (${path.basename(modelLocalPath)})`;
+          return { ok: true, spawned: true, message: msg };
+        }
+      }
+      return { ok: false, spawned: false, message: `Engine start failed: ${earlyStderr.slice(0, 180)}` };
+    } catch (err) {
+      return {
+        ok: false,
+        spawned: false,
+        message: `Unable to spawn binary: ${err instanceof Error ? err.message : 'ENOENT'}`,
+      };
+    }
+  }
 
   app.get('/health', (_req: Request, res: Response) => {
     res.json({
@@ -813,7 +916,7 @@ export async function createApp() {
   });
 
   app.post('/api/models/activate', async (req: Request, res: Response) => {
-    const body = req.body as { model?: GgufModelPreset; modelId?: string };
+    const body = req.body as { model?: GgufModelPreset; modelId?: string; reloadIfRunning?: boolean };
     if (body.model && body.model.id) {
       customModelsRegistry.set(body.model.id, body.model);
       activeModel = body.model;
@@ -827,6 +930,14 @@ export async function createApp() {
         ...createDefaultBackendTuningConfig(activeModel),
         mmprojPath: activeModel.mmprojPath ?? '',
       };
+    }
+    // If engine is currently running, hot-reload engine process with the newly activated model
+    if (engineStatus.running && (body.reloadIfRunning || spawnedLlamaChild)) {
+      if (spawnedLlamaChild) {
+        try { spawnedLlamaChild.kill('SIGTERM'); } catch {}
+        spawnedLlamaChild = null;
+      }
+      await launchLlamaServer();
     }
     const snap = await computeRuntimeSnapshot();
     res.json({ ok: true, snapshot: snap });
@@ -968,9 +1079,12 @@ export async function createApp() {
       if (probe.ok) {
         handshakeVerified = true;
         rttMs = probe.rttMs;
-      } else if (ip === '127.0.0.1' || b.allowHttpRegistration === true) {
-        // Allow active HTTP heartbeat registration when loopback or Android HTTP push registers
-        handshakeVerified = true;
+      } else if (b.allowHttpRegistration === true || ip === '127.0.0.1') {
+        // Even for HTTP registration, strictly verify that the worker's TCP port is actively open
+        const tcpOpen = await probeTcpPort(ip, rpcPort, 400);
+        if (tcpOpen) {
+          handshakeVerified = true;
+        }
       }
     }
 
@@ -1212,100 +1326,24 @@ export async function createApp() {
 
     let spawned = false;
     let spawnNote = 'Configuration & sharding plan validated and applied.';
-    const modelLocalPath = resolveGgufModelPath(activeModel);
-    if (modelLocalPath) {
-      activeModel.localPath = modelLocalPath;
-      activeModel.isLocal = true;
-    }
 
     if (body.spawnLocalBinary) {
-      const bin = resolveLlamaServerBinary(body.binaryPath);
-      if (modelLocalPath && fs.existsSync(modelLocalPath)) {
-        // Prepare CLI args with resolved local model path
-        let finalCliArgs = [...snap.plan.cliArgs];
-        const mIdx = finalCliArgs.indexOf('-m');
-        if (mIdx >= 0 && mIdx + 1 < finalCliArgs.length) {
-          finalCliArgs[mIdx + 1] = modelLocalPath;
-        }
-
-        // Test RPC targets before passing --rpc so llama-server doesn't crash on unconnectable endpoints
-        const rpcIdx = finalCliArgs.indexOf('--rpc');
-        if (rpcIdx >= 0 && rpcIdx + 1 < finalCliArgs.length) {
-          const rawRpcs = finalCliArgs[rpcIdx + 1].split(',').map((s) => s.trim()).filter(Boolean);
-          const verifiedRpcs: string[] = [];
-          for (const target of rawRpcs) {
-            const [rHost, rPortStr] = target.split(':');
-            const rPort = Number(rPortStr || 50052);
-            const live = await probeTcpPort(rHost, rPort, 800);
-            if (live) verifiedRpcs.push(target);
-          }
-          if (verifiedRpcs.length === 0) {
-            // Remove --rpc and --tensor-split flags if no RPC endpoints are actively listening
-            const tsIdx = finalCliArgs.indexOf('--tensor-split');
-            if (tsIdx >= 0) finalCliArgs.splice(tsIdx, 2);
-            const newRpcIdx = finalCliArgs.indexOf('--rpc');
-            if (newRpcIdx >= 0) finalCliArgs.splice(newRpcIdx, 2);
-          } else if (verifiedRpcs.length < rawRpcs.length) {
-            finalCliArgs[rpcIdx + 1] = verifiedRpcs.join(',');
-          }
-        }
-
-        try {
-          emitEngineEvent(`Launching ${path.basename(bin)} with local weights (${path.basename(modelLocalPath)})...`);
-          const child = spawn(bin, finalCliArgs, {
-            stdio: ['ignore', 'pipe', 'pipe'],
-            windowsHide: true,
-          });
-
-          let earlyStderr = '';
-          child.stderr?.on('data', (c: Buffer) => {
-            if (earlyStderr.length < 2048) earlyStderr += c.toString('utf8');
-          });
-
-          // Poll http://127.0.0.1:8080/health for ready state
-          const ready = await waitForServerHealth('http://127.0.0.1:8080', 7000, child);
-          if (ready) {
-            spawnedLlamaChild = child;
-            spawned = true;
-            upstreamBaseUrl = 'http://127.0.0.1:8080';
-            engineStatus.running = true;
-            engineStatus.upstreamUrl = upstreamBaseUrl;
-            engineStatus.serverType = 'llama-server';
-            spawnNote = `Live stock llama-server running on http://127.0.0.1:8080 (${path.basename(modelLocalPath)})`;
-          } else if (child.exitCode !== null) {
-            // If it crashed, check if it was an RPC error and retry without RPC
-            if (finalCliArgs.includes('--rpc')) {
-              emitEngineEvent('RPC connection failed, falling back to local Master direct inference...');
-              const retryArgs = finalCliArgs.filter((a, idx, arr) => {
-                if (a === '--rpc' || arr[idx - 1] === '--rpc') return false;
-                if (a === '--tensor-split' || arr[idx - 1] === '--tensor-split') return false;
-                return true;
-              });
-              const fallbackChild = spawn(bin, retryArgs, {
-                stdio: ['ignore', 'pipe', 'pipe'],
-                windowsHide: true,
-              });
-              const fbReady = await waitForServerHealth('http://127.0.0.1:8080', 6000, fallbackChild);
-              if (fbReady) {
-                spawnedLlamaChild = fallbackChild;
-                spawned = true;
-                upstreamBaseUrl = 'http://127.0.0.1:8080';
-                engineStatus.running = true;
-                engineStatus.upstreamUrl = upstreamBaseUrl;
-                engineStatus.serverType = 'llama-server';
-                spawnNote = `Live llama-server running on Master http://127.0.0.1:8080 (${path.basename(modelLocalPath)})`;
-              } else {
-                spawnNote = `Engine start failed: ${earlyStderr.slice(0, 180)}`;
-              }
-            } else {
-              spawnNote = `Engine start exited (code ${child.exitCode}): ${earlyStderr.slice(0, 180)}`;
-            }
-          }
-        } catch (err) {
-          spawnNote = `Unable to spawn binary: ${err instanceof Error ? err.message : 'ENOENT'}`;
-        }
-      } else {
-        spawnNote = `Local GGUF model file not found on disk. Place .gguf in models/ or specify path.`;
+      const launchRes = await launchLlamaServer(body.binaryPath);
+      spawned = launchRes.spawned;
+      spawnNote = launchRes.message;
+      if (!launchRes.ok) {
+        engineDraining = false;
+        engineStatus.reloadProgressPct = 0;
+        emitEngineEvent(spawnNote);
+        const errSnap = await computeRuntimeSnapshot();
+        res.status(400).json({
+          ok: false,
+          spawned: false,
+          error: spawnNote,
+          cliArgs: errSnap.plan.cliArgs,
+          snapshot: errSnap,
+        });
+        return;
       }
     }
 
@@ -1321,6 +1359,26 @@ export async function createApp() {
       cliArgs: updated.plan.cliArgs,
       snapshot: updated,
     });
+  });
+
+  app.post('/api/engine/stop', async (_req: Request, res: Response) => {
+    emitEngineEvent('Stopping local inference engine...');
+    if (spawnedLlamaChild) {
+      try {
+        spawnedLlamaChild.kill('SIGTERM');
+      } catch {
+        // ignore
+      }
+      spawnedLlamaChild = null;
+    }
+    upstreamBaseUrl = '';
+    engineStatus.running = false;
+    engineStatus.upstreamUrl = null;
+    engineStatus.serverType = 'offline';
+    engineStatus.lastEvent = 'Engine stopped — offline';
+    engineStatus.reloadProgressPct = 0;
+    const snap = await computeRuntimeSnapshot();
+    res.json({ ok: true, message: 'Engine stopped cleanly.', snapshot: snap });
   });
 
   app.get('/api/engine/events', (req: Request, res: Response) => {
