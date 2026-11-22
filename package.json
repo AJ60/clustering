@@ -10,7 +10,7 @@
     "build": "npm run build:client && npm run build:server",
     "start": "node dist/server.js",
     "lint": "tsc --noEmit",
-    "test": "NODE_ENV=test tsx --test src/__tests__/serverApi.test.ts src/__tests__/virtualEnvironmentsSmallModel.test.ts src/domain/__tests__/starClusterPlanner.test.ts",
+    "test": "tsx --test src/__tests__/serverApi.test.ts src/__tests__/virtualEnvironmentsSmallModel.test.ts src/domain/__tests__/starClusterPlanner.test.ts",
     "preview": "vite preview --host 0.0.0.0 --port 3000"
   },
   "dependencies": {
