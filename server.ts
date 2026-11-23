@@ -534,6 +534,20 @@ function resolveLlamaServerBinary(userSpecified?: string): string {
   if (fs.existsSync(localWin)) return localWin;
   const localLinux = path.join(process.cwd(), 'llama-b11429', 'llama-server');
   if (fs.existsSync(localLinux)) return localLinux;
+  if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
+    const wingetDir = path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Packages');
+    if (fs.existsSync(wingetDir)) {
+      try {
+        const matches = fs.readdirSync(wingetDir).filter((d) => d.includes('llamacpp'));
+        for (const m of matches) {
+          const binP = path.join(wingetDir, m, 'llama-server.exe');
+          if (fs.existsSync(binP)) return binP;
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
   return process.platform === 'win32' ? 'llama-server.exe' : 'llama-server';
 }
 
@@ -839,6 +853,26 @@ export async function createApp() {
       }
     }
 
+    // Ensure --slot-save-path directory exists if present, or strip it cleanly
+    const slotIdx = finalCliArgs.indexOf('--slot-save-path');
+    if (slotIdx >= 0 && slotIdx + 1 < finalCliArgs.length) {
+      const slotVal = (finalCliArgs[slotIdx + 1] || '').trim();
+      if (!slotVal) {
+        finalCliArgs.splice(slotIdx, 2);
+      } else {
+        const slotDir = path.isAbsolute(slotVal) ? slotVal : path.resolve(process.cwd(), slotVal);
+        try {
+          fs.mkdirSync(slotDir, { recursive: true });
+          finalCliArgs[slotIdx + 1] = slotDir;
+        } catch {
+          finalCliArgs.splice(slotIdx, 2);
+        }
+      }
+    }
+
+    // Dynamically calculate health wait time based on model size (min 10s, up to 35s for 35B models)
+    const loadWaitMs = Math.max(10000, Math.min(35000, Math.ceil((activeModel.sizeMb || 4000) / 1024) * 2000));
+
     try {
       emitEngineEvent(`Launching ${path.basename(bin)} with local weights (${path.basename(modelLocalPath)})...`);
       const child = spawn(bin, finalCliArgs, {
@@ -851,7 +885,7 @@ export async function createApp() {
         if (earlyStderr.length < 2048) earlyStderr += c.toString('utf8');
       });
 
-      const ready = await waitForServerHealth('http://127.0.0.1:8080', 7000, child);
+      const ready = await waitForServerHealth('http://127.0.0.1:8080', loadWaitMs, child);
       if (ready) {
         spawnedLlamaChild = child;
         upstreamBaseUrl = 'http://127.0.0.1:8080';
@@ -862,29 +896,42 @@ export async function createApp() {
         return { ok: true, spawned: true, message: msg };
       }
 
-      if (child.exitCode !== null && finalCliArgs.includes('--rpc')) {
-        emitEngineEvent('RPC connection failed, falling back to local Master direct inference...');
-        const retryArgs = finalCliArgs.filter((a, idx, arr) => {
-          if (a === '--rpc' || arr[idx - 1] === '--rpc') return false;
-          if (a === '--tensor-split' || arr[idx - 1] === '--tensor-split') return false;
-          return true;
-        });
-        const fallbackChild = spawn(bin, retryArgs, {
-          stdio: ['ignore', 'pipe', 'pipe'],
-          windowsHide: true,
-        });
-        const fbReady = await waitForServerHealth('http://127.0.0.1:8080', 6000, fallbackChild);
-        if (fbReady) {
-          spawnedLlamaChild = fallbackChild;
-          upstreamBaseUrl = 'http://127.0.0.1:8080';
-          engineStatus.running = true;
-          engineStatus.upstreamUrl = upstreamBaseUrl;
-          engineStatus.serverType = 'llama-server';
-          const msg = `Live llama-server running on Master http://127.0.0.1:8080 (${path.basename(modelLocalPath)})`;
-          return { ok: true, spawned: true, message: msg };
-        }
+      // If timed out but child is still hanging without listening, terminate it
+      if (child.exitCode === null) {
+        try { child.kill('SIGTERM'); } catch {}
       }
-      return { ok: false, spawned: false, message: `Engine start failed: ${earlyStderr.slice(0, 180)}` };
+
+      // Unconditional resilient fallback to direct Master inference
+      emitEngineEvent('Primary engine spawn failed or timed out, attempting resilient direct launch on Master...');
+      const retryArgs = finalCliArgs.filter((a, idx, arr) => {
+        if (a === '--rpc' || arr[idx - 1] === '--rpc') return false;
+        if (a === '--tensor-split' || arr[idx - 1] === '--tensor-split') return false;
+        if (a === '--slot-save-path' || arr[idx - 1] === '--slot-save-path') return false;
+        return true;
+      });
+      const fallbackChild = spawn(bin, retryArgs, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      let fbStderr = '';
+      fallbackChild.stderr?.on('data', (c: Buffer) => {
+        if (fbStderr.length < 2048) fbStderr += c.toString('utf8');
+      });
+      const fbReady = await waitForServerHealth('http://127.0.0.1:8080', loadWaitMs, fallbackChild);
+      if (fbReady) {
+        spawnedLlamaChild = fallbackChild;
+        upstreamBaseUrl = 'http://127.0.0.1:8080';
+        engineStatus.running = true;
+        engineStatus.upstreamUrl = upstreamBaseUrl;
+        engineStatus.serverType = 'llama-server';
+        const msg = `Live llama-server running on Master http://127.0.0.1:8080 (${path.basename(modelLocalPath)})`;
+        return { ok: true, spawned: true, message: msg };
+      }
+      if (fallbackChild.exitCode === null) {
+        try { fallbackChild.kill('SIGTERM'); } catch {}
+      }
+      const errDetail = (earlyStderr || fbStderr).slice(0, 240).trim() || 'Process exited prematurely or timed out';
+      return { ok: false, spawned: false, message: `Engine start failed: ${errDetail}` };
     } catch (err) {
       return {
         ok: false,
@@ -1639,7 +1686,7 @@ export async function createApp() {
     const isStream = Boolean(req.body?.stream);
     const targetUrl = `${upstreamBaseUrl.replace(/\/+$/, '')}/v1/chat/completions`;
     const controller = new AbortController();
-    const connectTimer = setTimeout(() => controller.abort(), 5000);
+    const connectTimer = setTimeout(() => controller.abort(), 120_000);
 
     res.on('close', () => {
       if (!res.writableEnded) {

@@ -85,7 +85,7 @@ export function createDefaultBackendTuningConfig(
     cacheReuse: 256,
     kvUnified: true,
     noKvOffload: null, // auto (-nkvo on <=4GB GPUs at >=32K context)
-    slotSavePath: './.silica-kv-cache',
+    slotSavePath: '',
     forceNoMmap: null, // auto (>=1.15x pool margin)
     threads: null,
     batchSize: 1024,

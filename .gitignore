@@ -44,4 +44,8 @@ android/local.properties
 *.apk
 *.aab
 
+# Silica Cluster Cache & Runtime Persistence
+.silica-kv-cache/
+cluster_history.json
+
 
