@@ -8,15 +8,15 @@ Write-Host "  Silica Cluster - Android Worker Node Automatic Setup    " -Foregro
 Write-Host "==========================================================" -ForegroundColor Cyan
 
 # 1. Check ADB connection
-$devices = adb devices -l | Select-String -Pattern "device product:"
-if (-not $devices) {
+$rawDevices = adb devices | Select-String "\bdevice\b"
+if (-not $rawDevices) {
     Write-Host "[ERROR] No authorized Android device connected via USB ADB!" -ForegroundColor Red
     Write-Host "Please connect your Android phone with USB debugging enabled." -ForegroundColor Yellow
     exit 1
 }
 
-$deviceLine = $devices[0].Line
-$serial = ($deviceLine -split "\s+")[0]
+$firstDevice = $rawDevices[0].Line.Trim()
+$serial = ($firstDevice -split "\s+")[0].Trim()
 Write-Host "[OK] Detected authorized Android device: $serial" -ForegroundColor Green
 
 # 2. Push compiled Dalvik/ART worker
@@ -30,7 +30,7 @@ if (Test-Path $dexPath) {
 adb -s $serial reverse tcp:3000 tcp:3000 | Out-Null
 
 # 4. Kill previous worker process if running
-adb -s $serial shell 'pkill -f com.silica.cluster.WorkerNode 2>/dev/null' | Out-Null
+adb -s $serial shell "pkill -f com.silica.cluster.WorkerNode 2>/dev/null" | Out-Null
 
 # 5. Start background worker node via app_process
 Write-Host "[*] Launching Silica Worker Node on device in background..." -ForegroundColor Cyan
@@ -39,8 +39,8 @@ adb -s $serial shell "nohup /system/bin/sh -c 'CLASSPATH=/data/local/tmp/silica_
 Start-Sleep -Seconds 2
 
 # 6. Detect bound port from worker log
-$boundPort = adb -s $serial shell "toybox grep -o 'BoundPort=[0-9]*' /data/local/tmp/worker.log 2>/dev/null | toybox tail -n 1 | toybox cut -d= -f2"
-$boundPort = ($boundPort -replace "[^0-9]", "").Trim()
+$rawPort = (adb -s $serial shell "toybox grep -o 'BoundPort=[0-9]*' /data/local/tmp/worker.log 2>/dev/null | toybox tail -n 1 | toybox cut -d= -f2" | Out-String).Trim()
+$boundPort = ($rawPort -replace "[^0-9]", "")
 if (-not $boundPort) {
     $boundPort = "50054"
 }
