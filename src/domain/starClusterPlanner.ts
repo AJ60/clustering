@@ -787,6 +787,9 @@ export function planStarCluster(
     String(learned?.recommendedUbatch ?? effectiveConfig.ubatchSize ?? 256),
   ];
   if (effectiveMmproj) cliArgs.push('--mmproj', effectiveMmproj);
+  if (effectiveConfig.threads && effectiveConfig.threads > 0) {
+    cliArgs.push('-t', String(effectiveConfig.threads));
+  }
   if (effectiveConfig.enableJinja !== false) cliArgs.push('--jinja');
   if (effectiveConfig.enableFlashAttn && model.architecture !== 'Ternary') cliArgs.push('-fa', 'on');
   if (effectiveConfig.kvUnified !== false) cliArgs.push('--kv-unified');

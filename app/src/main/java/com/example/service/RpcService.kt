@@ -73,6 +73,8 @@ data class DeviceTelemetryState(
     val safeCapMb: Long = 0L,
     val bigCoreCount: Int = 4,
     val totalCoreCount: Int = Runtime.getRuntime().availableProcessors(),
+    val threadOverride: Int = 0,
+    val safeRamPercentOverride: Int = 0,
     val cpuFeatures: String = "asimd",
     val hasDotProd: Boolean = false,
     val hasI8mm: Boolean = false,
@@ -140,6 +142,9 @@ class RpcService : Service(), ComponentCallbacks2 {
         private val _telemetry = MutableStateFlow(DeviceTelemetryState())
         val telemetry: StateFlow<DeviceTelemetryState> = _telemetry.asStateFlow()
 
+        @Volatile
+        private var activeService: RpcService? = null
+
         /**
          * Bit-exact Kotlin mirror of Rust `clusterd::protocol::compute_cluster_auth_token`.
          * Produces identical 32-byte auth tokens across Windows, Linux, macOS, and Android.
@@ -193,7 +198,7 @@ class RpcService : Service(), ComponentCallbacks2 {
             appendLog(if (enabled) "Developer Mode enabled" else "Switched back to Simple Mode")
         }
 
-        fun applyEngineOverrides(threads: Int, safeRamPercent: Int) {
+        fun applyEngineOverrides(threads: Int, safeRamPercent: Int, restartWorkerIfRunning: Boolean = true) {
             val pct = safeRamPercent.coerceIn(25, 50)
             _telemetry.update { state ->
                 val boundedThreads = if (threads > 0) {
@@ -206,10 +211,24 @@ class RpcService : Service(), ComponentCallbacks2 {
                 val boundedRam = max(256L, (total * pct) / 100L)
                 val layers = (boundedRam / 110L).toInt().coerceIn(2, 28)
                 state.copy(
+                    threadOverride = if (threads > 0) boundedThreads else 0,
+                    safeRamPercentOverride = pct,
                     bigCoreCount = boundedThreads,
                     safeCapMb = boundedRam,
                     activeLayersAssigned = if (state.workerState == WorkerRunState.RUNNING_USB || state.workerState == WorkerRunState.RUNNING_WIFI) layers else state.activeLayersAssigned
                 )
+            }
+
+            activeService?.let { service ->
+                val curState = _telemetry.value.workerState
+                if (restartWorkerIfRunning && (curState == WorkerRunState.RUNNING_USB || curState == WorkerRunState.RUNNING_WIFI)) {
+                    val usbOnly = _telemetry.value.usbLoopbackOnly
+                    val secret = _telemetry.value.clusterSecret
+                    appendLog("Applying updated thread budget (${_telemetry.value.bigCoreCount} cores) — reloading RPC server process")
+                    service.launchNativeOrEmbeddedRpcServer(usbOnly, secret)
+                    val master = service.lastPairedMasterHostPort ?: "127.0.0.1:3000"
+                    service.notifyMasterViaUdpOrHttp(master, usbOnly)
+                }
             }
         }
 
@@ -232,10 +251,21 @@ class RpcService : Service(), ComponentCallbacks2 {
             refreshStaticHardwareSnapshot(context)
             val profile = NodeAutoCalibrator.runCalibration(context)
             _telemetry.update { state ->
+                val override = state.threadOverride
+                val cores = if (override > 0) {
+                    override.coerceIn(1, max(1, state.totalCoreCount))
+                } else {
+                    profile.recommendedThreads
+                }
+                val ramCap = if (state.safeRamPercentOverride in 25..50 && state.totalRamMb > 0L) {
+                    max(256L, (state.totalRamMb * state.safeRamPercentOverride) / 100L)
+                } else {
+                    profile.recommendedSafeRamMb
+                }
                 state.copy(
                     calibration = profile,
-                    safeCapMb = profile.recommendedSafeRamMb,
-                    bigCoreCount = profile.recommendedThreads
+                    safeCapMb = ramCap,
+                    bigCoreCount = cores
                 )
             }
             appendLog(
@@ -326,11 +356,24 @@ class RpcService : Service(), ComponentCallbacks2 {
             }
 
             _telemetry.update { current ->
+                val override = current.threadOverride
+                val cores = if (override > 0) {
+                    override.coerceIn(1, max(1, cpu.totalCoreCount))
+                } else if (legacy.legacyHardwareMode) {
+                    min(cpu.bigCoreCount, 2)
+                } else {
+                    cpu.bigCoreCount
+                }
+                val ramCap = if (current.safeRamPercentOverride in 25..50 && mem.totalMb > 0L) {
+                    max(256L, (mem.totalMb * current.safeRamPercentOverride) / 100L)
+                } else {
+                    mem.safeCapMb
+                }
                 current.copy(
                     totalRamMb = mem.totalMb,
                     availableRamMb = mem.availableMb,
-                    safeCapMb = mem.safeCapMb,
-                    bigCoreCount = if (legacy.legacyHardwareMode) min(cpu.bigCoreCount, 2) else cpu.bigCoreCount,
+                    safeCapMb = ramCap,
+                    bigCoreCount = cores,
                     totalCoreCount = cpu.totalCoreCount,
                     cpuFeatures = cpu.featuresSummary,
                     hasDotProd = cpu.hasDotProd,
@@ -388,6 +431,7 @@ class RpcService : Service(), ComponentCallbacks2 {
 
     override fun onCreate() {
         super.onCreate()
+        activeService = this
         createNotificationChannel()
         refreshStaticHardwareSnapshot(this)
         appendLog("RpcService initialized on API ${Build.VERSION.SDK_INT} (${Build.MODEL})")
@@ -542,7 +586,7 @@ class RpcService : Service(), ComponentCallbacks2 {
         startSafetyTelemetryMonitor()
     }
 
-    private fun launchNativeOrEmbeddedRpcServer(usbOnly: Boolean, clusterSecret: String) {
+    internal fun launchNativeOrEmbeddedRpcServer(usbOnly: Boolean, clusterSecret: String) {
         rpcServerJob?.cancel()
         runCatching { serverSocket?.close() }
         runCatching { nativeProcess?.destroyForcibly() }
@@ -1045,7 +1089,7 @@ class RpcService : Service(), ComponentCallbacks2 {
         }.start()
     }
 
-    private fun notifyMasterViaUdpOrHttp(masterHostPort: String, isUsb: Boolean = false) {
+    internal fun notifyMasterViaUdpOrHttp(masterHostPort: String, isUsb: Boolean = false) {
         serviceScope.launch {
             val host = masterHostPort.substringBefore(":")
             val httpPort = masterHostPort.substringAfter(":", "3000").toIntOrNull() ?: 3000
@@ -1217,6 +1261,9 @@ class RpcService : Service(), ComponentCallbacks2 {
     }
 
     override fun onDestroy() {
+        if (activeService === this) {
+            activeService = null
+        }
         stopWorkerAndFreeRam("Service destroyed")
         serviceScope.cancel()
         super.onDestroy()

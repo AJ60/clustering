@@ -305,14 +305,18 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
             } catch {}
 
             const workerId = `android-usb-${serial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+            const existing = registeredWorkers.get(workerId) || Array.from(registeredWorkers.values()).find(
+              (w) => (w.ip === '127.0.0.1' || w.ip === 'localhost') && w.rpcPort === 50052
+            );
             // 50% physical RAM cap (e.g. 1851MB on 3702MB / 4GB total)
             const safeCap = probe.safeCapMb && probe.safeCapMb > 256
               ? Math.min(Math.floor(totalRam * 0.5), probe.safeCapMb)
-              : Math.floor(totalRam * 0.5);
+              : (existing?.safeCapMb && existing.safeCapMb > 256 ? existing.safeCapMb : Math.floor(totalRam * 0.5));
+            const bigCores = probe.bigCores || existing?.bigCores || 4;
 
             registeredWorkers.set(workerId, {
-              id: workerId,
-              label: `${modelName} (Android)`,
+              id: existing?.id || workerId,
+              label: existing?.label || `${modelName} (Android)`,
               platform: 'Android',
               osType: 'android',
               ip: '127.0.0.1',
@@ -324,10 +328,10 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
               vramMb: 0,
               computeTflops: 1.8,
               memBwGbps: 28.0,
-              bigCores: probe.bigCores || 4,
+              bigCores: bigCores,
               rttMs: probe.ok && probe.rttMs < 100 ? probe.rttMs : 0.8,
               pktLossPct: 0,
-              tempC: 32.0,
+              tempC: existing?.tempC || 32.0,
               cpuUsagePct: 15,
               gpuUsagePct: 0,
               handshakeVerified: true,

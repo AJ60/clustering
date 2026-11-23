@@ -481,8 +481,13 @@ export function parseLocalGgufModel(
     }
   }
 
+  const isGenericRawName =
+    !rawName ||
+    rawName.trim().length <= 2 ||
+    ['hf', 'model', 'llm', 'gguf', 'output', 'default', 'test'].includes(rawName.toLowerCase().trim());
+
   const cleanName =
-    rawName ||
+    (!isGenericRawName ? rawName : null) ||
     filename
       .replace(/\.gguf$/i, '')
       .replace(/[-_](iq[1-4]|q[0-8]|f16|f32|bf16|tq[1-2])[a-z0-9_.-]*/i, '')

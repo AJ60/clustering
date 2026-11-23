@@ -239,6 +239,17 @@ class SilicaViewModel(
             val cfg = uiState.value.config
             syncWithMaster(cfg.masterBaseUrl, cfg.clusterSecret)
         }
+
+        // Synchronize persisted thread override & safe RAM preferences into RpcService on startup
+        viewModelScope.launch {
+            repository.engineConfig.collect { cfg ->
+                RpcService.applyEngineOverrides(
+                    threads = cfg.threadCountOverride,
+                    safeRamPercent = cfg.safeRamPercent,
+                    restartWorkerIfRunning = false
+                )
+            }
+        }
     }
 
     fun selectTab(tab: SilicaTab) {
@@ -409,7 +420,7 @@ class SilicaViewModel(
         viewModelScope.launch {
             val pct = uiState.value.config.safeRamPercent
             repository.updateEngineConfig { it.copy(threadCountOverride = threads) }
-            RpcService.applyEngineOverrides(threads, pct)
+            RpcService.applyEngineOverrides(threads, pct, restartWorkerIfRunning = true)
             RpcService.logEngineEvent("CPU thread budget updated to $threads threads")
         }
     }
@@ -419,7 +430,7 @@ class SilicaViewModel(
         viewModelScope.launch {
             val threads = uiState.value.config.threadCountOverride
             repository.updateEngineConfig { it.copy(safeRamPercent = clamped) }
-            RpcService.applyEngineOverrides(threads, clamped)
+            RpcService.applyEngineOverrides(threads, clamped, restartWorkerIfRunning = true)
             RpcService.logEngineEvent("LMKD RAM guard set to $clamped% physical RAM ceiling")
         }
     }

@@ -220,6 +220,9 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
           model: activeModel.id,
           stream: true,
           messages: apiMessages,
+          temperature: 0.6,
+          top_p: 0.95,
+          min_p: 0.05,
           ...(webToolsEnabled ? { tools: WEB_TOOLS_SPEC, tool_choice: 'auto' } : {}),
         }),
       });
