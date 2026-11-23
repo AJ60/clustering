@@ -135,7 +135,7 @@ class StandaloneInferenceEngine(private val context: Context) {
      */
     fun refreshPrivateVault(): List<StandaloneModelEntry> {
         val mem = HardwareProbe.readProcMemInfo()
-        val cpu = HardwareProbe.probeCpuTopologyAndFeatures()
+        val cpu = HardwareProbe.probeCpuAndCores()
         val safeBudgetMb = mem.safeCapMb
         val threads = min(max(1, cpu.bigCoreCount), 6)
 

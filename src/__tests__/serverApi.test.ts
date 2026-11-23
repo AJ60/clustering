@@ -518,10 +518,10 @@ describe('Silica Cluster Server & Systems Verification', () => {
       assert.ok(missingJson.error.includes('not found'));
 
       // 2. Failing llama-server (e.g. RPC rejected) must return HTTP 500 with stderr + RPC hint
-      const failBin = path.join(tmpDir, 'mock-llama-fail.sh');
+      const failBin = path.join(tmpDir, 'mock-llama-fail.mjs');
       fs.writeFileSync(
         failBin,
-        `#!/bin/sh\necho "ggml_backend_rpc: connection refused on 127.0.0.1:50052" >&2\nexit 1\n`,
+        `console.error("ggml_backend_rpc: connection refused on 127.0.0.1:50052");\nprocess.exit(1);\n`,
         { mode: 0o755 }
       );
       const failRes = await fetch(`${baseUrl}/api/engine/reload`, {

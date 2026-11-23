@@ -1067,7 +1067,10 @@ export async function createApp() {
 
     try {
       emitEngineEvent(`Launching ${path.basename(bin)} with local weights (${path.basename(modelLocalPath)})...`);
-      const child = spawn(bin, finalCliArgs, {
+      const isNodeScript = bin.endsWith('.js') || bin.endsWith('.mjs');
+      const spawnBin = isNodeScript ? process.execPath : bin;
+      const spawnArgs = isNodeScript ? [bin, ...finalCliArgs] : finalCliArgs;
+      const child = spawn(spawnBin, spawnArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });
@@ -1122,7 +1125,10 @@ export async function createApp() {
           if (a === '--slot-save-path' || arr[idx - 1] === '--slot-save-path') return false;
           return true;
         });
-        const fallbackChild = spawn(bin, retryArgs, {
+        const isFallbackNodeScript = bin.endsWith('.js') || bin.endsWith('.mjs');
+        const fbSpawnBin = isFallbackNodeScript ? process.execPath : bin;
+        const fbSpawnArgs = isFallbackNodeScript ? [bin, ...retryArgs] : retryArgs;
+        const fallbackChild = spawn(fbSpawnBin, fbSpawnArgs, {
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,
         });
