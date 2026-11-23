@@ -297,14 +297,40 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
         await execFileAsync('adb', ['-s', serial, 'reverse', 'tcp:3000', 'tcp:3000'], {
           timeout: 1500,
         }).catch(() => {});
-        // Forward host port 50052 to phone port 50052 (Silica Android app worker listener)
-        await execFileAsync('adb', ['-s', serial, 'forward', 'tcp:50052', 'tcp:50052'], {
+
+        // Discover existing or alternate forward (Qualcomm devices occupy 50052 with radio daemon, so worker binds to 50054)
+        let phonePort = 50052;
+        try {
+          const { stdout: fList } = await execFileAsync('adb', ['forward', '--list'], { timeout: 1000 });
+          const m = fList.match(new RegExp(`${serial}\\s+tcp:50052\\s+tcp:(\\d+)`));
+          if (m && m[1]) {
+            phonePort = parseInt(m[1], 10);
+          } else {
+            // Check worker log for dynamic bound port if 50052 was taken
+            const { stdout: logOut } = await execFileAsync('adb', ['-s', serial, 'shell', 'toybox grep -o "BoundPort=[0-9]*" /data/local/tmp/worker.log 2>/dev/null | toybox tail -n 1'], { timeout: 1000 }).catch(() => ({ stdout: '' }));
+            const pMatch = logOut.match(/BoundPort=(\d+)/);
+            if (pMatch && pMatch[1]) {
+              phonePort = parseInt(pMatch[1], 10);
+            }
+          }
+        } catch {}
+
+        await execFileAsync('adb', ['-s', serial, 'forward', 'tcp:50052', `tcp:${phonePort}`], {
           timeout: 1500,
         }).catch(() => {});
 
         // Auto-detect and register Android worker over USB loopback if RPC port responds
         try {
-          const probe = await probeRpcHandshake('127.0.0.1', 50052, 1200);
+          let probe = await probeRpcHandshake('127.0.0.1', 50052, 1200);
+          if (!probe.ok && phonePort === 50052) {
+            // Retry on port 50054 for Qualcomm devices
+            await execFileAsync('adb', ['-s', serial, 'forward', 'tcp:50052', 'tcp:50054'], { timeout: 1500 }).catch(() => {});
+            const retryProbe = await probeRpcHandshake('127.0.0.1', 50052, 1200);
+            if (retryProbe.ok) {
+              probe = retryProbe;
+              phonePort = 50054;
+            }
+          }
           const isAlive = probe.ok || (await probeTcpPort('127.0.0.1', 50052, 400));
           if (isAlive) {
             let modelName = 'Android Device';
@@ -324,9 +350,10 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
               (w) => (w.ip === '127.0.0.1' || w.ip === 'localhost') && w.rpcPort === 50052
             );
             // 50% physical RAM cap (e.g. 1851MB on 3702MB / 4GB total)
-            const safeCap = probe.safeCapMb && probe.safeCapMb > 256
-              ? Math.min(Math.floor(totalRam * 0.5), probe.safeCapMb)
-              : (existing?.safeCapMb && existing.safeCapMb > 256 ? existing.safeCapMb : Math.floor(totalRam * 0.5));
+            const halfPhysRam = Math.floor(totalRam * 0.5);
+            const safeCap = existing?.safeCapMb && existing.safeCapMb > 256
+              ? Math.min(halfPhysRam, existing.safeCapMb)
+              : halfPhysRam;
             const bigCores = probe.bigCores || existing?.bigCores || 4;
 
             registeredWorkers.set(workerId, {
@@ -487,13 +514,7 @@ async function probeLiveHardware(): Promise<LiveHardwareProbe> {
     if (isDup) continue;
     const androidHardCap =
       w.platform === 'Android'
-        ? Math.max(
-            256,
-            Math.min(
-              Math.floor(w.totalRamMb * (w.totalRamMb <= 2048 ? 0.4 : 0.5)),
-              Math.max(256, w.availableRamMb - (w.totalRamMb <= 2048 ? 256 : 512))
-            )
-          )
+        ? Math.floor(w.totalRamMb * (w.totalRamMb <= 2048 ? 0.4 : 0.5))
         : 0;
     const safeCapMb =
       w.safeCapMb && w.safeCapMb > 256
