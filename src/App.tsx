@@ -314,7 +314,9 @@ export function App() {
   ];
 
   const uniqueLiveWorkers = useMemo(() => {
-    const raw = plan.nodes.filter((n) => n.role === 'Worker' && n.isConnected);
+    const raw = plan.nodes.filter(
+      (n) => n.role === 'Worker' && n.isConnected && (n.allocatedLayers ?? 0) > 0
+    );
     const deduped: typeof raw = [];
     for (const w of raw) {
       if (!deduped.some((ex) => isSameAndroidWorker(ex, w) || (ex.ip === w.ip && ex.rpcPort === w.rpcPort))) {

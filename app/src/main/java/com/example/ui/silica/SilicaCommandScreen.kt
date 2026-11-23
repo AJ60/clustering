@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -1013,10 +1014,18 @@ fun SilicaCommandScreen(
 
                     HorizontalDivider(color = cs.outlineVariant.copy(alpha = 0.6f))
 
+                    val logScrollState = rememberScrollState()
+                    LaunchedEffect(filteredLogs.size) {
+                        if (filteredLogs.isNotEmpty()) {
+                            logScrollState.animateScrollTo(logScrollState.maxValue)
+                        }
+                    }
+
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 120.dp, max = 230.dp),
+                            .heightIn(min = 120.dp, max = 240.dp)
+                            .verticalScroll(logScrollState),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         if (filteredLogs.isEmpty()) {
@@ -1028,7 +1037,7 @@ fun SilicaCommandScreen(
                                 color = cs.onSurfaceVariant
                             )
                         } else {
-                            filteredLogs.take(12).forEach { line ->
+                            filteredLogs.forEach { line ->
                                 val lineColor = when {
                                     line.contains("CRITICAL", ignoreCase = true) ||
                                         line.contains("Rejected", ignoreCase = true) ||
@@ -1046,9 +1055,7 @@ fun SilicaCommandScreen(
                                     fontFamily = JetBrainsMonoFontFamily,
                                     fontSize = 11.sp,
                                     lineHeight = 15.sp,
-                                    color = lineColor,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
+                                    color = lineColor
                                 )
                             }
                         }

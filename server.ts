@@ -47,7 +47,7 @@ const execFileAsync = promisify(execFile);
 
 const PORT = Number(process.env.PORT || 3000);
 const CLUSTER_SECRET = process.env.CLUSTER_SECRET || 'clusterd-default-hmac-key';
-const WORKER_TTL_MS = 30_000;
+const WORKER_TTL_MS = 10_000;
 const HISTORY_PATH = path.resolve(process.cwd(), 'cluster_history.json');
 
 interface RegisteredWorkerRecord {
@@ -370,12 +370,22 @@ async function pruneStaleWorkers(): Promise<void> {
       toDelete.push(id);
       continue;
     }
-    // In live runtime, verify that the worker's TCP port is actively listening.
-    // If the app was closed or uninstalled, the TCP connection is refused immediately.
+    // In live runtime, verify that the worker is actively responsive.
+    // For local ADB-forwarded loopback workers (127.0.0.1/localhost), the host ADB port stays open
+    // even when the worker on the device is stopped. Therefore, we probe the 32-byte RPC handshake
+    // to strictly verify the worker daemon on the phone is actually alive.
     if (process.env.NODE_ENV !== 'test') {
-      const alive = await probeTcpPort(worker.ip, worker.rpcPort, 120);
-      if (!alive) {
-        toDelete.push(id);
+      const isLoopback = worker.ip === '127.0.0.1' || worker.ip === 'localhost' || worker.ip.startsWith('127.');
+      if (isLoopback) {
+        const probe = await probeRpcHandshake(worker.ip, worker.rpcPort, 350);
+        if (!probe.ok) {
+          toDelete.push(id);
+        }
+      } else {
+        const alive = await probeTcpPort(worker.ip, worker.rpcPort, 200);
+        if (!alive) {
+          toDelete.push(id);
+        }
       }
     }
   }
@@ -715,6 +725,26 @@ async function computeRuntimeSnapshot(): Promise<RuntimeClusterSnapshot> {
   const learned = historyStore.profiles[profileKey] ?? null;
   const plan = planStarCluster(nodes, activeModel, undefined, tuningConfig, learned);
 
+  // If live engine is running without RPC (e.g. Master direct fallback or no workers),
+  // ensure the plan honestly attributes 100% compute to Master and sets worker layers to 0
+  if (engineStatus.running && (!registeredWorkers.size || !plan.cliArgs.includes('--rpc'))) {
+    for (const node of plan.nodes) {
+      if (node.role === 'Master') {
+        node.allocatedLayers = activeModel.layers;
+        node.layerStart = 0;
+        node.layerEnd = activeModel.layers - 1;
+        node.allocatedMb = Math.round(plan.neededMb);
+      } else {
+        node.allocatedLayers = 0;
+        node.layerStart = -1;
+        node.layerEnd = -1;
+        node.allocatedMb = 0;
+        node.isConnected = false;
+      }
+    }
+    plan.tensorSplit = [100];
+  }
+
   engineStatus.draining = engineDraining;
   engineStatus.activeTurns = activeGenerationTurns;
   engineStatus.hasMmproj = Boolean(plan.masterMmprojPath);
@@ -832,7 +862,7 @@ export async function createApp() {
       finalCliArgs[mIdx + 1] = modelLocalPath;
     }
 
-    // Verify RPC targets
+    // Verify RPC targets with true RPC handshake
     const rpcIdx = finalCliArgs.indexOf('--rpc');
     if (rpcIdx >= 0 && rpcIdx + 1 < finalCliArgs.length) {
       const rawRpcs = finalCliArgs[rpcIdx + 1].split(',').map((s) => s.trim()).filter(Boolean);
@@ -840,8 +870,17 @@ export async function createApp() {
       for (const target of rawRpcs) {
         const [rHost, rPortStr] = target.split(':');
         const rPort = Number(rPortStr || 50052);
-        const live = await probeTcpPort(rHost, rPort, 800);
-        if (live) verifiedRpcs.push(target);
+        const probe = await probeRpcHandshake(rHost, rPort, 800);
+        if (probe.ok) {
+          verifiedRpcs.push(target);
+        } else {
+          // If handshake fails, prune worker from registeredWorkers
+          for (const [wId, wRec] of registeredWorkers.entries()) {
+            if (wRec.ip === rHost && wRec.rpcPort === rPort) {
+              registeredWorkers.delete(wId);
+            }
+          }
+        }
       }
       if (verifiedRpcs.length === 0) {
         const tsIdx = finalCliArgs.indexOf('--tensor-split');
@@ -919,12 +958,16 @@ export async function createApp() {
       });
       const fbReady = await waitForServerHealth('http://127.0.0.1:8080', loadWaitMs, fallbackChild);
       if (fbReady) {
+        // Fallback runs directly on Master without remote RPC.
+        // Remove failed RPC workers from registeredWorkers so the UI snapshot
+        // immediately reflects that Master is executing 100% of the layers.
+        registeredWorkers.clear();
         spawnedLlamaChild = fallbackChild;
         upstreamBaseUrl = 'http://127.0.0.1:8080';
         engineStatus.running = true;
         engineStatus.upstreamUrl = upstreamBaseUrl;
         engineStatus.serverType = 'llama-server';
-        const msg = `Live llama-server running on Master http://127.0.0.1:8080 (${path.basename(modelLocalPath)})`;
+        const msg = `Live stock llama-server running on Master http://127.0.0.1:8080 (${path.basename(modelLocalPath)})`;
         return { ok: true, spawned: true, message: msg };
       }
       if (fallbackChild.exitCode === null) {

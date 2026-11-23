@@ -62,7 +62,9 @@ export const LiveClusterGraph: React.FC<LiveClusterGraphProps> = ({
   onOpenPairHelp,
 }) => {
   const master = plan.nodes.find((n) => n.role === 'Master') ?? plan.nodes[0];
-  const rawWorkers = plan.nodes.filter((n) => n.role === 'Worker');
+  const rawWorkers = plan.nodes.filter(
+    (n) => n.role === 'Worker' && n.isConnected && (n.allocatedLayers ?? 0) > 0
+  );
   
   // Strict deduplication so duplicate aliases for the same physical device never display in the graph
   const workers: PlannedStarNode[] = [];

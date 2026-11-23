@@ -123,7 +123,9 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
     return exists ? list : [activeModel, ...list];
   }, [availableModels, activeModel]);
 
-  const rawWorkers = plan.nodes.filter((n) => n.role === 'Worker' && n.isConnected);
+  const rawWorkers = plan.nodes.filter(
+    (n) => n.role === 'Worker' && n.isConnected && (n.allocatedLayers ?? 0) > 0
+  );
   const liveWorkers = useMemo(() => {
     const deduped: PlannedStarNode[] = [];
     for (const w of rawWorkers) {
