@@ -53,10 +53,14 @@ export function scoreClusterNode(node: StarClusterNode, emaMultiplier = 1.0): nu
     node.linkType === 'Local'
       ? 1.4
       : node.linkType === 'USB-C Tunnel' || node.linkType === 'USB RNDIS'
-        ? 1.15
+        ? 1.18
         : node.linkType === 'Ethernet 2.5G'
-          ? 1.12
-          : 0.86;
+          ? 1.14
+          : node.linkType === 'Wi-Fi Direct P2P'
+            ? 1.04
+            : node.linkType === 'Wi-Fi LAN'
+              ? 0.88
+              : 0.82; // WebGPU Browser
   const num =
     (0.7 * node.memBwGbps + 10.0 * node.computeTflops) * vramBonus * linkBonus * emaMultiplier;
   const den = 1.0 + 0.15 * Math.max(0.1, node.rttMs) + 2.0 * node.pktLossPct;
@@ -257,21 +261,29 @@ export function buildStarClusterNodes(
       if (!isDup) dedupedDevices.push(dev);
     }
     const verifiedWorkers: StarClusterNode[] = dedupedDevices.map((dev) => {
-        const osType =
+        const osType: StarClusterNode['osType'] =
           dev.platform === 'Android'
             ? 'android'
             : dev.platform === 'Windows'
               ? 'windows'
               : dev.platform === 'Edge ARM'
                 ? 'edge-arm'
-                : 'linux';
-        const linkType = dev.transport.toLowerCase().includes('rndis')
-          ? 'USB RNDIS'
-          : dev.transport.toLowerCase().includes('usb')
-            ? 'USB-C Tunnel'
-            : dev.transport.toLowerCase().includes('eth')
-              ? 'Ethernet 2.5G'
-              : 'Wi-Fi LAN';
+                : dev.platform === 'WebGPU'
+                  ? 'webgpu'
+                  : 'linux';
+        const lowT = dev.transport.toLowerCase();
+        const linkType: StarClusterNode['linkType'] =
+          dev.platform === 'WebGPU' || lowT.includes('webgpu')
+            ? 'WebGPU Browser'
+            : lowT.includes('p2p') || lowT.includes('direct')
+              ? 'Wi-Fi Direct P2P'
+              : lowT.includes('rndis')
+                ? 'USB RNDIS'
+                : lowT.includes('usb')
+                  ? 'USB-C Tunnel'
+                  : lowT.includes('eth')
+                    ? 'Ethernet 2.5G'
+                    : 'Wi-Fi LAN';
 
         return {
           nodeId: dev.id,
@@ -282,37 +294,64 @@ export function buildStarClusterNodes(
               ? 'Android'
               : dev.platform === 'Edge ARM'
                 ? 'Edge ARM'
-                : 'Desktop',
+                : dev.platform === 'WebGPU'
+                  ? 'WebGPU'
+                  : 'Desktop',
           osType,
           ip: dev.ip || (linkType === 'USB-C Tunnel' ? '127.0.0.1' : '192.168.1.20'),
           rpcPort: dev.rpcPort || 50052,
           backendDriver:
             dev.platform === 'Android'
               ? 'ARM NEON / Vulkan'
-              : dev.vramMb && dev.vramMb > 0
-                ? 'CUDA / Vulkan'
-                : 'CPU OpenBLAS',
+              : dev.platform === 'WebGPU'
+                ? 'WebGPU WGSL Compute'
+                : dev.vramMb && dev.vramMb > 0
+                  ? 'CUDA / Vulkan'
+                  : 'CPU OpenBLAS',
           linkType,
           safeRamMb: dev.safeCapMb,
           totalRamMb: dev.totalRamMb ?? dev.safeCapMb * 2,
           availableRamMb: dev.availableRamMb ?? dev.safeCapMb,
           vramFreeMb: dev.vramMb ?? 0,
           vramTotalMb: dev.vramMb ?? 0,
-          memBwGbps: dev.vramMb && dev.vramMb > 0 ? 180.0 : dev.platform === 'Android' ? 28.0 : 42.0,
-          computeTflops: dev.computeTflops ?? (dev.platform === 'Android' ? 1.8 : 4.2),
+          memBwGbps:
+            dev.vramMb && dev.vramMb > 0
+              ? 180.0
+              : dev.platform === 'WebGPU'
+                ? 96.0
+                : dev.platform === 'Android'
+                  ? 28.0
+                  : 42.0,
+          computeTflops:
+            dev.computeTflops ??
+            (dev.platform === 'Android' ? 1.8 : dev.platform === 'WebGPU' ? 3.6 : 4.2),
           physicalCores: dev.bigCores ?? 4,
-          rttMs: dev.rttMs ?? (linkType === 'USB-C Tunnel' ? 0.9 : 4.5),
+          rttMs:
+            dev.rttMs ??
+            (linkType === 'USB-C Tunnel'
+              ? 0.9
+              : linkType === 'Wi-Fi Direct P2P'
+                ? 3.5
+                : linkType === 'WebGPU Browser'
+                  ? 8.5
+                  : 4.5),
           pktLossPct: dev.pktLossPct ?? 0,
-          bandwidthMbps: dev.bandwidthMbps ?? (linkType === 'USB-C Tunnel' ? 480 : 240),
+          bandwidthMbps:
+            dev.bandwidthMbps ??
+            (linkType === 'USB-C Tunnel' ? 480 : linkType === 'Wi-Fi Direct P2P' ? 866 : 240),
           tempC: Math.max(25, (dev.tempC ?? 34.0) + simulatedTempOffsetC),
           cpuUsagePct: dev.cpuUsagePct ?? 12,
           gpuUsagePct: dev.gpuUsagePct ?? 0,
           handshakeVerified: true,
+          rpcNativeReady: dev.rpcNativeReady,
           heartbeatAgeS: dev.lastHeartbeatMs
             ? Math.max(0, Math.round((Date.now() - dev.lastHeartbeatMs) / 1000))
             : 0,
           isConnected: true,
-          statusNote: `Verified RPC v9 · ${dev.safeCapMb} MB safe cap`,
+          statusNote:
+            dev.platform === 'WebGPU'
+              ? `WebGPU Browser Worker · ${dev.safeCapMb} MB VRAM shard`
+              : `Verified RPC v9 · ${dev.safeCapMb} MB safe cap`,
         };
       });
 
@@ -440,12 +479,20 @@ export function planStarCluster(
         Boolean(learned?.learnedKvOffload);
 
   const evaluated: PlannedStarNode[] = rawNodes.map((n) => {
+    const strictAndroidCap = computeAndroidSafeCap(
+      n.totalRamMb,
+      n.availableRamMb,
+      n.totalRamMb <= 2048 ? 40 : 50,
+      n.totalRamMb <= 2048 ? 256 : 512
+    );
     const safeRamMb =
       n.platform === 'Android'
-        ? (n.safeRamMb && n.safeRamMb > 256
-            ? Math.min(n.safeRamMb, Math.floor(n.totalRamMb * 0.5))
-            : computeAndroidSafeCap(n.totalRamMb, n.availableRamMb))
-        : computeDesktopSafeCap(n.availableRamMb, n.platform === 'Edge ARM' ? 512 : 1024);
+        ? n.safeRamMb && n.safeRamMb > 256
+          ? Math.min(n.safeRamMb, strictAndroidCap)
+          : strictAndroidCap
+        : n.platform === 'WebGPU'
+          ? Math.max(256, Math.min(8192, n.safeRamMb ?? Math.floor(n.availableRamMb * 0.75)))
+          : computeDesktopSafeCap(n.availableRamMb, n.platform === 'Edge ARM' ? 512 : 1024);
     const safeVramMb = computeVramSafeCap(n.vramFreeMb, n.osType === 'windows');
     const thermalStatus = evaluateNodeThermal(n, limits);
     const baseCap = safeRamMb + safeVramMb;
@@ -503,6 +550,13 @@ export function planStarCluster(
   const active: PlannedStarNode[] = [];
   for (const node of evaluated) {
     if (node.role !== 'Master') {
+      if (node.rpcNativeReady === false) {
+        node.pruned = true;
+        node.pruneReason =
+          'Handshake-only listener (install native llama.cpp rpc-server -c to offload layers)';
+        node.statusNote = node.pruneReason;
+        continue;
+      }
       if (node.effectiveCapMb < 256 || node.thermalStatus.state === 'EMERGENCY_OFFLOAD') {
         node.pruned = true;
         node.pruneReason =

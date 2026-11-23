@@ -207,8 +207,14 @@ class RpcService : Service(), ComponentCallbacks2 {
                     state.calibration.recommendedThreads.coerceIn(1, max(1, state.totalCoreCount))
                 }
                 val total = if (state.totalRamMb > 0L) state.totalRamMb else 4096L
-                // Physical RAM allocation: slider directly governs percentage of physical RAM up to 50%
-                val boundedRam = max(256L, (total * pct) / 100L)
+                val reserveMb = if (total <= 2048L) 256L else 512L
+                val physicalCeiling = max(256L, (total * pct) / 100L)
+                // Strict Zero-OOM invariant: AllocatedMemory <= min(0.50 * TotalRAM, AvailableRAM - 512MB)
+                val boundedRam = if (state.availableRamMb > 0L) {
+                    min(physicalCeiling, max(256L, state.availableRamMb - reserveMb))
+                } else {
+                    physicalCeiling
+                }
                 val layers = (boundedRam / 110L).toInt().coerceIn(2, 28)
                 state.copy(
                     threadOverride = if (threads > 0) boundedThreads else 0,
@@ -649,7 +655,7 @@ class RpcService : Service(), ComponentCallbacks2 {
                     nativeProcess = null
                 }
             } else {
-                appendLog("Embedded GGUF/v1.0.0 RPC v9 responder bound to $hostIp:50052 (SafeCap=${snap.safeCapMb}MB)")
+                appendLog("Native librpc_server_exec.so not packaged in APK — running embedded GGUF/v1.0.0 handshake responder on $hostIp:50052 (install native rpc-server -c to offload layers)")
             }
 
             _telemetry.update {
@@ -1116,6 +1122,9 @@ class RpcService : Service(), ComponentCallbacks2 {
                     detectLocalLanIpv4(host)
                 }
                 val curTel = _telemetry.value
+                val isNativeRpcRunning = nativeProcess != null && runCatching {
+                    nativeProcess?.isAlive == true
+                }.getOrDefault(false)
                 val jsonPayload = org.json.JSONObject().apply {
                     put("id", buildDeviceWorkerId())
                     put("label", "${curTel.deviceModel.trim()} (Android)")
@@ -1132,15 +1141,18 @@ class RpcService : Service(), ComponentCallbacks2 {
                     put("computeTflops", if (curTel.hasDotProd) 2.2 else 1.4)
                     put("memBwGbps", 25.6)
                     put("linkType", if (isUsb || advertiseIp == "127.0.0.1") "USB-C Tunnel" else "Wi-Fi LAN")
+                    put("nativeRpcReady", isNativeRpcRunning)
                     put("allowHttpRegistration", true)
                 }.toString()
 
-                val targetUrls = listOf(
-                    "http://$host:$httpPort/api/cluster/nodes/register",
-                    "http://$host:$httpPort/api/nodes/add",
-                    "http://127.0.0.1:3000/api/cluster/nodes/register",
-                    "http://127.0.0.1:3000/api/nodes/add"
-                ).distinct()
+                val targetUrls = if (isUsb || host == "127.0.0.1") {
+                    listOf("http://127.0.0.1:3000/api/cluster/nodes/register")
+                } else {
+                    listOf(
+                        "http://$host:$httpPort/api/cluster/nodes/register",
+                        "http://127.0.0.1:3000/api/cluster/nodes/register"
+                    ).distinct()
+                }
 
                 for (u in targetUrls) {
                     val ok = runCatching {
@@ -1334,7 +1346,10 @@ object HardwareProbe {
         val availMb = (memAvailKb / 1024L).coerceAtLeast(256L)
         // Legacy / <= 2 GB RAM devices get an extra-conservative 40% cap; all others strictly <= 50%
         val physicalCapRatio = if (totalMb <= 2048L) 0.40 else 0.50
-        val safeCapMb = (totalMb * physicalCapRatio).toLong()
+        val reserveMb = if (totalMb <= 2048L) 256L else 512L
+        val physicalLimitMb = (totalMb * physicalCapRatio).toLong()
+        val availMinusReserveMb = max(256L, availMb - reserveMb)
+        val safeCapMb = min(physicalLimitMb, availMinusReserveMb)
 
         return MemInfoResult(
             totalMb = totalMb,

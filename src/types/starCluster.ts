@@ -11,7 +11,7 @@ export type SpeculativeMode = 'off' | 'native_mtp' | 'prompt_lookup' | 'external
 export interface ConnectedDeviceInfo {
   id: string;
   model: string;
-  platform: 'Android' | 'Linux' | 'Windows' | 'Edge ARM' | 'Other';
+  platform: 'Android' | 'Linux' | 'Windows' | 'Edge ARM' | 'WebGPU' | 'Other';
   transport: string;
   safeCapMb: number;
   totalRamMb?: number;
@@ -29,6 +29,7 @@ export interface ConnectedDeviceInfo {
   rpcPort?: number;
   lastHeartbeatMs?: number;
   handshakeVerified?: boolean;
+  rpcNativeReady?: boolean;
   isOnline?: boolean;
   isWorkerRunning?: boolean;
   workerStatus?: 'Running' | 'Not Installed' | 'Stopped' | 'Offline';
@@ -39,7 +40,7 @@ export interface NodeNetworkAudit {
   label: string;
   role: 'Master' | 'Worker';
   ip: string;
-  linkType: 'Local' | 'USB-C Tunnel' | 'USB RNDIS' | 'Ethernet 2.5G' | 'Wi-Fi LAN';
+  linkType: 'Local' | 'USB-C Tunnel' | 'USB RNDIS' | 'Ethernet 2.5G' | 'Wi-Fi Direct P2P' | 'Wi-Fi LAN' | 'WebGPU Browser';
   rttMs: number;
   bandwidthMbps: number;
   packetLossPct: number;
@@ -294,22 +295,24 @@ export interface ThermalStatus {
   cooldownRemainingS: number;
 }
 
-export type NodeOsType = 'windows' | 'linux' | 'android' | 'edge-arm';
+export type NodeOsType = 'windows' | 'linux' | 'android' | 'edge-arm' | 'webgpu';
 
 export interface StarClusterNode {
   nodeId: string;
   label: string;
   role: 'Master' | 'Worker';
-  platform: 'Desktop' | 'Android' | 'Edge ARM';
+  platform: 'Desktop' | 'Android' | 'Edge ARM' | 'WebGPU';
   osType: NodeOsType;
   ip: string;
   rpcPort?: number;
   backendDriver: string;
-  linkType: 'Local' | 'USB-C Tunnel' | 'USB RNDIS' | 'Ethernet 2.5G' | 'Wi-Fi LAN';
+  linkType: 'Local' | 'USB-C Tunnel' | 'USB RNDIS' | 'Ethernet 2.5G' | 'Wi-Fi Direct P2P' | 'Wi-Fi LAN' | 'WebGPU Browser';
   totalRamMb: number;
   availableRamMb: number;
+  safeRamMb?: number;
   vramFreeMb: number;
   vramTotalMb?: number;
+  batteryDischargePctPerHr?: number;
   memBwGbps: number;
   computeTflops: number;
   physicalCores: number;
@@ -320,6 +323,7 @@ export interface StarClusterNode {
   cpuUsagePct?: number;
   gpuUsagePct?: number;
   handshakeVerified?: boolean;
+  rpcNativeReady?: boolean;
   heartbeatAgeS?: number;
   isConnected: boolean;
   statusNote?: string;
@@ -403,6 +407,7 @@ export interface BackendTuningConfig {
   ubatchSize?: number;
   enableJinja?: boolean;
   mmprojPath?: string;
+  binaryPath?: string;
 }
 
 export interface TunedOsBackendProfile {
@@ -462,6 +467,8 @@ export interface EngineRuntimeStatus {
   hasMmproj: boolean;
   mmprojPath: string | null;
   lastEvent: string;
+  lastError?: string | null;
+  detectedLlamaBin?: string | null;
   reloadProgressPct: number;
 }
 
@@ -489,3 +496,73 @@ export interface RuntimeClusterSnapshot {
   learnedProfile?: LearnedEmaProfile | null;
   updatedAt: string;
 }
+
+export interface NodeBenchmarkEntry {
+  nodeId: string;
+  label: string;
+  role: 'Master' | 'Worker';
+  platform: string;
+  transport: string;
+  rttMs: number;
+  layersAssigned: number;
+  layerRange: string;
+  allocatedMb: number;
+  safeCapMb: number;
+  promptEvalTokPerSec: number;
+  generationTokPerSec: number;
+  ttftMs: number;
+  bandwidthGbps: number;
+  status: 'Measured Live' | 'Hardware Micro-Bench' | 'Pruned';
+}
+
+export interface ClusterBenchmarkResult {
+  id: string;
+  timestamp: string;
+  modelId: string;
+  modelName: string;
+  quant: string;
+  architecture: GgufArchitecture;
+  mode: 'live_engine' | 'hardware_microbench';
+  promptTokens: number;
+  generatedTokens: number;
+  durationMs: number;
+  ttftMs: number;
+  clusterPromptTokPerSec: number;
+  clusterGenTokPerSec: number;
+  speculativeSpeedup: number;
+  speculativeDraftK: number;
+  speculativeAcceptanceRate: number;
+  activeNodesCount: number;
+  nodes: NodeBenchmarkEntry[];
+  note: string;
+}
+
+export interface DiagnosticCheckItem {
+  id: string;
+  index: number;
+  name: string;
+  status: 'pass' | 'warn' | 'fail';
+  summary: string;
+  detail: string;
+  remediation?: string;
+}
+
+export interface DiagnosticSentinelReport {
+  timestamp: string;
+  overallStatus: 'healthy' | 'degraded' | 'critical';
+  passedCount: number;
+  totalChecks: number;
+  checks: DiagnosticCheckItem[];
+}
+
+export interface WifiDirectQrPayload {
+  version: 'SILICA_P2P_V1';
+  ssid: string;
+  passphrase: string;
+  endpoint: string;
+  authHashHex: string;
+  crc8Hex: string;
+  rawPayload: string;
+  matrix21x21: boolean[][];
+}
+

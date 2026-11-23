@@ -407,4 +407,208 @@ describe('Silica Cluster Server & Systems Verification', () => {
     assert.equal(updated.learnedKvOffload, true);
     assert.equal(updated.recommendedBatch, 512);
   });
+
+  it('deduplicates same physical Android phone across USB (127.0.0.1) and secondary IP (127.0.10.3)', async () => {
+    const reg1 = await fetch(`${baseUrl}/api/cluster/nodes/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: 'android-xiaomi-redmi-note-7-pro',
+        label: 'Xiaomi Redmi Note 7 Pro (Android)',
+        platform: 'Android',
+        ip: '127.0.0.1',
+        rpcPort: 50052,
+        linkType: 'USB-C Tunnel',
+        totalRamMb: 4096,
+        availableRamMb: 1900,
+        nativeRpcReady: true,
+      }),
+    });
+    assert.equal(reg1.status, 200);
+
+    const reg2 = await fetch(`${baseUrl}/api/cluster/nodes/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: 'android-redmi-note-7-pro-lan',
+        label: 'Redmi Note 7 Pro',
+        platform: 'Android',
+        ip: '127.0.10.3',
+        rpcPort: 50052,
+        linkType: 'Wi-Fi LAN',
+        totalRamMb: 4096,
+        availableRamMb: 1900,
+        nativeRpcReady: true,
+      }),
+    });
+    assert.equal(reg2.status, 200);
+    const body2 = (await reg2.json()) as {
+      ok: boolean;
+      deduplicated?: boolean;
+      snapshot: {
+        plan: {
+          nodes: Array<{ role: string; ip: string; nodeId: string }>;
+          cliArgs: string[];
+        };
+      };
+    };
+    assert.equal(body2.deduplicated, true);
+    const workers = body2.snapshot.plan.nodes.filter((n) => n.role === 'Worker');
+    assert.equal(workers.length, 1, 'Same phone must be deduplicated to exactly 1 worker');
+    assert.equal(workers[0].ip, '127.0.0.1', 'Must prefer USB-C Tunnel loopback IP');
+
+    await fetch(`${baseUrl}/api/cluster/nodes/unregister`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'android-xiaomi-redmi-note-7-pro' }),
+    });
+  });
+
+  it('auto-creates --slot-save-path, passes --rpc & --tensor-split to real llama-server, and reports real stderr on RPC crash', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'silica-spawn-'));
+    try {
+      const modelPath = path.join(tmpDir, 'test-local-7b-q4_k_m.gguf');
+      const slotDir = path.join(tmpDir, 'nested', 'kv-cache-dir');
+      const argsLog = path.join(tmpDir, 'spawned-args.json');
+      const hdr = buildSyntheticGgufHeader({
+        arch: 'qwen2',
+        name: 'Test-Local-7B',
+        blocks: 32,
+        tokens: ['<bos>', 'hi'],
+      });
+      fs.writeFileSync(modelPath, hdr);
+
+      // Register a native RPC worker so --rpc and --tensor-split are emitted
+      await fetch(`${baseUrl}/api/cluster/nodes/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: 'linux-rpc-worker',
+          label: 'Linux RPC Worker',
+          platform: 'Linux',
+          ip: '127.0.0.1',
+          rpcPort: 50052,
+          linkType: 'USB-C Tunnel',
+          totalRamMb: 8192,
+          availableRamMb: 6000,
+          nativeRpcReady: true,
+        }),
+      });
+
+      const inspectRes = await fetch(`${baseUrl}/api/models/inspect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: modelPath }),
+      });
+      const { model } = (await inspectRes.json()) as { model: Record<string, unknown> };
+
+      // 1. Missing binary must honestly fail with HTTP 400 (never silently claim ok: true)
+      const missingBinRes = await fetch(`${baseUrl}/api/engine/reload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          spawnLocalBinary: true,
+          binaryPath: path.join(tmpDir, 'does-not-exist-llama-server'),
+        }),
+      });
+      assert.equal(missingBinRes.status, 400);
+      const missingJson = (await missingBinRes.json()) as { ok: boolean; error: string };
+      assert.equal(missingJson.ok, false);
+      assert.ok(missingJson.error.includes('not found'));
+
+      // 2. Failing llama-server (e.g. RPC rejected) must return HTTP 500 with stderr + RPC hint
+      const failBin = path.join(tmpDir, 'mock-llama-fail.sh');
+      fs.writeFileSync(
+        failBin,
+        `#!/bin/sh\necho "ggml_backend_rpc: connection refused on 127.0.0.1:50052" >&2\nexit 1\n`,
+        { mode: 0o755 }
+      );
+      const failRes = await fetch(`${baseUrl}/api/engine/reload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          tuningConfig: { slotSavePath: slotDir },
+          spawnLocalBinary: true,
+          binaryPath: failBin,
+        }),
+      });
+      assert.equal(failRes.status, 500);
+      const failJson = (await failRes.json()) as {
+        ok: boolean;
+        spawned: boolean;
+        error: string;
+        snapshot: { engineStatus: { running: boolean } };
+      };
+      assert.equal(failJson.ok, false);
+      assert.equal(failJson.spawned, false);
+      assert.equal(failJson.snapshot.engineStatus.running, false);
+      assert.ok(failJson.error.includes('ggml_backend_rpc'));
+      assert.ok(failJson.error.includes('rpc-server -c'));
+      // Verify --slot-save-path directory was automatically created before spawning
+      assert.equal(fs.existsSync(slotDir), true);
+
+      // 3. Healthy mock llama-server script responds 200 on /health and records its CLI args
+      const okBin = path.join(tmpDir, 'mock-llama-ok.mjs');
+      fs.writeFileSync(
+        okBin,
+        `#!${process.execPath}\n` +
+          `import http from 'node:http';\n` +
+          `import fs from 'node:fs';\n` +
+          `const args = process.argv.slice(2);\n` +
+          `fs.writeFileSync(${JSON.stringify(argsLog)}, JSON.stringify(args));\n` +
+          `const pIdx = args.indexOf('--port');\n` +
+          `const port = pIdx !== -1 ? Number(args[pIdx + 1]) : 8080;\n` +
+          `const srv = http.createServer((req, res) => {\n` +
+          `  if (req.url === '/health') { res.writeHead(200); res.end('{"status":"ok"}'); return; }\n` +
+          `  res.writeHead(404); res.end();\n` +
+          `});\n` +
+          `srv.listen(port, '127.0.0.1');\n` +
+          `process.on('SIGTERM', () => { srv.close(() => process.exit(0)); });\n`,
+        { mode: 0o755 }
+      );
+
+      const okRes = await fetch(`${baseUrl}/api/engine/reload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          tuningConfig: { slotSavePath: slotDir },
+          spawnLocalBinary: true,
+          binaryPath: okBin,
+        }),
+      });
+      assert.equal(okRes.status, 200);
+      const okJson = (await okRes.json()) as {
+        ok: boolean;
+        spawned: boolean;
+        message: string;
+        snapshot: { engineStatus: { running: boolean } };
+      };
+      assert.equal(okJson.ok, true);
+      assert.equal(okJson.spawned, true);
+      assert.equal(okJson.snapshot.engineStatus.running, true);
+      assert.ok(okJson.message.includes('127.0.0.1:50052'));
+
+      const recordedArgs = JSON.parse(fs.readFileSync(argsLog, 'utf8')) as string[];
+      assert.ok(recordedArgs.includes('--rpc'));
+      assert.ok(recordedArgs.includes('127.0.0.1:50052'));
+      assert.ok(recordedArgs.includes('--tensor-split'));
+
+      // Cleanly terminate spawned child and unregister test worker
+      await fetch(`${baseUrl}/api/engine/reload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ spawnLocalBinary: false }),
+      });
+      await fetch(`${baseUrl}/api/cluster/nodes/unregister`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: 'linux-rpc-worker' }),
+      });
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

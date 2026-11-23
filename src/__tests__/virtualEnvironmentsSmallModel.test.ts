@@ -12,6 +12,7 @@ import {
   validateStockLlamaFlags,
 } from '../domain/backendTuner.ts';
 import { createInitialTelemetryState } from '../service/nodeClusterService.ts';
+import { parseLocalGgufModel } from '../data/localModelsScanner.ts';
 
 describe('Data-Driven Auto-Planner Hard Mathematical Invariants', () => {
   const smallModel = GGUF_MODEL_PRESETS.find((m) => m.id === 'small-1.5b')!;
@@ -175,5 +176,121 @@ describe('Data-Driven Auto-Planner Hard Mathematical Invariants', () => {
       createDefaultBackendTuningConfig(smallModel)
     );
     assert.ok(profile.scriptContent.includes('Silica Cluster Linux Tuned Backend'));
+  });
+
+  it('produces strictly contiguous non-overlapping layer spans for 64-layer 27B dense models under tight memory', () => {
+    const dense27b = {
+      ...GGUF_MODEL_PRESETS.find((m) => m.id === 'dense-32b')!,
+      id: 'local-qwen3-5-27b-iq2',
+      name: 'Qwen3.5-27B GSQ-RCO',
+      quant: 'IQ2_MIX',
+      architecture: 'Dense' as const,
+      sizeMb: 10500,
+      layers: 64,
+      totalParamsB: 27,
+      activeParamsB: 27,
+      contextLengthDefault: 8192 as const,
+      isLocal: true,
+      localPath: '/tmp/Qwen3.5-27B-IQ2.gguf',
+    };
+
+    const worker1: StarClusterNode = {
+      ...androidUsb,
+      nodeId: 'android-usb-1',
+      label: 'Xiaomi Redmi Note 7 Pro (Android)',
+      ip: '127.0.0.1',
+      totalRamMb: 4096,
+      availableRamMb: 1600,
+      rpcNativeReady: true,
+    };
+    const worker2: StarClusterNode = {
+      ...androidUsb,
+      nodeId: 'linux-worker-2',
+      label: 'Linux Edge Worker',
+      platform: 'Desktop',
+      osType: 'linux',
+      ip: '192.168.1.25',
+      linkType: 'Ethernet 2.5G',
+      totalRamMb: 4096,
+      availableRamMb: 2048,
+      rttMs: 1.2,
+      rpcNativeReady: true,
+    };
+
+    const plan = planStarCluster([master4Gb, worker1, worker2], dense27b);
+    const active = plan.nodes.filter((n) => n.allocatedLayers > 0 && !n.pruned);
+    assert.ok(active.length >= 2, 'Expected Master + workers to receive layers');
+
+    // Strictly contiguous non-overlapping spans covering 0..63
+    assert.equal(active[0].layerStart, 0);
+    for (let i = 1; i < active.length; i++) {
+      assert.equal(
+        active[i].layerStart,
+        active[i - 1].layerEnd + 1,
+        `Overlap/gap between ${active[i - 1].nodeId} (L${active[i - 1].layerStart}..L${active[i - 1].layerEnd}) and ${active[i].nodeId} (L${active[i].layerStart}..L${active[i].layerEnd})`
+      );
+    }
+    assert.equal(active[active.length - 1].layerEnd, 63);
+    const totalAssigned = active.reduce((sum, n) => sum + n.allocatedLayers, 0);
+    assert.equal(totalAssigned, 64);
+
+    // Zero OOM still holds on every node
+    for (const node of plan.nodes) {
+      assert.ok(node.allocatedMb <= node.safeRamMb + node.safeVramMb);
+    }
+  });
+
+  it('prunes handshake-only Android workers without native rpc-server and caps 27B dense default context to 8192', () => {
+    const handshakeOnlyPhone: StarClusterNode = {
+      ...androidUsb,
+      nodeId: 'android-handshake-only',
+      rpcNativeReady: false,
+    };
+    const plan = planStarCluster([master4Gb, handshakeOnlyPhone], smallModel);
+    const phone = plan.nodes.find((n) => n.nodeId === 'android-handshake-only')!;
+    assert.equal(phone.pruned, true);
+    assert.equal(phone.allocatedLayers, 0);
+    assert.ok(!plan.cliArgs.includes('--rpc'), 'Handshake-only worker must not be passed to --rpc');
+
+    // Build minimal synthetic GGUF header with 131,072 context length & 64 layers
+    const parts: Buffer[] = [];
+    const u32 = (v: number) => {
+      const b = Buffer.alloc(4);
+      b.writeUInt32LE(v, 0);
+      parts.push(b);
+    };
+    const u64 = (v: number) => {
+      const b = Buffer.alloc(8);
+      b.writeBigUInt64LE(BigInt(v), 0);
+      parts.push(b);
+    };
+    const str = (s: string) => {
+      const b = Buffer.from(s, 'utf8');
+      u64(b.length);
+      parts.push(b);
+    };
+    parts.push(Buffer.from('GGUF', 'ascii'));
+    u32(3);
+    u64(0);
+    u64(3);
+    str('general.architecture');
+    u32(8);
+    str('qwen2');
+    str('qwen2.block_count');
+    u32(4);
+    u32(64);
+    str('qwen2.context_length');
+    u32(4);
+    u32(131072);
+    const hdr = Buffer.concat(parts);
+
+    const parsed = parseLocalGgufModel(
+      '/models/Qwen3.5-27B-IQ2_MIX.gguf',
+      10 * 1024 * 1024 * 1024,
+      new Uint8Array(hdr)
+    );
+    assert.equal(parsed.layers, 64);
+    assert.equal(parsed.maxContextLength, 131072);
+    assert.equal(parsed.contextLengthDefault, 8192);
   });
 });

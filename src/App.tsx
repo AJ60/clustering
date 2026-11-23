@@ -29,6 +29,7 @@ import { ApiHarnessConnectPage } from './components/ApiHarnessConnectPage';
 import { FloatingResourceHud } from './components/FloatingResourceHud';
 import { ModelLoadConfigDrawer } from './components/ModelLoadConfigDrawer';
 import { SettingsMenuDialog } from './components/SettingsMenuDialog';
+import { JoinWorkerPage } from './components/JoinWorkerPage';
 
 type NavTab = 'cluster' | 'models' | 'chat' | 'connect';
 
@@ -59,12 +60,23 @@ function readInitialShowOnboarding(): boolean {
 }
 
 export function App() {
+  const [pathname, setPathname] = useState<string>(() =>
+    typeof window !== 'undefined' ? window.location.pathname : '/'
+  );
   const [activeTab, setActiveTab] = useState<NavTab>('cluster');
   const [isDarkTheme, setIsDarkTheme] = useState<boolean>(readInitialDarkTheme);
   const [showOnboarding, setShowOnboarding] = useState<boolean>(readInitialShowOnboarding);
   const [hudOpen, setHudOpen] = useState<boolean>(false);
   const [loadConfigOpen, setLoadConfigOpen] = useState<boolean>(false);
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
+
+  useEffect(() => {
+    const onPopState = () => {
+      setPathname(window.location.pathname);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   const [activeModel, setActiveModel] = useState<GgufModelPreset>(GGUF_MODEL_PRESETS[0]);
   const [availableModels, setAvailableModels] = useState<GgufModelPreset[]>(GGUF_MODEL_PRESETS);
@@ -191,6 +203,7 @@ export function App() {
             model: activeModel,
             tuningConfig,
             spawnLocalBinary,
+            binaryPath: tuningConfig.binaryPath?.trim() || undefined,
           }),
         });
         const data = (await res.json()) as {
@@ -327,6 +340,18 @@ export function App() {
   }, [plan.nodes]);
   const liveWorkerCount = uniqueLiveWorkers.length;
 
+  if (pathname === '/join' || pathname.startsWith('/join/')) {
+    return (
+      <JoinWorkerPage
+        onBackToDashboard={() => {
+          window.history.pushState({}, '', '/');
+          setPathname('/');
+          refreshHardware();
+        }}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#F8FAFC] dark:bg-[#0B0F17] text-slate-900 dark:text-slate-100 transition-colors flex flex-col">
       {/* Strict 3-Zone Header Bar */}
@@ -443,6 +468,7 @@ export function App() {
           <ModelsHubPage
             activeModel={activeModel}
             plan={plan}
+            engineStatus={engineStatus}
             onActivateModel={handleSelectModel}
             onOpenLoadConfig={() => setLoadConfigOpen(true)}
           />
@@ -481,6 +507,7 @@ export function App() {
         model={activeModel}
         config={tuningConfig}
         plan={plan}
+        engineStatus={engineStatus}
         onUpdateConfig={handleUpdateConfig}
         onApplyAndReload={handleApplyAndReload}
         onResetDefaults={handleResetDefaults}

@@ -496,17 +496,19 @@ export function parseLocalGgufModel(
 
   const id = `local-${filename.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
   const maxContextLength = detectedCtx || (totalParamsB <= 2 ? 32768 : 131072);
-  let contextLengthDefault: ContextLengthOption = 16384;
-  if (detectedCtx) {
-    if (detectedCtx >= 131072) contextLengthDefault = 131072;
-    else if (detectedCtx >= 65536) contextLengthDefault = 65536;
-    else if (detectedCtx >= 32768) contextLengthDefault = 32768;
-    else if (detectedCtx >= 16384) contextLengthDefault = 16384;
-    else if (detectedCtx >= 8192) contextLengthDefault = 8192;
-    else contextLengthDefault = 4096;
-  } else if (totalParamsB <= 2) {
-    contextLengthDefault = 8192;
-  }
+  // Keep auto-default context length OOM-safe (users can still raise -c up to maxContextLength in Load Config).
+  // For example, a 64-layer 27B dense model at 131,072 ctx needs ~14 GB for KV cache alone.
+  const practicalCap: ContextLengthOption =
+    totalParamsB <= 2
+      ? 8192
+      : architecture === 'Dense' && (totalParamsB >= 20 || layers >= 48)
+        ? 8192
+        : 16384;
+  const boundedCtx = detectedCtx ? Math.min(detectedCtx, practicalCap) : practicalCap;
+  let contextLengthDefault: ContextLengthOption = 8192;
+  if (boundedCtx >= 16384) contextLengthDefault = 16384;
+  else if (boundedCtx >= 8192) contextLengthDefault = 8192;
+  else contextLengthDefault = 4096;
 
   const { masterPinnedOverheadMb, perLayerProfiles } = buildNonUniformLayerProfiles(
     layers,

@@ -1,16 +1,19 @@
 import React, { useState } from 'react';
 import {
+  AlertTriangle,
   CheckCircle2,
   Eye,
   Loader2,
   Play,
   RotateCcw,
   SlidersHorizontal,
+  Terminal,
   X,
 } from 'lucide-react';
 import {
   BackendTuningConfig,
   ContextLengthOption,
+  EngineRuntimeStatus,
   GgufModelPreset,
   KvCacheQuantOption,
   SpeculativeMode,
@@ -22,6 +25,7 @@ interface ModelLoadConfigDrawerProps {
   model: GgufModelPreset;
   config: BackendTuningConfig;
   plan: StarClusterPlan;
+  engineStatus?: EngineRuntimeStatus;
   onUpdateConfig: (patch: Partial<BackendTuningConfig>) => void;
   onApplyAndReload: (spawnLocalBinary: boolean) => Promise<{ ok: boolean; message: string }>;
   onResetDefaults: () => void;
@@ -36,6 +40,7 @@ export const ModelLoadConfigDrawer: React.FC<ModelLoadConfigDrawerProps> = ({
   model,
   config,
   plan,
+  engineStatus,
   onUpdateConfig,
   onApplyAndReload,
   onResetDefaults,
@@ -45,6 +50,11 @@ export const ModelLoadConfigDrawer: React.FC<ModelLoadConfigDrawerProps> = ({
   const [reloadResult, setReloadResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   if (!open) return null;
+
+  const handshakeOnlyWorkers = plan.nodes.filter(
+    (n) => n.role === 'Worker' && n.rpcNativeReady === false
+  );
+  const missingLocalFile = !model.isLocal || !model.localPath;
 
   const handleReload = async () => {
     setReloading(true);
@@ -109,6 +119,54 @@ export const ModelLoadConfigDrawer: React.FC<ModelLoadConfigDrawerProps> = ({
                 <Eye className="w-3.5 h-3.5 shrink-0" />
                 Master-pinned --mmproj: {config.mmprojPath || plan.masterMmprojPath}
               </p>
+            )}
+          </div>
+
+          {/* llama-server Binary Path & Worker Offload Readiness */}
+          <div className="space-y-2.5">
+            <label className="space-y-1.5 block">
+              <span className="font-medium text-slate-700 dark:text-slate-300 flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5">
+                  <Terminal className="w-3.5 h-3.5 text-slate-500" />
+                  llama-server Binary Path
+                </span>
+                <span className="font-mono-num text-[11px] text-slate-500 dark:text-slate-400">
+                  {engineStatus?.detectedLlamaBin ? 'Auto-detected' : 'Not in PATH'}
+                </span>
+              </span>
+              <input
+                type="text"
+                placeholder={
+                  engineStatus?.detectedLlamaBin ||
+                  'Auto (or full path e.g. C:\\llama.cpp\\llama-server.exe)'
+                }
+                value={config.binaryPath ?? ''}
+                onChange={(e) => onUpdateConfig({ binaryPath: e.target.value })}
+                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#111827] px-3 py-2 font-mono-num text-slate-900 dark:text-slate-100"
+              />
+            </label>
+
+            {missingLocalFile && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-amber-800 dark:text-amber-300 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>
+                  This is a catalog preset with no local file path. Use <strong>Browse GGUF</strong>{' '}
+                  to select a local <code className="font-mono-num">.gguf</code> file before loading.
+                </span>
+              </div>
+            )}
+
+            {handshakeOnlyWorkers.length > 0 && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-amber-800 dark:text-amber-300 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>
+                  {handshakeOnlyWorkers.map((w) => w.label).join(', ')} is connected in handshake-only
+                  mode (missing native <code className="font-mono-num">librpc_server_exec.so</code>).
+                  To offload layers to it, bundle native <code className="font-mono-num">rpc-server</code>{' '}
+                  in the APK or run <code className="font-mono-num">rpc-server -H 0.0.0.0 -p 50052 -c</code>{' '}
+                  in Termux.
+                </span>
+              </div>
             )}
           </div>
 
@@ -381,20 +439,27 @@ export const ModelLoadConfigDrawer: React.FC<ModelLoadConfigDrawerProps> = ({
               llama-server {plan.cliArgs.join(' ')}
             </pre>
           </div>
+        </div>
 
-          {reloadResult && (
+        {reloadResult && (
+          <div className="px-5 py-2.5 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0B1120]">
             <div
+              role={reloadResult.ok ? 'status' : 'alert'}
               className={`rounded-lg border p-3 text-xs flex items-start gap-2 ${
                 reloadResult.ok
                   ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300'
                   : 'border-rose-500/40 bg-rose-500/10 text-rose-800 dark:text-rose-300'
               }`}
             >
-              <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>{reloadResult.message}</span>
+              {reloadResult.ok ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              )}
+              <span className="break-words">{reloadResult.message}</span>
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Footer Actions */}
         <div className="px-5 py-3.5 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">

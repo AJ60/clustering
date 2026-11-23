@@ -113,12 +113,14 @@ object NodeAutoCalibrator {
         }
 
         // <= 40% physical RAM on <= 2 GB / low-RAM legacy devices; strictly <= 50% on all devices
+        // AND strictly <= AvailableRAM - 512MB (256MB on <=2GB) to prevent LMKD kills.
         val physicalCapRatio = if (mem.totalMb <= 2048L || legacy.isLowRamDevice) 0.40 else 0.50
         val maxPhysicalCeiling = max(256L, (mem.totalMb * physicalCapRatio).toLong())
+        val zeroOomCap = min(maxPhysicalCeiling, mem.safeCapMb)
         val tunedSafeRamMb = if (isWarmOrLowBattery) {
-            max(256L, (maxPhysicalCeiling * 0.80).toLong())
+            min(zeroOomCap, max(256L, (zeroOomCap * 0.80).toLong()))
         } else {
-            maxPhysicalCeiling
+            zeroOomCap
         }
 
         val tierLabel = when {
