@@ -574,9 +574,9 @@ export function planStarCluster(
     for (const w of workers) {
       // Safe cap constraint: worker can hold at most effectiveCapMb / mbPerLayer
       const maxCapLayers = Math.max(0, Math.floor(w.effectiveCapMb / Math.max(1, mbPerLayer)));
-      // Throughput-proportional share
+      // Throughput-proportional share with an active worker offload minimum (at least 2 layers if capacity fits)
       const scoreShare = w.score / totalScore;
-      const targetLayers = Math.round(totalLayers * scoreShare);
+      const targetLayers = Math.max(2, Math.round(totalLayers * scoreShare));
       const allocated = Math.max(0, Math.min(maxCapLayers, targetLayers));
       workerLayerMap.set(w.nodeId, allocated);
       totalWorkerLayers += allocated;

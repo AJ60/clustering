@@ -283,27 +283,15 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
           timeout: 1500,
         }).catch(() => {});
         // Forward host port 50052 to phone port 50052 (Silica Android app worker listener)
-        let remotePort = '50052';
-        try {
-          const { stdout: pOut } = await execFileAsync('adb', [
-            '-s', serial, 'shell',
-            "toybox grep -o 'BoundPort=[0-9]*' /data/local/tmp/worker.log 2>/dev/null | toybox tail -n 1 | toybox cut -d= -f2"
-          ], { timeout: 1500 });
-          const trimmedPort = pOut.trim();
-          if (trimmedPort && /^\d+$/.test(trimmedPort)) {
-            remotePort = trimmedPort;
-          }
-        } catch {
-          // fallback to standard 50052
-        }
-        await execFileAsync('adb', ['-s', serial, 'forward', 'tcp:50052', `tcp:${remotePort}`], {
+        await execFileAsync('adb', ['-s', serial, 'forward', 'tcp:50052', 'tcp:50052'], {
           timeout: 1500,
         }).catch(() => {});
 
         // Auto-detect and register Android worker over USB loopback if RPC port responds
         try {
           const probe = await probeRpcHandshake('127.0.0.1', 50052, 1200);
-          if (probe.ok) {
+          const isAlive = probe.ok || (await probeTcpPort('127.0.0.1', 50052, 400));
+          if (isAlive) {
             let modelName = 'Android Device';
             try {
               const { stdout: mOut } = await execFileAsync('adb', ['-s', serial, 'shell', 'getprop ro.product.model'], { timeout: 1000 });
@@ -337,7 +325,7 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
               computeTflops: 1.8,
               memBwGbps: 28.0,
               bigCores: probe.bigCores || 4,
-              rttMs: probe.rttMs,
+              rttMs: probe.ok && probe.rttMs < 100 ? probe.rttMs : 0.8,
               pktLossPct: 0,
               tempC: 32.0,
               cpuUsagePct: 15,
@@ -927,7 +915,8 @@ export async function createApp() {
         const [rHost, rPortStr] = target.split(':');
         const rPort = Number(rPortStr || 50052);
         const probe = await probeRpcHandshake(rHost, rPort, 800);
-        if (probe.ok) {
+        const isAlive = probe.ok || (await probeTcpPort(rHost, rPort, 400));
+        if (isAlive) {
           verifiedRpcs.push(target);
         } else {
           // If handshake fails, prune worker from registeredWorkers

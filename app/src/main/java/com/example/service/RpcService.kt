@@ -310,7 +310,13 @@ class RpcService : Service(), ComponentCallbacks2 {
             val legacy = HardwareProbe.detectLegacyHardwareProfile(context, mem, vk)
             val battery = HardwareProbe.readBatteryAndThermal(context)
             val nativeDir = context.applicationInfo.nativeLibraryDir ?: ""
-            val execFile = File(nativeDir, "librpc_server_exec.so")
+            val candidateExecs = listOf(
+                File(nativeDir, "librpc_server_exec.so"),
+                File(context.filesDir, "librpc_server_exec.so"),
+                File("/data/local/tmp/ggml-rpc-server")
+            )
+            val execFile = candidateExecs.firstOrNull { it.exists() && it.canExecute() }
+                ?: File(nativeDir, "librpc_server_exec.so")
 
             val backend = when {
                 legacy.legacyGraphicsMode -> ComputeBackend.ARM_V8_0_NEON
@@ -543,27 +549,60 @@ class RpcService : Service(), ComponentCallbacks2 {
 
         val hostIp = if (usbOnly) "127.0.0.1" else "0.0.0.0"
         val snap = _telemetry.value
-        val nativeBin = File(snap.nativeBinaryPath)
+        val nativeDir = applicationContext.applicationInfo.nativeLibraryDir ?: ""
+        val candidateFiles = listOf(
+            File(snap.nativeBinaryPath),
+            File(nativeDir, "librpc_server_exec.so"),
+            File(applicationContext.filesDir, "librpc_server_exec.so"),
+            File("/data/local/tmp/ggml-rpc-server")
+        )
+        val activeBin = candidateFiles.firstOrNull { it.exists() && it.canExecute() }
 
-        rpcServerJob = serviceScope.launch {
-            if (nativeBin.exists() && nativeBin.canExecute()) {
+        rpcServerJob = serviceScope.launch(Dispatchers.IO) {
+            if (activeBin != null) {
                 try {
                     val pb = ProcessBuilder(
-                        nativeBin.absolutePath,
+                        activeBin.absolutePath,
                         "-H", hostIp,
                         "-p", "50052",
-                        "-t", snap.bigCoreCount.toString(),
-                        "-m", snap.safeCapMb.toString(),
-                        "-c"
+                        "-t", snap.bigCoreCount.toString()
                     )
                     val env = pb.environment()
-                    if (!snap.vulkanProbePassed) {
+                    env["HOME"] = applicationContext.filesDir.absolutePath
+                    val ldPath = "${activeBin.parentFile?.absolutePath ?: nativeDir}:${nativeDir}:${env["LD_LIBRARY_PATH"] ?: ""}"
+                    env["LD_LIBRARY_PATH"] = ldPath
+                    if (!snap.vulkanProbePassed || snap.legacyGraphicsMode) {
                         env["GGML_VK_VISIBLE_DEVICES"] = ""
                     }
-                    nativeProcess = pb.start()
-                    appendLog("Spawned native librpc_server_exec.so on $hostIp:50052 (-t ${snap.bigCoreCount} -m ${snap.safeCapMb}MB)")
+                    val proc = pb.start()
+                    nativeProcess = proc
+                    appendLog("Spawned native ${activeBin.name} on $hostIp:50052 (-t ${snap.bigCoreCount})")
+
+                    // Drain stdout and stderr into event logs
+                    launch {
+                        runCatching {
+                            proc.inputStream.bufferedReader().useLines { lines ->
+                                lines.forEach { line -> appendLog("[rpc] $line") }
+                            }
+                        }
+                    }
+                    launch {
+                        runCatching {
+                            proc.errorStream.bufferedReader().useLines { lines ->
+                                lines.forEach { line -> appendLog("[rpc] $line") }
+                            }
+                        }
+                    }
+
+                    delay(300)
+                    if (!proc.isAlive) {
+                        val exit = proc.exitValue()
+                        appendLog("Native rpc process exited early with code $exit, falling back to embedded socket")
+                        nativeProcess = null
+                    }
                 } catch (e: Exception) {
                     appendLog("Native exec fallback to embedded GGUF v9 socket responder: ${e.message}")
+                    nativeProcess = null
                 }
             } else {
                 appendLog("Embedded GGUF/v1.0.0 RPC v9 responder bound to $hostIp:50052 (SafeCap=${snap.safeCapMb}MB)")
