@@ -20,7 +20,7 @@ import {
   RuntimeClusterSnapshot,
 } from './types/starCluster';
 import { createInitialTelemetryState } from './service/nodeClusterService';
-import { buildStarClusterNodes, planStarCluster } from './domain/starClusterPlanner';
+import { buildStarClusterNodes, planStarCluster, isSameAndroidWorker } from './domain/starClusterPlanner';
 import { createDefaultBackendTuningConfig } from './domain/backendTuner';
 import { StarClusterDashboard } from './components/StarClusterDashboard';
 import { ModelsHubPage } from './components/ModelsHubPage';
@@ -67,6 +67,7 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
 
   const [activeModel, setActiveModel] = useState<GgufModelPreset>(GGUF_MODEL_PRESETS[0]);
+  const [availableModels, setAvailableModels] = useState<GgufModelPreset[]>(GGUF_MODEL_PRESETS);
   const [clusterMode, setClusterMode] = useState<ClusterMode>('LIVE_CLUSTER');
   const [tuningConfig, setTuningConfig] = useState<BackendTuningConfig>(() =>
     createDefaultBackendTuningConfig(GGUF_MODEL_PRESETS[0])
@@ -119,9 +120,10 @@ export function App() {
 
   const refreshState = useCallback(async () => {
     try {
-      const [stateRes, hwRes] = await Promise.all([
+      const [stateRes, hwRes, modelsRes] = await Promise.all([
         fetch('/api/cluster/state'),
         fetch('/api/cluster/hardware'),
+        fetch('/api/models').catch(() => null),
       ]);
       if (stateRes.ok) {
         const snap = (await stateRes.json()) as RuntimeClusterSnapshot;
@@ -130,6 +132,12 @@ export function App() {
       if (hwRes.ok) {
         const hw = (await hwRes.json()) as LiveHardwareProbe;
         setLiveHardware(hw);
+      }
+      if (modelsRes && modelsRes.ok) {
+        const mData = (await modelsRes.json()) as { models?: GgufModelPreset[] };
+        if (mData.models && mData.models.length > 0) {
+          setAvailableModels(mData.models);
+        }
       }
     } catch {
       // ignore initial offline probe error
@@ -305,7 +313,17 @@ export function App() {
     { id: 'connect', label: 'Connect', icon: <PlugZap className="w-4 h-4" /> },
   ];
 
-  const liveWorkerCount = plan.nodes.filter((n) => n.role === 'Worker' && n.isConnected).length;
+  const uniqueLiveWorkers = useMemo(() => {
+    const raw = plan.nodes.filter((n) => n.role === 'Worker' && n.isConnected);
+    const deduped: typeof raw = [];
+    for (const w of raw) {
+      if (!deduped.some((ex) => isSameAndroidWorker(ex, w) || (ex.ip === w.ip && ex.rpcPort === w.rpcPort))) {
+        deduped.push(w);
+      }
+    }
+    return deduped;
+  }, [plan.nodes]);
+  const liveWorkerCount = uniqueLiveWorkers.length;
 
   return (
     <div className="min-h-screen bg-[#F8FAFC] dark:bg-[#0B0F17] text-slate-900 dark:text-slate-100 transition-colors flex flex-col">
@@ -399,6 +417,7 @@ export function App() {
         {activeTab === 'cluster' && (
           <StarClusterDashboard
             activeModel={activeModel}
+            availableModels={availableModels}
             onSelectModel={handleSelectModel}
             clusterMode={clusterMode}
             onChangeClusterMode={handleChangeClusterMode}
@@ -430,6 +449,7 @@ export function App() {
         {activeTab === 'chat' && (
           <ChatAndBrainPage
             activeModel={activeModel}
+            availableModels={availableModels}
             plan={plan}
             engineStatus={engineStatus}
             upstreamUrl={upstreamUrl}

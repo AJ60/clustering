@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   Brain,
@@ -43,6 +43,7 @@ interface ChatTurn {
 
 interface ChatAndBrainPageProps {
   activeModel: GgufModelPreset;
+  availableModels?: GgufModelPreset[];
   plan: StarClusterPlan;
   engineStatus?: EngineRuntimeStatus;
   upstreamUrl: string;
@@ -88,6 +89,7 @@ const WEB_TOOLS_SPEC = [
 
 export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
   activeModel,
+  availableModels,
   plan,
   engineStatus,
   upstreamUrl,
@@ -97,6 +99,12 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
   onApplyAndReload,
   onStopEngine,
 }) => {
+  const modelChoices = useMemo(() => {
+    const list = availableModels && availableModels.length > 0 ? availableModels : GGUF_MODEL_PRESETS;
+    const exists = list.some((p) => p.id === activeModel.id);
+    return exists ? list : [activeModel, ...list];
+  }, [availableModels, activeModel]);
+
   const [messages, setMessages] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
@@ -381,14 +389,14 @@ export const ChatAndBrainPage: React.FC<ChatAndBrainPageProps> = ({
                 aria-label="Select Model"
                 value={activeModel.id}
                 onChange={(e) => {
-                  const m = GGUF_MODEL_PRESETS.find((x) => x.id === e.target.value);
+                  const m = modelChoices.find((x: GgufModelPreset) => x.id === e.target.value);
                   if (m) onSelectModel(m);
                 }}
                 className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1424] px-2 py-1 text-xs font-semibold text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-emerald-500"
               >
-                {GGUF_MODEL_PRESETS.map((m) => (
+                {modelChoices.map((m: GgufModelPreset) => (
                   <option key={m.id} value={m.id}>
-                    {m.name} ({(m.sizeMb / 1024).toFixed(1)} GB · {m.quant})
+                    {m.isLocal || m.localPath ? '💾 ' : '🌐 '}{m.name} ({(m.sizeMb / 1024).toFixed(1)} GB · {m.quant}{m.isLocal || m.localPath ? ' · Local' : ''})
                   </option>
                 ))}
               </select>

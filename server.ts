@@ -281,7 +281,21 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
         await execFileAsync('adb', ['-s', serial, 'reverse', 'tcp:3000', 'tcp:3000'], {
           timeout: 1500,
         }).catch(() => {});
-        await execFileAsync('adb', ['-s', serial, 'forward', 'tcp:50052', 'tcp:50052'], {
+        // Detect phone worker bound port dynamically (from /data/local/tmp/worker.log)
+        let remotePort = '50054';
+        try {
+          const { stdout: pOut } = await execFileAsync('adb', [
+            '-s', serial, 'shell',
+            "toybox grep -o 'BoundPort=[0-9]*' /data/local/tmp/worker.log 2>/dev/null | toybox tail -n 1 | toybox cut -d= -f2"
+          ], { timeout: 1500 });
+          const trimmedPort = pOut.trim();
+          if (trimmedPort && /^\d+$/.test(trimmedPort)) {
+            remotePort = trimmedPort;
+          }
+        } catch {
+          // fallback to 50054 or 50052
+        }
+        await execFileAsync('adb', ['-s', serial, 'forward', 'tcp:50052', `tcp:${remotePort}`], {
           timeout: 1500,
         }).catch(() => {});
       }
@@ -390,7 +404,14 @@ async function probeLiveHardware(): Promise<LiveHardwareProbe> {
   for (const w of sortedWorkers) {
     if (!w.handshakeVerified) continue;
     const isDup = connectedDevices.some((existing) =>
-      isSameAndroidWorker(existing, w) || (existing.ip === w.ip && existing.rpcPort === w.rpcPort)
+      isSameAndroidWorker(existing, w) ||
+      (existing.ip === w.ip && existing.rpcPort === w.rpcPort) ||
+      (existing.platform === 'Android' &&
+        w.platform === 'Android' &&
+        (!existing.ip || existing.ip === 'localhost' || existing.ip.startsWith('127.')) &&
+        (!w.ip || w.ip === 'localhost' || w.ip.startsWith('127.')) &&
+        !existing.id.startsWith('vm-') &&
+        !w.id.startsWith('vm-'))
     );
     if (isDup) continue;
     const safeCapMb =
@@ -516,6 +537,29 @@ function resolveLlamaServerBinary(userSpecified?: string): string {
   return process.platform === 'win32' ? 'llama-server.exe' : 'llama-server';
 }
 
+function findGgufFilesRecursive(dir: string, depth = 0, maxDepth = 2): string[] {
+  if (depth > maxDepth || !fs.existsSync(dir)) return [];
+  const files: string[] = [];
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') {
+        files.push(...findGgufFilesRecursive(full, depth + 1, maxDepth));
+      } else if (
+        e.isFile() &&
+        e.name.toLowerCase().endsWith('.gguf') &&
+        !e.name.toLowerCase().includes('mmproj')
+      ) {
+        files.push(full);
+      }
+    }
+  } catch {
+    // skip unreadable directories
+  }
+  return files;
+}
+
 function resolveGgufModelPath(model: GgufModelPreset): string | null {
   if (model.localPath && fs.existsSync(model.localPath)) {
     return model.localPath;
@@ -524,25 +568,30 @@ function resolveGgufModelPath(model: GgufModelPreset): string | null {
     path.resolve(process.cwd(), 'models'),
     path.resolve(process.cwd()),
     path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'models'),
+    path.join(os.homedir(), 'Downloads', 'Models'),
     path.join(os.homedir(), 'Downloads'),
     path.join(os.homedir(), '.ollama', 'models'),
     path.join(os.homedir(), '.cache', 'lm-studio', 'models'),
   ];
   for (const d of searchDirs) {
     if (!fs.existsSync(d)) continue;
-    try {
-      const entries = fs.readdirSync(d);
-      for (const e of entries) {
-        if (!e.toLowerCase().endsWith('.gguf') || e.toLowerCase().includes('mmproj')) continue;
-        const normE = e.toLowerCase().replace(/[^a-z0-9]/g, '');
-        const normName = model.name.toLowerCase().replace(/[^a-z0-9]/g, '');
-        const normId = model.id.toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (normE.includes(normName) || normName.includes(normE) || normE.includes(normId)) {
-          return path.join(d, e);
-        }
+    const ggufs = findGgufFilesRecursive(d, 0, 2);
+    for (const full of ggufs) {
+      const e = path.basename(full);
+      const normE = e.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const normName = model.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const normId = model.id.toLowerCase().replace(/[^a-z0-9]/g, '');
+      // Match exact name/id or common model stem (e.g. qwen38 / 27b / coder)
+      if (
+        normE.includes(normName) ||
+        normName.includes(normE) ||
+        normE.includes(normId) ||
+        (normName.includes('qwen') && normE.includes('qwen') && normE.includes('27b') && normName.includes('27b')) ||
+        (normName.includes('bonsai') && normE.includes('bonsai')) ||
+        (normName.includes('coder') && normE.includes('coder'))
+      ) {
+        return full;
       }
-    } catch {
-      // ignore
     }
   }
   return null;
@@ -600,6 +649,8 @@ function scanLocalGgufFiles(directory?: string): { directory: string; models: Gg
   if (!directory || directory === './models' || directory === 'models') {
     const hermesDir = path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'models');
     if (fs.existsSync(hermesDir)) dirsToScan.push(hermesDir);
+    const downloadsModelsDir = path.join(os.homedir(), 'Downloads', 'Models');
+    if (fs.existsSync(downloadsModelsDir)) dirsToScan.push(downloadsModelsDir);
     const downloadsDir = path.join(os.homedir(), 'Downloads');
     if (fs.existsSync(downloadsDir)) dirsToScan.push(downloadsDir);
   }
@@ -607,28 +658,22 @@ function scanLocalGgufFiles(directory?: string): { directory: string; models: Gg
   const seenPaths = new Set<string>();
   for (const dir of dirsToScan) {
     if (!fs.existsSync(dir)) continue;
-    try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (
-          entry.isFile() &&
-          entry.name.toLowerCase().endsWith('.gguf') &&
-          !entry.name.toLowerCase().includes('mmproj')
-        ) {
-          const full = path.join(dir, entry.name);
-          if (seenPaths.has(full)) continue;
-          seenPaths.add(full);
-          try {
-            const parsed = inspectGgufPathSync(full);
-            customModelsRegistry.set(parsed.id, parsed);
-            models.push(parsed);
-          } catch {
-            // skip unreadable file
-          }
+    const ggufFiles = findGgufFilesRecursive(dir, 0, 2);
+    for (const full of ggufFiles) {
+      if (seenPaths.has(full)) continue;
+      seenPaths.add(full);
+      try {
+        const st = fs.statSync(full);
+        // Skip small vocab helper files (< 50MB)
+        if (st.size < 50 * 1024 * 1024 && path.basename(full).toLowerCase().includes('vocab')) {
+          continue;
         }
+        const parsed = inspectGgufPathSync(full);
+        customModelsRegistry.set(parsed.id, parsed);
+        models.push(parsed);
+      } catch {
+        // skip unreadable file
       }
-    } catch {
-      // non-fatal
     }
   }
   return { directory: targetDir, models };
@@ -727,7 +772,14 @@ export async function createApp() {
   // Auto-discover local GGUF weights on startup (models/, hermes, Downloads)
   if (process.env.NODE_ENV !== 'test') {
     try {
-      scanLocalGgufFiles();
+      const scanned = scanLocalGgufFiles();
+      if (scanned.models.length > 0 && !resolveGgufModelPath(activeModel)) {
+        activeModel = scanned.models[0];
+        tuningConfig = {
+          ...createDefaultBackendTuningConfig(activeModel),
+          mmprojPath: activeModel.mmprojPath ?? '',
+        };
+      }
     } catch {
       // non-fatal
     }
@@ -915,6 +967,18 @@ export async function createApp() {
     res.json(snap);
   });
 
+  app.get('/api/models', (_req: Request, res: Response) => {
+    const scanned = scanLocalGgufFiles();
+    const allModels = new Map<string, GgufModelPreset>();
+    for (const m of scanned.models) allModels.set(m.id, m);
+    for (const m of customModelsRegistry.values()) allModels.set(m.id, m);
+    for (const m of GGUF_MODEL_PRESETS) if (!allModels.has(m.id)) allModels.set(m.id, m);
+    res.json({
+      activeId: activeModel.id,
+      models: Array.from(allModels.values()),
+    });
+  });
+
   app.post('/api/models/activate', async (req: Request, res: Response) => {
     const body = req.body as { model?: GgufModelPreset; modelId?: string; reloadIfRunning?: boolean };
     if (body.model && body.model.id) {
@@ -1059,11 +1123,14 @@ export async function createApp() {
 
     // Deduplicate Android worker entries by IP/loopback and hardware signature so ghost duplicates never occur
     if (platform === 'Android') {
+      const isLoopback = !ip || ip === 'localhost' || ip.startsWith('127.');
       for (const [existingId, existing] of registeredWorkers.entries()) {
+        const existingIsLoopback = !existing.ip || existing.ip === 'localhost' || existing.ip.startsWith('127.');
         if (
           existing.platform === 'Android' &&
           (existingId === id ||
             existing.ip === ip ||
+            (existingIsLoopback && isLoopback && !existingId.startsWith('vm-') && !id.startsWith('vm-')) ||
             isSameAndroidWorker(existing, { platform, ip, id, label }))
         ) {
           registeredWorkers.delete(existingId);

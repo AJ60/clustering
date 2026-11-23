@@ -11,6 +11,7 @@ import {
   Usb,
 } from 'lucide-react';
 import { GgufModelPreset, PlannedStarNode, StarClusterPlan } from '../types/starCluster';
+import { isSameAndroidWorker } from '../domain/starClusterPlanner';
 
 interface LiveClusterGraphProps {
   plan: StarClusterPlan;
@@ -30,6 +31,14 @@ const NODE_COLORS = [
 function formatMem(mb: number): string {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
   return `${Math.round(mb)} MB`;
+}
+
+function cleanNodeName(label: string): string {
+  let s = label.replace(/\s*\((Master|Worker|Android)\)/gi, '').trim();
+  if (/xiaomi/i.test(s) && /redmi/i.test(s)) {
+    s = s.replace(/xiaomi\s*/i, '');
+  }
+  return s;
 }
 
 function transportIcon(linkType: PlannedStarNode['linkType']) {
@@ -53,8 +62,18 @@ export const LiveClusterGraph: React.FC<LiveClusterGraphProps> = ({
   onOpenPairHelp,
 }) => {
   const master = plan.nodes.find((n) => n.role === 'Master') ?? plan.nodes[0];
-  const workers = plan.nodes.filter((n) => n.role === 'Worker');
-  const activeNodes = plan.nodes.filter((n) => n.allocatedLayers > 0 && !n.pruned);
+  const rawWorkers = plan.nodes.filter((n) => n.role === 'Worker');
+  
+  // Strict deduplication so duplicate aliases for the same physical device never display in the graph
+  const workers: PlannedStarNode[] = [];
+  for (const w of rawWorkers) {
+    const isDup = workers.some((existing) =>
+      isSameAndroidWorker(existing, w) || (existing.ip === w.ip && existing.rpcPort === w.rpcPort)
+    );
+    if (!isDup) workers.push(w);
+  }
+
+  const activeNodes = [master, ...workers].filter((n) => Boolean(n && n.allocatedLayers > 0 && !n.pruned));
 
   // SVG star-topology coordinates (scales dynamically for 1..N live workers with zero overlap)
   const svgW = 980;
@@ -208,7 +227,7 @@ export const LiveClusterGraph: React.FC<LiveClusterGraphProps> = ({
                   y={masterPos.y - 18}
                   className="fill-slate-900 dark:fill-slate-100 text-[13px] font-semibold"
                 >
-                  {master.label.slice(0, 26)}
+                  {cleanNodeName(master.label)}
                 </text>
                 <text
                   x={masterPos.x - 119}
@@ -282,7 +301,7 @@ export const LiveClusterGraph: React.FC<LiveClusterGraphProps> = ({
                     y={y - 11}
                     className="fill-slate-900 dark:fill-slate-100 text-[13px] font-semibold"
                   >
-                    {node.label.slice(0, 26)}
+                    {cleanNodeName(node.label)}
                   </text>
                   <text
                     x={cardLeft + 16}
@@ -358,7 +377,7 @@ export const LiveClusterGraph: React.FC<LiveClusterGraphProps> = ({
         )}
 
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {plan.nodes.map((node, idx) => {
+          {[master, ...workers].map((node, idx) => {
             const color = NODE_COLORS[idx % NODE_COLORS.length];
             const totalCap = Math.max(1, node.safeRamMb + node.safeVramMb);
             const usedPct = Math.min(100, Math.round((node.allocatedMb / totalCap) * 100));

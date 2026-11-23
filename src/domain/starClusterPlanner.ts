@@ -151,20 +151,32 @@ export function isSameAndroidWorker(
   a: { platform?: string; ip?: string; id?: string; model?: string; label?: string },
   b: { platform?: string; ip?: string; id?: string; model?: string; label?: string }
 ): boolean {
-  // Both nodes MUST be Android
-  if (a.platform !== 'Android' || b.platform !== 'Android') return false;
+  // Both nodes MUST be Android (case-insensitive)
+  const aPlat = (a.platform || '').toLowerCase();
+  const bPlat = (b.platform || '').toLowerCase();
+  if (aPlat !== 'android' || bPlat !== 'android') return false;
+
   // Distinct simulated test VMs must never be deduplicated
   if (a.id?.startsWith('vm-') && b.id?.startsWith('vm-') && a.id !== b.id) {
     return false;
   }
+
   // 1. Direct ID match
   if (a.id && b.id && a.id === b.id) return true;
+
   // 2. Exact IP match
   if (a.ip && b.ip && a.ip === b.ip) return true;
-  // 3. Both are mapped to the single local ADB loopback tunnel 127.0.0.1
-  const aLocalAdb = a.ip === '127.0.0.1' || a.ip === 'localhost';
-  const bLocalAdb = b.ip === '127.0.0.1' || b.ip === 'localhost';
-  if (aLocalAdb && bLocalAdb) return true;
+
+  // 3. Both are mapped to the local host ADB loopback tunnel (127.0.0.0/8 or localhost)
+  const aIsLoopback = !a.ip || a.ip === 'localhost' || a.ip.startsWith('127.');
+  const bIsLoopback = !b.ip || b.ip === 'localhost' || b.ip.startsWith('127.');
+  if (aIsLoopback && bIsLoopback) {
+    // If neither is a distinct VM, any two loopback Android records are the same physical device
+    if (!a.id?.startsWith('vm-') && !b.id?.startsWith('vm-')) {
+      return true;
+    }
+  }
+
   // 4. Normalized label / model similarity (e.g. "Redmi Note 7 Pro" vs "Xiaomi Redmi Note 7 Pro (Android)")
   const normA = (a.label || a.model || a.id || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const normB = (b.label || b.model || b.id || '').toLowerCase().replace(/[^a-z0-9]/g, '');

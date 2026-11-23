@@ -28,14 +28,17 @@ import {
   GGUF_MODEL_PRESETS,
   GgufModelPreset,
   LiveHardwareProbe,
+  PlannedStarNode,
   StarClusterPlan,
 } from '../types/starCluster';
 import { buildTunedOsBackendProfile } from '../domain/backendTuner';
+import { isSameAndroidWorker } from '../domain/starClusterPlanner';
 import { LiveClusterGraph } from './LiveClusterGraph';
 import { OnboardingWizardCard } from './OnboardingWizardCard';
 
 interface StarClusterDashboardProps {
   activeModel: GgufModelPreset;
+  availableModels?: GgufModelPreset[];
   onSelectModel: (model: GgufModelPreset) => void;
   clusterMode: ClusterMode;
   onChangeClusterMode: (mode: ClusterMode) => void;
@@ -56,6 +59,7 @@ interface StarClusterDashboardProps {
 
 export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
   activeModel,
+  availableModels,
   onSelectModel,
   clusterMode,
   onChangeClusterMode,
@@ -114,11 +118,22 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
   };
 
   const modelChoices = useMemo(() => {
-    const exists = GGUF_MODEL_PRESETS.some((p) => p.id === activeModel.id);
-    return exists ? GGUF_MODEL_PRESETS : [activeModel, ...GGUF_MODEL_PRESETS];
-  }, [activeModel]);
+    const list = availableModels && availableModels.length > 0 ? availableModels : GGUF_MODEL_PRESETS;
+    const exists = list.some((p) => p.id === activeModel.id);
+    return exists ? list : [activeModel, ...list];
+  }, [availableModels, activeModel]);
 
-  const liveWorkers = plan.nodes.filter((n) => n.role === 'Worker' && n.isConnected);
+  const rawWorkers = plan.nodes.filter((n) => n.role === 'Worker' && n.isConnected);
+  const liveWorkers = useMemo(() => {
+    const deduped: PlannedStarNode[] = [];
+    for (const w of rawWorkers) {
+      const isDup = deduped.some((existing) =>
+        isSameAndroidWorker(existing, w) || (existing.ip === w.ip && existing.rpcPort === w.rpcPort)
+      );
+      if (!isDup) deduped.push(w);
+    }
+    return deduped;
+  }, [rawWorkers]);
   const masterNode = plan.nodes.find((n) => n.role === 'Master') ?? plan.nodes[0];
   const isEngineLive = Boolean(engineStatus?.running);
 
@@ -419,10 +434,10 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
                       </div>
                       <div>
                         <p className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                          {w.label}
+                          {w.label.replace(/\s*\((Master|Worker|Android)\)/gi, '')}
                         </p>
                         <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                          {w.linkType} · Layers L{w.layerStart}-L{w.layerEnd} (Safe Mode)
+                          {w.linkType} · Layers L{w.layerStart}–L{w.layerEnd} (Safe Mode)
                         </p>
                       </div>
                     </div>
@@ -535,7 +550,7 @@ export const StarClusterDashboard: React.FC<StarClusterDashboardProps> = ({
               >
                 {modelChoices.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.name} ({m.quant} · {m.architecture})
+                    {m.isLocal || m.localPath ? '💾 ' : '🌐 '}{m.name} ({m.quant} · {m.architecture}{m.isLocal || m.localPath ? ' · Local' : ''})
                   </option>
                 ))}
               </select>

@@ -421,62 +421,75 @@ pub fn compute_cluster_plan(
     let weight_sum: f64 = raw_weights.iter().map(|(_, w)| *w).sum::<f64>().max(1e-6);
     let total_layer_budget_mb = total_layer_weights_mb + total_kv_mb;
 
-    // Determine target layer budget per active node, strictly clamped to node_remaining_mb.
-    let mut target_budgets: Vec<(usize, f64)> = raw_weights
-        .drain(..)
-        .map(|(idx, w)| {
-            let desired = total_layer_budget_mb * (w / weight_sum);
-            (idx, desired.min(node_remaining_mb[idx]))
-        })
-        .collect();
+    let total_layers = card.per_layer_profiles.len() as u32;
+    let mb_per_layer = (card.file_size_mb / total_layers.max(1) as f64).max(1.0);
+    
+    // Master gets first slice [0, master_layers - 1], workers get contiguous subsequent slices
+    let master_idx = active_indices.first().copied().unwrap_or(0);
+    let worker_indices: Vec<usize> = active_indices.iter().copied().filter(|&i| i != master_idx).collect();
 
-    // Assign contiguous layers sequentially while NEVER exceeding any node's cap (Zero-OOM invariant).
-    let mut current_pos = 0usize;
-    let mut current_used_for_layers = 0.0f64;
+    let mut total_worker_layers = 0u32;
+    let mut worker_layer_counts: Vec<(usize, u32)> = Vec::new();
 
-    for layer in &card.per_layer_profiles {
-        let layer_need = layer.total_weight_mb + layer.kv_cache_mb;
-        let mut placed = false;
+    for &w_idx in &worker_indices {
+        let max_cap_layers = (node_remaining_mb[w_idx] / mb_per_layer).floor().max(0.0) as u32;
+        let score_weight = raw_weights.iter().find(|(idx, _)| *idx == w_idx).map(|(_, w)| *w).unwrap_or(1.0);
+        let target_layers = ((total_layers as f64) * (score_weight / weight_sum)).round().max(0.0) as u32;
+        let count = max_cap_layers.min(target_layers);
+        worker_layer_counts.push((w_idx, count));
+        total_worker_layers += count;
+    }
 
-        // Advance to next node if current node reached target or lacks remaining cap.
-        while current_pos < target_budgets.len() {
-            let (node_idx, target_mb) = target_budgets[current_pos];
-            let has_room = node_remaining_mb[node_idx] >= layer_need;
-            let within_target =
-                current_pos == target_budgets.len() - 1 || current_used_for_layers + layer_need <= target_mb * 1.05;
-
-            if has_room && within_target {
-                allocations[node_idx].alloc_mb += layer_need;
-                node_remaining_mb[node_idx] = (node_remaining_mb[node_idx] - layer_need).max(0.0);
-                current_used_for_layers += layer_need;
-                allocations[node_idx].layer_count += 1;
-                if allocations[node_idx].layer_start.is_none() {
-                    allocations[node_idx].layer_start = Some(layer.layer_index);
-                }
-                allocations[node_idx].layer_end = Some(layer.layer_index);
-                placed = true;
-                break;
-            }
-            current_pos += 1;
-            current_used_for_layers = 0.0;
+    if total_worker_layers >= total_layers && total_layers > 1 {
+        let allowed = total_layers - 1;
+        let mut excess = total_worker_layers - allowed;
+        for (_, count) in worker_layer_counts.iter_mut().rev() {
+            let deduct = (*count).min(excess);
+            *count -= deduct;
+            excess -= deduct;
+            if excess == 0 { break; }
         }
+        total_worker_layers = allowed;
+    }
 
-        // Spillover pass: place layer on any active node with remaining safe cap (still zero OOM).
-        if !placed {
-            if let Some(&(best_idx, _)) = target_budgets
-                .iter()
-                .max_by(|(a, _), (b, _)| node_remaining_mb[*a].total_cmp(&node_remaining_mb[*b]))
-            {
-                let clamped = layer_need.min(node_remaining_mb[best_idx]);
-                if clamped > 0.0 {
-                    allocations[best_idx].alloc_mb += clamped;
-                    node_remaining_mb[best_idx] = (node_remaining_mb[best_idx] - clamped).max(0.0);
-                    allocations[best_idx].layer_count += 1;
-                    if allocations[best_idx].layer_start.is_none() {
-                        allocations[best_idx].layer_start = Some(layer.layer_index);
+    let master_layers = total_layers.saturating_sub(total_worker_layers).max(1);
+    allocations[master_idx].layer_count = master_layers;
+    allocations[master_idx].layer_start = Some(0);
+    allocations[master_idx].layer_end = Some(master_layers.saturating_sub(1));
+
+    let mut cursor_layer = master_layers;
+    for (w_idx, count) in worker_layer_counts {
+        if count > 0 && cursor_layer < total_layers {
+            allocations[w_idx].layer_count = count;
+            allocations[w_idx].layer_start = Some(cursor_layer);
+            allocations[w_idx].layer_end = Some(cursor_layer + count - 1);
+            cursor_layer += count;
+        } else {
+            allocations[w_idx].layer_count = 0;
+            allocations[w_idx].layer_start = None;
+            allocations[w_idx].layer_end = None;
+        }
+    }
+
+    if cursor_layer < total_layers {
+        let remaining = total_layers - cursor_layer;
+        let last_active_idx = worker_indices.iter().copied().rev().find(|&i| allocations[i].layer_count > 0).unwrap_or(master_idx);
+        allocations[last_active_idx].layer_count += remaining;
+        allocations[last_active_idx].layer_end = Some(total_layers - 1);
+    }
+
+    // Compute exact non-uniform byte allocation based on assigned contiguous spans
+    for &idx in &active_indices {
+        if allocations[idx].layer_count > 0 {
+            if let (Some(start), Some(end)) = (allocations[idx].layer_start, allocations[idx].layer_end) {
+                let mut layer_mb = 0.0f64;
+                for l_idx in start..=end {
+                    if let Some(prof) = card.per_layer_profiles.get(l_idx as usize) {
+                        layer_mb += prof.total_weight_mb + prof.kv_cache_mb;
                     }
-                    allocations[best_idx].layer_end = Some(layer.layer_index);
                 }
+                let master_pinned = if idx == master_idx { card.master_pinned_overhead_mb } else { 0.0 };
+                allocations[idx].alloc_mb = layer_mb + master_pinned;
             }
         }
     }

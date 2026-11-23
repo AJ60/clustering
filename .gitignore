@@ -28,7 +28,11 @@ exo-repo/
 llama-b11429/
 logs/
 
-# Android Build Outputs
+# Rust Build Outputs
+target/
+silica-core/target/
+silica-core/Cargo.lock
+
 .gradle/
 build/
 app/build/
