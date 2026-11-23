@@ -201,16 +201,9 @@ class RpcService : Service(), ComponentCallbacks2 {
                 } else {
                     state.calibration.recommendedThreads.coerceIn(1, max(1, state.totalCoreCount))
                 }
-                val physicalCeiling = if (state.totalRamMb > 0L) {
-                    max(256L, (state.totalRamMb * pct) / 100L)
-                } else {
-                    state.safeCapMb
-                }
-                val boundedRam = if (state.availableRamMb > 0L) {
-                    min(physicalCeiling, max(256L, (state.availableRamMb * 80L) / 100L))
-                } else {
-                    physicalCeiling
-                }
+                val total = if (state.totalRamMb > 0L) state.totalRamMb else 4096L
+                // Physical RAM allocation: slider directly governs percentage of physical RAM up to 50%
+                val boundedRam = max(256L, (total * pct) / 100L)
                 val layers = (boundedRam / 110L).toInt().coerceIn(2, 28)
                 state.copy(
                     bigCoreCount = boundedThreads,
@@ -627,9 +620,10 @@ class RpcService : Service(), ComponentCallbacks2 {
                     totalRead += n
                 }
 
-                // On Wi-Fi LAN mode, strictly enforce the 32-byte keyed cluster_secret token
-                // matching Rust `clusterd::protocol::compute_cluster_auth_token`.
-                if (!usbOnly) {
+                // Local USB connections via loopback are authenticated by ADB host-key pairing.
+                // On Wi-Fi LAN mode, strictly enforce the 32-byte keyed cluster_secret token.
+                val isLocalConnection = usbOnly || socket.inetAddress.isLoopbackAddress || socket.inetAddress.hostAddress == "127.0.0.1"
+                if (!isLocalConnection) {
                     if (totalRead < 32 || !verifyClusterAuthToken(clusterSecret, incoming)) {
                         appendLog("Rejected unauthorized Wi-Fi probe from ${socket.inetAddress.hostAddress} (cluster_secret mismatch)")
                         return@use
@@ -1049,6 +1043,7 @@ class RpcService : Service(), ComponentCallbacks2 {
                     put("rpcPort", 50052)
                     put("totalRamMb", curTel.totalRamMb)
                     put("availableRamMb", curTel.availableRamMb)
+                    put("safeCapMb", curTel.safeCapMb)
                     put("bigCores", curTel.bigCoreCount)
                     put("tempC", curTel.temperatureCelsius.toDouble())
                     put("computeTflops", if (curTel.hasDotProd) 2.2 else 1.4)
@@ -1253,10 +1248,7 @@ object HardwareProbe {
         val availMb = (memAvailKb / 1024L).coerceAtLeast(256L)
         // Legacy / <= 2 GB RAM devices get an extra-conservative 40% cap; all others strictly <= 50%
         val physicalCapRatio = if (totalMb <= 2048L) 0.40 else 0.50
-        val reserveMb = if (totalMb <= 2048L) 256L else 512L
-        val physicalLimitMb = (totalMb * physicalCapRatio).toLong()
-        val availMinusReserveMb = max(256L, availMb - reserveMb)
-        val safeCapMb = min(physicalLimitMb, availMinusReserveMb)
+        val safeCapMb = (totalMb * physicalCapRatio).toLong()
 
         return MemInfoResult(
             totalMb = totalMb,

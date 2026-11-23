@@ -293,6 +293,7 @@ export function buildStarClusterNodes(
                 ? 'CUDA / Vulkan'
                 : 'CPU OpenBLAS',
           linkType,
+          safeRamMb: dev.safeCapMb,
           totalRamMb: dev.totalRamMb ?? dev.safeCapMb * 2,
           availableRamMb: dev.availableRamMb ?? dev.safeCapMb,
           vramFreeMb: dev.vramMb ?? 0,
@@ -441,7 +442,9 @@ export function planStarCluster(
   const evaluated: PlannedStarNode[] = rawNodes.map((n) => {
     const safeRamMb =
       n.platform === 'Android'
-        ? computeAndroidSafeCap(n.totalRamMb, n.availableRamMb)
+        ? (n.safeRamMb && n.safeRamMb > 256
+            ? Math.min(n.safeRamMb, Math.floor(n.totalRamMb * 0.5))
+            : computeAndroidSafeCap(n.totalRamMb, n.availableRamMb))
         : computeDesktopSafeCap(n.availableRamMb, n.platform === 'Edge ARM' ? 512 : 1024);
     const safeVramMb = computeVramSafeCap(n.vramFreeMb, n.osType === 'windows');
     const thermalStatus = evaluateNodeThermal(n, limits);

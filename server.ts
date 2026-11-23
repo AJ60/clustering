@@ -60,6 +60,7 @@ interface RegisteredWorkerRecord {
   linkType: string;
   totalRamMb: number;
   availableRamMb: number;
+  safeCapMb?: number;
   vramMb: number;
   computeTflops: number;
   memBwGbps: number;
@@ -281,8 +282,8 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
         await execFileAsync('adb', ['-s', serial, 'reverse', 'tcp:3000', 'tcp:3000'], {
           timeout: 1500,
         }).catch(() => {});
-        // Detect phone worker bound port dynamically (from /data/local/tmp/worker.log)
-        let remotePort = '50054';
+        // Forward host port 50052 to phone port 50052 (Silica Android app worker listener)
+        let remotePort = '50052';
         try {
           const { stdout: pOut } = await execFileAsync('adb', [
             '-s', serial, 'shell',
@@ -293,11 +294,61 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
             remotePort = trimmedPort;
           }
         } catch {
-          // fallback to 50054 or 50052
+          // fallback to standard 50052
         }
         await execFileAsync('adb', ['-s', serial, 'forward', 'tcp:50052', `tcp:${remotePort}`], {
           timeout: 1500,
         }).catch(() => {});
+
+        // Auto-detect and register Android worker over USB loopback if RPC port responds
+        try {
+          const probe = await probeRpcHandshake('127.0.0.1', 50052, 1200);
+          if (probe.ok) {
+            let modelName = 'Android Device';
+            try {
+              const { stdout: mOut } = await execFileAsync('adb', ['-s', serial, 'shell', 'getprop ro.product.model'], { timeout: 1000 });
+              if (mOut.trim()) modelName = mOut.trim();
+            } catch {}
+            let totalRam = 4096;
+            try {
+              const { stdout: memOut } = await execFileAsync('adb', ['-s', serial, 'shell', "cat /proc/meminfo | grep MemTotal"], { timeout: 1000 });
+              const m = memOut.match(/MemTotal:\s+(\d+)\s+kB/);
+              if (m) totalRam = Math.round(parseInt(m[1], 10) / 1024);
+            } catch {}
+
+            const workerId = `android-usb-${serial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+            // 50% physical RAM cap (e.g. 1851MB on 3702MB / 4GB total)
+            const safeCap = probe.safeCapMb && probe.safeCapMb > 256
+              ? Math.min(Math.floor(totalRam * 0.5), probe.safeCapMb)
+              : Math.floor(totalRam * 0.5);
+
+            registeredWorkers.set(workerId, {
+              id: workerId,
+              label: `${modelName} (Android)`,
+              platform: 'Android',
+              osType: 'android',
+              ip: '127.0.0.1',
+              rpcPort: 50052,
+              linkType: 'USB-C Tunnel',
+              totalRamMb: totalRam,
+              availableRamMb: Math.round(totalRam * 0.5),
+              safeCapMb: safeCap,
+              vramMb: 0,
+              computeTflops: 1.8,
+              memBwGbps: 28.0,
+              bigCores: probe.bigCores || 4,
+              rttMs: probe.rttMs,
+              pktLossPct: 0,
+              tempC: 32.0,
+              cpuUsagePct: 15,
+              gpuUsagePct: 0,
+              handshakeVerified: true,
+              lastSeenMs: now,
+            });
+          }
+        } catch {
+          // Probe failed or app not running yet
+        }
       }
     }
     cachedAdbInfo = { ts: now, serials };
@@ -377,12 +428,15 @@ async function pruneStaleWorkers(): Promise<void> {
     if (process.env.NODE_ENV !== 'test') {
       const isLoopback = worker.ip === '127.0.0.1' || worker.ip === 'localhost' || worker.ip.startsWith('127.');
       if (isLoopback) {
-        const probe = await probeRpcHandshake(worker.ip, worker.rpcPort, 350);
+        const probe = await probeRpcHandshake(worker.ip, worker.rpcPort, 1200);
         if (!probe.ok) {
-          toDelete.push(id);
+          const tcpAlive = await probeTcpPort(worker.ip, worker.rpcPort, 400);
+          if (!tcpAlive) {
+            toDelete.push(id);
+          }
         }
       } else {
-        const alive = await probeTcpPort(worker.ip, worker.rpcPort, 200);
+        const alive = await probeTcpPort(worker.ip, worker.rpcPort, 400);
         if (!alive) {
           toDelete.push(id);
         }
@@ -425,9 +479,11 @@ async function probeLiveHardware(): Promise<LiveHardwareProbe> {
     );
     if (isDup) continue;
     const safeCapMb =
-      w.platform === 'Android'
-        ? Math.floor(Math.min(w.totalRamMb * 0.5, w.availableRamMb * 0.8))
-        : Math.max(512, Math.floor(w.availableRamMb * 0.82));
+      w.safeCapMb && w.safeCapMb > 256
+        ? (w.platform === 'Android' ? Math.min(Math.floor(w.totalRamMb * 0.5), w.safeCapMb) : w.safeCapMb)
+        : (w.platform === 'Android'
+            ? Math.floor(w.totalRamMb * 0.5)
+            : Math.max(512, Math.floor(w.availableRamMb * 0.82)));
     connectedDevices.push({
       id: w.id,
       model: w.label,
@@ -1263,6 +1319,7 @@ export async function createApp() {
       linkType: String(b.linkType || (ip === '127.0.0.1' ? 'USB-C Tunnel' : 'Wi-Fi LAN')),
       totalRamMb: Number(b.totalRamMb || 8192),
       availableRamMb: Number(b.availableRamMb || 4096),
+      safeCapMb: Number(b.safeCapMb || 0),
       vramMb: Number(b.vramMb || 0),
       computeTflops: Number(b.computeTflops || (platform === 'Android' ? 1.8 : 4.5)),
       memBwGbps: Number(b.memBwGbps || (platform === 'Android' ? 28 : 48)),

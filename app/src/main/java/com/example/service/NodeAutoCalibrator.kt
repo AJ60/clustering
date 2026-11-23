@@ -116,9 +116,9 @@ object NodeAutoCalibrator {
         val physicalCapRatio = if (mem.totalMb <= 2048L || legacy.isLowRamDevice) 0.40 else 0.50
         val maxPhysicalCeiling = max(256L, (mem.totalMb * physicalCapRatio).toLong())
         val tunedSafeRamMb = if (isWarmOrLowBattery) {
-            min(maxPhysicalCeiling, max(256L, (mem.safeCapMb * 0.80).toLong()))
+            max(256L, (maxPhysicalCeiling * 0.80).toLong())
         } else {
-            min(maxPhysicalCeiling, mem.safeCapMb)
+            maxPhysicalCeiling
         }
 
         val tierLabel = when {
