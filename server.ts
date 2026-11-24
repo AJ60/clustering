@@ -103,7 +103,7 @@ let cachedAdbInfo: { ts: number; serials: string[] } | null = null;
 let spawnedLlamaChild: ChildProcess | null = null;
 let runtimeRpcActive = false;
 let runtimeRpcEndpoints: string[] = [];
-const rpcProbeCache = new Map<string, { ts: number; res: { ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number } }>();
+const rpcProbeCache = new Map<string, { ts: number; res: { ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number; nativeRpc?: boolean } }>();
 
 // Turn-boundary drain state machine
 let activeGenerationTurns = 0;
@@ -494,7 +494,7 @@ async function probeRpcHandshake(
   port: number,
   timeoutMs = 1500,
   forceRefresh = false
-): Promise<{ ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number }> {
+): Promise<{ ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number; nativeRpc?: boolean }> {
   const cacheKey = `${host}:${port}`;
   const now = Date.now();
   if (!forceRefresh && process.env.NODE_ENV !== 'test') {
@@ -504,9 +504,9 @@ async function probeRpcHandshake(
     }
   }
 
-  const res = await new Promise<{ ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number }>((resolve) => {
+  const res = await new Promise<{ ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number; nativeRpc?: boolean }>((resolve) => {
     let resolved = false;
-    const safeResolve = (val: { ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number }) => {
+    const safeResolve = (val: { ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number; nativeRpc?: boolean }) => {
       if (!resolved) {
         resolved = true;
         clearTimeout(timer);
@@ -539,6 +539,13 @@ async function probeRpcHandshake(
       chunks.push(chunk);
       totalLen += chunk.length;
       const full = Buffer.concat(chunks);
+      // Valid native ggml-rpc v7.x HELLO reply starts with uint64 LE size = 28 (0x1c)
+      if (totalLen >= 12 && full.readUInt32LE(0) === 28 && full.readUInt32LE(4) === 0) {
+        const rttMs = Math.max(0.4, Date.now() - start);
+        socket.destroy();
+        safeResolve({ ok: true, rttMs, nativeRpc: true });
+        return;
+      }
       if (totalLen >= 32) {
         const decoded = decodeGgufHandshakeFrame(new Uint8Array(full.subarray(0, 32)));
         const rttMs = Math.max(0.4, Date.now() - start);
@@ -549,17 +556,12 @@ async function probeRpcHandshake(
             rttMs,
             safeCapMb: decoded.safeCapMb,
             bigCores: decoded.bigCores,
+            nativeRpc: false,
           });
           return;
         }
         safeResolve({ ok: true, rttMs });
         return;
-      }
-      // Valid ggml-rpc HELLO reply starts with uint64 LE size = 28 (0x1c)
-      if (totalLen >= 12 && full.readUInt32LE(0) === 28 && full.readUInt32LE(4) === 0) {
-        const rttMs = Math.max(0.4, Date.now() - start);
-        socket.destroy();
-        safeResolve({ ok: true, rttMs });
       }
     });
 
@@ -620,13 +622,15 @@ async function pruneStaleWorkers(): Promise<void> {
     if (process.env.NODE_ENV !== 'test') {
       const isLoopback = worker.ip === '127.0.0.1' || worker.ip === 'localhost' || worker.ip.startsWith('127.');
       const probeTimeout = isLoopback ? 600 : 2000;
-      const rpcAlive = (await probeRpcHandshake(worker.ip, worker.rpcPort, probeTimeout)).ok;
-      let alive = rpcAlive || (!isLoopback && (await probeTcpPort(worker.ip, worker.rpcPort, probeTimeout)));
+      const rpcProbe = await probeRpcHandshake(worker.ip, worker.rpcPort, probeTimeout);
+      if (rpcProbe.nativeRpc) worker.rpcNativeReady = true;
+      let alive = rpcProbe.ok || (!isLoopback && (await probeTcpPort(worker.ip, worker.rpcPort, probeTimeout)));
       if (!alive && worker.lanIp && worker.lanPort) {
-        const lanAlive = (await probeRpcHandshake(worker.lanIp, worker.lanPort, 1200)).ok;
-        if (lanAlive) {
+        const lanProbe = await probeRpcHandshake(worker.lanIp, worker.lanPort, 1200);
+        if (lanProbe.ok) {
           worker.ip = worker.lanIp;
           worker.rpcPort = worker.lanPort;
+          if (lanProbe.nativeRpc) worker.rpcNativeReady = true;
           alive = true;
         }
       }
@@ -1758,6 +1762,7 @@ export async function createApp() {
 
     // Attempt authentic ggml-rpc HELLO / GGUF handshake unless WebGPU browser worker or unit test
     let rttMs = Number(b.rttMs || (ip === '127.0.0.1' ? 0.8 : platform === 'WebGPU' ? 7.5 : 4.2));
+    let probeNativeRpc = false;
     let handshakeVerified =
       process.env.NODE_ENV === 'test' ||
       Boolean(b.skipHandshakeProbe) ||
@@ -1770,6 +1775,7 @@ export async function createApp() {
       if (probe.ok) {
         handshakeVerified = true;
         rttMs = probe.rttMs;
+        if (probe.nativeRpc) probeNativeRpc = true;
       } else if (!isLoopback) {
         const tcpOpen = await probeTcpPort(ip, rpcPort, tcpTimeout);
         if (tcpOpen) {
@@ -1820,12 +1826,15 @@ export async function createApp() {
       cpuUsagePct: Number(b.cpuUsagePct || 16),
       gpuUsagePct: Number(b.gpuUsagePct || 0),
       handshakeVerified: true,
+      // Authentic native ggml-rpc HELLO verification overrides stale startup nativeRpcReady=false from app boot
       rpcNativeReady:
-        typeof b.nativeRpcReady === 'boolean'
-          ? b.nativeRpcReady
-          : typeof b.rpcNativeReady === 'boolean'
-            ? b.rpcNativeReady
-            : undefined,
+        probeNativeRpc
+          ? true
+          : typeof b.nativeRpcReady === 'boolean'
+            ? b.nativeRpcReady
+            : typeof b.rpcNativeReady === 'boolean'
+              ? b.rpcNativeReady
+              : undefined,
       cachedBytes: typeof b.cachedBytes === 'number' ? Number(b.cachedBytes) : undefined,
       cachedShards: typeof b.cachedShards === 'number' ? Number(b.cachedShards) : undefined,
       cacheHits: typeof b.cacheHits === 'number' ? Number(b.cacheHits) : undefined,
