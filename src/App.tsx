@@ -24,14 +24,15 @@ import { buildStarClusterNodes, planStarCluster, isSameAndroidWorker } from './d
 import { createDefaultBackendTuningConfig } from './domain/backendTuner';
 import { StarClusterDashboard } from './components/StarClusterDashboard';
 import { ModelsHubPage } from './components/ModelsHubPage';
-import { ChatAndBrainPage } from './components/ChatAndBrainPage';
+import { ChatTab } from './components/ChatTab';
+import { ClusterVisualizerTab } from './components/ClusterVisualizerTab';
 import { ApiHarnessConnectPage } from './components/ApiHarnessConnectPage';
 import { FloatingResourceHud } from './components/FloatingResourceHud';
 import { ModelLoadConfigDrawer } from './components/ModelLoadConfigDrawer';
 import { SettingsMenuDialog } from './components/SettingsMenuDialog';
 import { JoinWorkerPage } from './components/JoinWorkerPage';
 
-type NavTab = 'cluster' | 'models' | 'chat' | 'connect';
+type NavTab = 'chat' | 'visualizer' | 'cluster' | 'models' | 'connect';
 
 const THEME_STORAGE_KEY = 'silica.theme.v1';
 const ONBOARDING_STORAGE_KEY = 'silica.onboarding.dismissed.v1';
@@ -63,7 +64,7 @@ export function App() {
   const [pathname, setPathname] = useState<string>(() =>
     typeof window !== 'undefined' ? window.location.pathname : '/'
   );
-  const [activeTab, setActiveTab] = useState<NavTab>('cluster');
+  const [activeTab, setActiveTab] = useState<NavTab>('chat');
   const [isDarkTheme, setIsDarkTheme] = useState<boolean>(readInitialDarkTheme);
   const [showOnboarding, setShowOnboarding] = useState<boolean>(readInitialShowOnboarding);
   const [hudOpen, setHudOpen] = useState<boolean>(false);
@@ -320,9 +321,10 @@ export function App() {
   );
 
   const navItems: Array<{ id: NavTab; label: string; icon: React.ReactNode }> = [
-    { id: 'cluster', label: 'Cluster', icon: <Network className="w-4 h-4" /> },
-    { id: 'models', label: 'Models', icon: <Boxes className="w-4 h-4" /> },
     { id: 'chat', label: 'Chat', icon: <MessageSquare className="w-4 h-4" /> },
+    { id: 'visualizer', label: 'Cluster Visualizer', icon: <Network className="w-4 h-4" /> },
+    { id: 'cluster', label: 'Nodes & Lab', icon: <Activity className="w-4 h-4" /> },
+    { id: 'models', label: 'Models', icon: <Boxes className="w-4 h-4" /> },
     { id: 'connect', label: 'Connect', icon: <PlugZap className="w-4 h-4" /> },
   ];
 
@@ -441,6 +443,28 @@ export function App() {
 
       {/* Main Workspace Canvas */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6">
+        {activeTab === 'chat' && (
+          <ChatTab
+            activeModel={activeModel}
+            plan={plan}
+            engineStatus={engineStatus}
+            upstreamUrl={upstreamUrl}
+            onUpstreamConnected={handleUpstreamConnected}
+            onOpenLoadConfig={() => setLoadConfigOpen(true)}
+            onStopEngine={handleStopEngine}
+          />
+        )}
+
+        {activeTab === 'visualizer' && (
+          <ClusterVisualizerTab
+            plan={plan}
+            activeModel={activeModel}
+            onRefresh={refreshHardware}
+            onAutoBalance={() => handleApplyAndReload(true)}
+            onStopAndFree={handleStopEngine}
+          />
+        )}
+
         {activeTab === 'cluster' && (
           <StarClusterDashboard
             activeModel={activeModel}
@@ -471,21 +495,6 @@ export function App() {
             engineStatus={engineStatus}
             onActivateModel={handleSelectModel}
             onOpenLoadConfig={() => setLoadConfigOpen(true)}
-          />
-        )}
-
-        {activeTab === 'chat' && (
-          <ChatAndBrainPage
-            activeModel={activeModel}
-            availableModels={availableModels}
-            plan={plan}
-            engineStatus={engineStatus}
-            upstreamUrl={upstreamUrl}
-            onUpstreamConnected={handleUpstreamConnected}
-            onOpenLoadConfig={() => setLoadConfigOpen(true)}
-            onSelectModel={handleSelectModel}
-            onApplyAndReload={handleApplyAndReload}
-            onStopEngine={handleStopEngine}
           />
         )}
 

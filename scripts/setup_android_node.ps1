@@ -31,22 +31,35 @@ foreach ($dev in $rawDevices) {
     # 3. Configure reverse tunnel for phone -> Master heartbeats
     adb -s $serial reverse tcp:3000 tcp:3000 2>$null | Out-Null
 
-    # 4. Kill previous worker process if running
-    adb -s $serial shell "pkill -f com.silica.cluster.WorkerNode 2>/dev/null; pkill -f ggml-rpc-server 2>/dev/null" 2>$null | Out-Null
+    # 4. Check if the Android Companion App (RpcService) or native RPC is already running
+    $probePorts = @("50055", "50052", "50054")
+    $alreadyListening = ""
+    foreach ($p in $probePorts) {
+        $check = (adb -s $serial shell "toybox netstat -tuln 2>/dev/null | toybox grep ':$p ' || true" 2>$null | Out-String).Trim()
+        if ($check) {
+            $alreadyListening = $p
+            break
+        }
+    }
 
-    # 5. Start background worker node (prefer native ggml-rpc-server on port 50055 if available)
-    $hasNative = (adb -s $serial shell "[ -f /data/local/tmp/ggml-rpc-server ] && echo 1" 2>$null | Out-String).Trim()
-    if ($hasNative -eq "1") {
-        Write-Host "  [*] Launching native ggml-rpc-server on port 50055 (Qualcomm-safe)..." -ForegroundColor Cyan
-        adb -s $serial shell "nohup /system/bin/sh -c 'export LD_LIBRARY_PATH=/data/local/tmp; export GGML_VK_VISIBLE_DEVICES=; exec /data/local/tmp/ggml-rpc-server -H 0.0.0.0 -p 50055 -t 6 -c' > /data/local/tmp/rpc55.log 2>&1 &"
-        $boundPort = "50055"
+    if ($alreadyListening) {
+        Write-Host "  [OK] Detected active Silica RPC server on phone port $alreadyListening" -ForegroundColor Green
+        $boundPort = $alreadyListening
     } else {
-        adb -s $serial shell "nohup /system/bin/sh -c 'CLASSPATH=/data/local/tmp/silica_worker.dex app_process /data/local/tmp com.silica.cluster.WorkerNode' > /data/local/tmp/worker.log 2>&1 &"
-        Start-Sleep -Seconds 2
-        $rawPort = (adb -s $serial shell "toybox grep -o 'BoundPort=[0-9]*' /data/local/tmp/worker.log 2>/dev/null | toybox tail -n 1 | toybox cut -d= -f2" 2>$null | Out-String).Trim()
-        $boundPort = ($rawPort -replace "[^0-9]", "")
-        if (-not $boundPort) {
+        # 5. If no active companion app worker is running, launch native standalone daemon with -c cache
+        $hasNative = (adb -s $serial shell "[ -f /data/local/tmp/ggml-rpc-server ] && echo 1" 2>$null | Out-String).Trim()
+        if ($hasNative -eq "1") {
+            Write-Host "  [*] Launching native ggml-rpc-server on port 50055 (Qualcomm-safe, -c flash cache)..." -ForegroundColor Cyan
+            adb -s $serial shell "mkdir -p /data/local/tmp/silica_tensor_cache; cd /data/local/tmp/silica_tensor_cache; nohup /system/bin/sh -c 'export HOME=/data/local/tmp/silica_tensor_cache; export LD_LIBRARY_PATH=/data/local/tmp; export GGML_VK_VISIBLE_DEVICES=; exec /data/local/tmp/ggml-rpc-server -H 0.0.0.0 -p 50055 -t 6 -c' > /data/local/tmp/rpc55.log 2>&1 &"
             $boundPort = "50055"
+        } else {
+            adb -s $serial shell "nohup /system/bin/sh -c 'CLASSPATH=/data/local/tmp/silica_worker.dex app_process /data/local/tmp com.silica.cluster.WorkerNode' > /data/local/tmp/worker.log 2>&1 &"
+            Start-Sleep -Seconds 2
+            $rawPort = (adb -s $serial shell "toybox grep -o 'BoundPort=[0-9]*' /data/local/tmp/worker.log 2>/dev/null | toybox tail -n 1 | toybox cut -d= -f2" 2>$null | Out-String).Trim()
+            $boundPort = ($rawPort -replace "[^0-9]", "")
+            if (-not $boundPort) {
+                $boundPort = "50055"
+            }
         }
     }
     Write-Host "  [*] Forwarding PC port $hostPort -> Phone port $boundPort..." -ForegroundColor Cyan

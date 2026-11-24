@@ -612,10 +612,12 @@ class RpcService : Service(), ComponentCallbacks2 {
         val activeBin = candidateFiles.firstOrNull { it.exists() && it.canExecute() }
 
         rpcServerJob = serviceScope.launch(Dispatchers.IO) {
+            val cacheDir = TensorCacheManager.getCacheDir(applicationContext)
+            // Prioritize Qualcomm-safe port 50055 first, then 50052, then 50054
+            val chosenPort = if (isPortFree(50055)) 50055 else if (isPortFree(50052)) 50052 else 50054
+
             if (activeBin != null) {
                 try {
-                    // Check if default 50052 is free; on Qualcomm devices it is occupied by radio daemon, so fallback to 50055
-                    val chosenPort = if (isPortFree(50052)) 50052 else if (isPortFree(50055)) 50055 else 50054
                     val pb = ProcessBuilder(
                         activeBin.absolutePath,
                         "-H", hostIp,
@@ -623,17 +625,24 @@ class RpcService : Service(), ComponentCallbacks2 {
                         "-t", snap.bigCoreCount.toString(),
                         "-c"
                     )
+                    pb.directory(cacheDir)
                     val env = pb.environment()
-                    env["HOME"] = applicationContext.filesDir.absolutePath
+                    env["HOME"] = cacheDir.absolutePath
+                    env["CACHE_DIR"] = cacheDir.absolutePath
                     val ldPath = "${activeBin.parentFile?.absolutePath ?: nativeDir}:${nativeDir}:${env["LD_LIBRARY_PATH"] ?: ""}"
                     env["LD_LIBRARY_PATH"] = ldPath
-                    if (!snap.vulkanProbePassed || snap.legacyGraphicsMode) {
+                    if (!snap.vulkanProbePassed || snap.legacyGraphicsMode || Build.VERSION.SDK_INT < 30) {
                         env["GGML_VK_VISIBLE_DEVICES"] = ""
                     }
                     val proc = pb.start()
                     nativeProcess = proc
-                    _telemetry.update { it.copy(bindAddress = "$hostIp:$chosenPort") }
-                    appendLog("Spawned native ${activeBin.name} on $hostIp:$chosenPort (-t ${snap.bigCoreCount})")
+                    _telemetry.update {
+                        it.copy(
+                            bindAddress = "$hostIp:$chosenPort",
+                            pairingQrPayload = "clusterd://pair?master=${it.pairedMasterAddress.substringAfter("http://").substringBefore(" ")}&rpc=$chosenPort&secret=${it.clusterSecret}"
+                        )
+                    }
+                    appendLog("Spawned native ${activeBin.name} on $hostIp:$chosenPort (-t ${snap.bigCoreCount}, -c cache: ${cacheDir.name})")
 
                     // Drain stdout and stderr into event logs
                     launch {
@@ -662,23 +671,24 @@ class RpcService : Service(), ComponentCallbacks2 {
                     nativeProcess = null
                 }
             } else {
-                appendLog("Native librpc_server_exec.so not packaged in APK — running embedded GGUF/v1.0.0 handshake responder on $hostIp:50052 (install native rpc-server -c to offload layers)")
+                appendLog("Native librpc_server_exec.so not packaged in APK — running embedded GGUF/v1.0.0 handshake responder on $hostIp:$chosenPort (install native rpc-server -c to offload layers)")
             }
 
             _telemetry.update {
                 it.copy(
+                    bindAddress = "$hostIp:$chosenPort",
                     workerState = if (usbOnly) WorkerRunState.RUNNING_USB else WorkerRunState.RUNNING_WIFI,
                     activeLayersAssigned = (it.safeCapMb / 110L).toInt().coerceIn(2, 24)
                 )
             }
             updateNotification()
 
-            // Embedded protocol listener on 50052 if native binary wasn't occupying the port
+            // Embedded protocol listener on chosenPort if native binary wasn't occupying the port
             if (nativeProcess == null) {
                 try {
                     val sock = ServerSocket()
                     sock.reuseAddress = true
-                    sock.bind(InetSocketAddress(hostIp, 50052))
+                    sock.bind(InetSocketAddress(hostIp, chosenPort))
                     serverSocket = sock
                     while (isActive) {
                         val client = sock.accept()
@@ -1107,10 +1117,12 @@ class RpcService : Service(), ComponentCallbacks2 {
             val host = masterHostPort.substringBefore(":")
             val httpPort = masterHostPort.substringAfter(":", "3000").toIntOrNull() ?: 3000
 
-            // 1. Send UDP registration beacon to Master :50050
+            val activePort = _telemetry.value.bindAddress.substringAfter(":", "50055").toIntOrNull() ?: 50055
+
+            // 1. Send UDP registration beacon to Master :50050 with exact chosen port
             runCatching {
                 java.net.DatagramSocket().use { udp ->
-                    val msg = "CLUSTERD_REGISTER:50052".toByteArray(StandardCharsets.UTF_8)
+                    val msg = "CLUSTERD_REGISTER:$activePort".toByteArray(StandardCharsets.UTF_8)
                     val pkt = java.net.DatagramPacket(
                         msg,
                         msg.size,
@@ -1121,7 +1133,7 @@ class RpcService : Service(), ComponentCallbacks2 {
                 }
             }
 
-            // 2. HTTP POST registration/heartbeat with real hardware telemetry and device-derived worker ID
+            // 2. HTTP POST registration/heartbeat with real hardware telemetry, exact rpcPort, and flash tensor cache stats
             runCatching {
                 val advertiseIp = if (isUsb || host == "127.0.0.1") {
                     "127.0.0.1"
@@ -1132,14 +1144,16 @@ class RpcService : Service(), ComponentCallbacks2 {
                 val isNativeRpcRunning = nativeProcess != null && runCatching {
                     nativeProcess?.isAlive == true
                 }.getOrDefault(false)
+                val cacheStats = TensorCacheManager.getStats(applicationContext, enabled = true)
+
                 val jsonPayload = org.json.JSONObject().apply {
                     put("id", buildDeviceWorkerId())
                     put("label", "${curTel.deviceModel.trim()} (Android)")
                     put("platform", "Android")
                     put("osType", "android")
-                    put("addr", "$advertiseIp:50052")
+                    put("addr", "$advertiseIp:$activePort")
                     put("ip", advertiseIp)
-                    put("rpcPort", 50052)
+                    put("rpcPort", activePort)
                     put("totalRamMb", curTel.totalRamMb)
                     put("availableRamMb", curTel.availableRamMb)
                     put("safeCapMb", curTel.safeCapMb)
@@ -1150,6 +1164,10 @@ class RpcService : Service(), ComponentCallbacks2 {
                     put("linkType", if (isUsb || advertiseIp == "127.0.0.1") "USB-C Tunnel" else "Wi-Fi LAN")
                     put("nativeRpcReady", isNativeRpcRunning)
                     put("allowHttpRegistration", true)
+                    put("cachedBytes", cacheStats.cachedBytes)
+                    put("cachedShards", cacheStats.layerCount)
+                    put("cacheHits", cacheStats.hitCount)
+                    put("cacheStatus", cacheStats.statusLabel)
                 }.toString()
 
                 val targetUrls = if (isUsb || host == "127.0.0.1") {

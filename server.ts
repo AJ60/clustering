@@ -326,10 +326,17 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
       // Auto-detect and register Android worker over USB loopback if RPC port responds
       try {
         let isAlive = await probeTcpPort('127.0.0.1', hostPort, 400);
-        if (!isAlive && phonePort !== 50055) {
-          await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${hostPort}`, 'tcp:50055'], { timeout: 1500 }).catch(() => {});
-          isAlive = await probeTcpPort('127.0.0.1', hostPort, 400);
-          if (isAlive) phonePort = 50055;
+        if (!isAlive) {
+          // Dynamically try candidate ports [50055, 50052, 50054] to connect to active Companion App or native daemon
+          const candidates = [50055, 50052, 50054].filter((p) => p !== phonePort);
+          for (const cand of candidates) {
+            await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${hostPort}`, `tcp:${cand}`], { timeout: 1500 }).catch(() => {});
+            isAlive = await probeTcpPort('127.0.0.1', hostPort, 400);
+            if (isAlive) {
+              phonePort = cand;
+              break;
+            }
+          }
         }
         if (isAlive) {
           let modelName = 'Android Device';
@@ -1079,7 +1086,7 @@ export async function createApp() {
     const loadWaitMs =
       process.env.NODE_ENV === 'test'
         ? 3000
-        : Math.max(15000, Math.min(180000, Math.ceil((activeModel.sizeMb || 4000) / 1024) * 8000 + (finalCliArgs.includes('--rpc') ? 45000 : 0)));
+        : Math.max(20000, Math.min(240000, Math.ceil((activeModel.sizeMb || 4000) / 1024) * 10000 + (finalCliArgs.includes('--rpc') ? 60000 : 0)));
 
     try {
       emitEngineEvent(`Launching ${path.basename(bin)} with local weights (${path.basename(modelLocalPath)})...`);
@@ -1426,7 +1433,6 @@ export async function createApp() {
     // Smart Android deduplication: strictly prefer USB-C loopback (127.0.0.1) over secondary/LAN IPs
     let deduplicated = false;
     if (platform === 'Android') {
-      const incomingIsPrimaryUsb = ip === '127.0.0.1' || ip === 'localhost';
       for (const [existingId, existing] of registeredWorkers.entries()) {
         if (existing.platform !== 'Android') continue;
         const matchesSamePhone =
