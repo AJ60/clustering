@@ -834,7 +834,10 @@ export function planStarCluster(
     '-ctv',
     effectiveConfig.kvCacheQuant,
     '-ngl',
-    String(effectiveConfig.gpuOffloadLayers ?? masterNode?.nglLayers ?? 0),
+    String(
+      effectiveConfig.gpuOffloadLayers ??
+      (workerRpcs.length > 0 ? 999 : (masterNode?.nglLayers ?? 0))
+    ),
     '-b',
     String(learned?.recommendedBatch ?? effectiveConfig.batchSize ?? 1024),
     '-ub',

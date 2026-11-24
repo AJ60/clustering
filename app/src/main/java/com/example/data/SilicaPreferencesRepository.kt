@@ -22,7 +22,7 @@ data class SilicaEngineConfig(
     val localGgufUri: String = "",
     val localGgufName: String = "",
     val threadCountOverride: Int = 0, // 0 = auto-calibrated big cores
-    val safeRamPercent: Int = 45, // strictly bounded 25..50% for LMKD safety
+    val safeRamPercent: Int = 50, // bounded 25..70% for physical RAM ceiling
     val contextLength: Int = 4096,
     val kvCacheQuant: String = "Q8_0", // "F16" | "Q8_0" | "Q4_0"
     val usbBridgeOnly: Boolean = true,

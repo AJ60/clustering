@@ -27,8 +27,17 @@ adb -s "$SERIAL" reverse tcp:3000 tcp:3000 > /dev/null || true
 adb -s "$SERIAL" forward tcp:50052 tcp:50054 > /dev/null || true
 
 echo "[*] Launching Silica Worker Node on device in background..."
-adb -s "$SERIAL" shell "kill -9 \$(toybox pidof app_process 2>/dev/null) 2>/dev/null" || true
-adb -s "$SERIAL" shell "nohup /system/bin/sh -c 'CLASSPATH=/data/local/tmp/silica_worker.dex app_process /data/local/tmp com.silica.cluster.WorkerNode' > /data/local/tmp/worker.log 2>&1 &"
+adb -s "$SERIAL" shell "pkill -f com.silica.cluster.WorkerNode 2>/dev/null; pkill -f ggml-rpc-server 2>/dev/null" || true
+
+HAS_NATIVE=$(adb -s "$SERIAL" shell "[ -f /data/local/tmp/ggml-rpc-server ] && echo 1" | tr -d '\r\n')
+if [ "$HAS_NATIVE" = "1" ]; then
+    echo "[*] Launching native ggml-rpc-server on port 50055 (Qualcomm-safe)..."
+    adb -s "$SERIAL" shell "nohup /system/bin/sh -c 'export LD_LIBRARY_PATH=/data/local/tmp; export GGML_VK_VISIBLE_DEVICES=; exec /data/local/tmp/ggml-rpc-server -H 0.0.0.0 -p 50055 -t 4' > /data/local/tmp/rpc55.log 2>&1 &"
+    adb -s "$SERIAL" forward tcp:50052 tcp:50055 > /dev/null || true
+else
+    adb -s "$SERIAL" forward tcp:50052 tcp:50054 > /dev/null || true
+    adb -s "$SERIAL" shell "nohup /system/bin/sh -c 'CLASSPATH=/data/local/tmp/silica_worker.dex app_process /data/local/tmp com.silica.cluster.WorkerNode' > /data/local/tmp/worker.log 2>&1 &"
+fi
 
 sleep 2
 

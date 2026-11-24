@@ -298,20 +298,13 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
           timeout: 1500,
         }).catch(() => {});
 
-        // Discover existing or alternate forward (Qualcomm devices occupy 50052 with radio daemon, so worker binds to 50054)
-        let phonePort = 50052;
+        // Discover existing or alternate forward (Qualcomm devices occupy 50052 with radio daemon, so worker binds to 50055)
+        let phonePort = 50055;
         try {
           const { stdout: fList } = await execFileAsync('adb', ['forward', '--list'], { timeout: 1000 });
           const m = fList.match(new RegExp(`${serial}\\s+tcp:50052\\s+tcp:(\\d+)`));
           if (m && m[1]) {
             phonePort = parseInt(m[1], 10);
-          } else {
-            // Check worker log for dynamic bound port if 50052 was taken
-            const { stdout: logOut } = await execFileAsync('adb', ['-s', serial, 'shell', 'toybox grep -o "BoundPort=[0-9]*" /data/local/tmp/worker.log 2>/dev/null | toybox tail -n 1'], { timeout: 1000 }).catch(() => ({ stdout: '' }));
-            const pMatch = logOut.match(/BoundPort=(\d+)/);
-            if (pMatch && pMatch[1]) {
-              phonePort = parseInt(pMatch[1], 10);
-            }
           }
         } catch {}
 
@@ -321,17 +314,12 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
 
         // Auto-detect and register Android worker over USB loopback if RPC port responds
         try {
-          let probe = await probeRpcHandshake('127.0.0.1', 50052, 1200);
-          if (!probe.ok && phonePort === 50052) {
-            // Retry on port 50054 for Qualcomm devices
-            await execFileAsync('adb', ['-s', serial, 'forward', 'tcp:50052', 'tcp:50054'], { timeout: 1500 }).catch(() => {});
-            const retryProbe = await probeRpcHandshake('127.0.0.1', 50052, 1200);
-            if (retryProbe.ok) {
-              probe = retryProbe;
-              phonePort = 50054;
-            }
+          let isAlive = await probeTcpPort('127.0.0.1', 50052, 400);
+          if (!isAlive && phonePort !== 50055) {
+            await execFileAsync('adb', ['-s', serial, 'forward', 'tcp:50052', 'tcp:50055'], { timeout: 1500 }).catch(() => {});
+            isAlive = await probeTcpPort('127.0.0.1', 50052, 400);
+            if (isAlive) phonePort = 50055;
           }
-          const isAlive = probe.ok || (await probeTcpPort('127.0.0.1', 50052, 400));
           if (isAlive) {
             let modelName = 'Android Device';
             try {
@@ -462,12 +450,10 @@ async function pruneStaleWorkers(): Promise<void> {
     if (process.env.NODE_ENV !== 'test') {
       const isLoopback = worker.ip === '127.0.0.1' || worker.ip === 'localhost' || worker.ip.startsWith('127.');
       if (isLoopback) {
-        const probe = await probeRpcHandshake(worker.ip, worker.rpcPort, 1200);
-        if (!probe.ok) {
-          const tcpAlive = await probeTcpPort(worker.ip, worker.rpcPort, 400);
-          if (!tcpAlive) {
-            toDelete.push(id);
-          }
+        // If llama-server or native RPC is running, probe non-destructively via TCP
+        const tcpAlive = await probeTcpPort(worker.ip, worker.rpcPort, 400);
+        if (!tcpAlive) {
+          toDelete.push(id);
         }
       } else {
         const alive = await probeTcpPort(worker.ip, worker.rpcPort, 400);
@@ -796,18 +782,25 @@ async function waitForServerHealth(
   child?: ChildProcess | null
 ): Promise<boolean> {
   const start = Date.now();
+  let consecutive503s = 0;
   while (Date.now() - start < maxWaitMs) {
     if (child && child.exitCode !== null) return false;
     try {
       const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), 400);
+      const t = setTimeout(() => controller.abort(), 600);
       const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
       clearTimeout(t);
       if (res.ok) return true;
+      if (res.status === 503) {
+        consecutive503s++;
+        if (consecutive503s % 10 === 0) {
+          emitEngineEvent(`Model weights loading across cluster (${Math.round((Date.now() - start) / 1000)}s elapsed)...`);
+        }
+      }
     } catch {
       // not yet up
     }
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 400));
   }
   return false;
 }
@@ -1084,7 +1077,7 @@ export async function createApp() {
     const loadWaitMs =
       process.env.NODE_ENV === 'test'
         ? 3000
-        : Math.max(10000, Math.min(35000, Math.ceil((activeModel.sizeMb || 4000) / 1024) * 2000));
+        : Math.max(15000, Math.min(180000, Math.ceil((activeModel.sizeMb || 4000) / 1024) * 8000 + (finalCliArgs.includes('--rpc') ? 45000 : 0)));
 
     try {
       emitEngineEvent(`Launching ${path.basename(bin)} with local weights (${path.basename(modelLocalPath)})...`);

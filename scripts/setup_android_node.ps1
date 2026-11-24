@@ -30,19 +30,23 @@ if (Test-Path $dexPath) {
 adb -s $serial reverse tcp:3000 tcp:3000 | Out-Null
 
 # 4. Kill previous worker process if running
-adb -s $serial shell "pkill -f com.silica.cluster.WorkerNode 2>/dev/null" | Out-Null
+adb -s $serial shell "pkill -f com.silica.cluster.WorkerNode 2>/dev/null; pkill -f ggml-rpc-server 2>/dev/null" | Out-Null
 
-# 5. Start background worker node via app_process
+# 5. Start background worker node (prefer native ggml-rpc-server on port 50055 if available)
 Write-Host "[*] Launching Silica Worker Node on device in background..." -ForegroundColor Cyan
-adb -s $serial shell "nohup /system/bin/sh -c 'CLASSPATH=/data/local/tmp/silica_worker.dex app_process /data/local/tmp com.silica.cluster.WorkerNode' > /data/local/tmp/worker.log 2>&1 &"
-
-Start-Sleep -Seconds 2
-
-# 6. Detect bound port from worker log
-$rawPort = (adb -s $serial shell "toybox grep -o 'BoundPort=[0-9]*' /data/local/tmp/worker.log 2>/dev/null | toybox tail -n 1 | toybox cut -d= -f2" | Out-String).Trim()
-$boundPort = ($rawPort -replace "[^0-9]", "")
-if (-not $boundPort) {
-    $boundPort = "50054"
+$hasNative = (adb -s $serial shell "[ -f /data/local/tmp/ggml-rpc-server ] && echo 1" | Out-String).Trim()
+if ($hasNative -eq "1") {
+    Write-Host "[*] Launching native ggml-rpc-server on port 50055 (Qualcomm-safe)..." -ForegroundColor Cyan
+    adb -s $serial shell "nohup /system/bin/sh -c 'export LD_LIBRARY_PATH=/data/local/tmp; export GGML_VK_VISIBLE_DEVICES=; exec /data/local/tmp/ggml-rpc-server -H 0.0.0.0 -p 50055 -t 4' > /data/local/tmp/rpc55.log 2>&1 &"
+    $boundPort = "50055"
+} else {
+    adb -s $serial shell "nohup /system/bin/sh -c 'CLASSPATH=/data/local/tmp/silica_worker.dex app_process /data/local/tmp com.silica.cluster.WorkerNode' > /data/local/tmp/worker.log 2>&1 &"
+    Start-Sleep -Seconds 2
+    $rawPort = (adb -s $serial shell "toybox grep -o 'BoundPort=[0-9]*' /data/local/tmp/worker.log 2>/dev/null | toybox tail -n 1 | toybox cut -d= -f2" | Out-String).Trim()
+    $boundPort = ($rawPort -replace "[^0-9]", "")
+    if (-not $boundPort) {
+        $boundPort = "50055"
+    }
 }
 Write-Host "[*] Worker listening on device port: $boundPort" -ForegroundColor Cyan
 

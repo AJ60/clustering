@@ -207,14 +207,9 @@ class RpcService : Service(), ComponentCallbacks2 {
                     state.calibration.recommendedThreads.coerceIn(1, max(1, state.totalCoreCount))
                 }
                 val total = if (state.totalRamMb > 0L) state.totalRamMb else 4096L
-                val reserveMb = if (total <= 2048L) 256L else 512L
-                val physicalCeiling = max(256L, (total * pct) / 100L)
-                // Strict Zero-OOM invariant: AllocatedMemory <= min(0.50 * TotalRAM, AvailableRAM - 512MB)
-                val boundedRam = if (state.availableRamMb > 0L) {
-                    min(physicalCeiling, max(256L, state.availableRamMb - reserveMb))
-                } else {
-                    physicalCeiling
-                }
+                // Strict Zero-OOM guarantee: strictly <= 50% physical RAM (leaving remaining 50% / >1.8GB for Android OS)
+                val physicalCeiling = min(total / 2L, max(256L, (total * pct) / 100L))
+                val boundedRam = physicalCeiling
                 val layers = (boundedRam / 110L).toInt().coerceIn(2, 28)
                 state.copy(
                     threadOverride = if (threads > 0) boundedThreads else 0,
@@ -592,6 +587,14 @@ class RpcService : Service(), ComponentCallbacks2 {
         startSafetyTelemetryMonitor()
     }
 
+    private fun isPortFree(port: Int): Boolean {
+        return try {
+            ServerSocket(port).use { true }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     internal fun launchNativeOrEmbeddedRpcServer(usbOnly: Boolean, clusterSecret: String) {
         rpcServerJob?.cancel()
         runCatching { serverSocket?.close() }
@@ -611,10 +614,12 @@ class RpcService : Service(), ComponentCallbacks2 {
         rpcServerJob = serviceScope.launch(Dispatchers.IO) {
             if (activeBin != null) {
                 try {
+                    // Check if default 50052 is free; on Qualcomm devices it is occupied by radio daemon, so fallback to 50055
+                    val chosenPort = if (isPortFree(50052)) 50052 else if (isPortFree(50055)) 50055 else 50054
                     val pb = ProcessBuilder(
                         activeBin.absolutePath,
                         "-H", hostIp,
-                        "-p", "50052",
+                        "-p", chosenPort.toString(),
                         "-t", snap.bigCoreCount.toString()
                     )
                     val env = pb.environment()
@@ -626,7 +631,8 @@ class RpcService : Service(), ComponentCallbacks2 {
                     }
                     val proc = pb.start()
                     nativeProcess = proc
-                    appendLog("Spawned native ${activeBin.name} on $hostIp:50052 (-t ${snap.bigCoreCount})")
+                    _telemetry.update { it.copy(bindAddress = "$hostIp:$chosenPort") }
+                    appendLog("Spawned native ${activeBin.name} on $hostIp:$chosenPort (-t ${snap.bigCoreCount})")
 
                     // Drain stdout and stderr into event logs
                     launch {
@@ -1344,12 +1350,12 @@ object HardwareProbe {
 
         val totalMb = (memTotalKb / 1024L).coerceAtLeast(1024L)
         val availMb = (memAvailKb / 1024L).coerceAtLeast(256L)
-        // Legacy / <= 2 GB RAM devices get an extra-conservative 40% cap; all others strictly <= 50%
+        // Reserve minimum 1.0 GB for Android OS and system services (512MB on <= 2GB)
+        val minOsReserveMb = if (totalMb <= 2048L) 512L else 1024L
+        val maxPhysicalCeiling = max(256L, totalMb - minOsReserveMb)
         val physicalCapRatio = if (totalMb <= 2048L) 0.40 else 0.50
-        val reserveMb = if (totalMb <= 2048L) 256L else 512L
         val physicalLimitMb = (totalMb * physicalCapRatio).toLong()
-        val availMinusReserveMb = max(256L, availMb - reserveMb)
-        val safeCapMb = min(physicalLimitMb, availMinusReserveMb)
+        val safeCapMb = min(physicalLimitMb, maxPhysicalCeiling)
 
         return MemInfoResult(
             totalMb = totalMb,

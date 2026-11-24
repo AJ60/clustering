@@ -426,7 +426,7 @@ class SilicaViewModel(
     }
 
     fun setSafeRamPercent(percent: Int) {
-        val clamped = percent.coerceIn(25, 50)
+        val clamped = percent.coerceIn(25, 70)
         viewModelScope.launch {
             val threads = uiState.value.config.threadCountOverride
             repository.updateEngineConfig { it.copy(safeRamPercent = clamped) }
