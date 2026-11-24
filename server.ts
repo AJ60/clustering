@@ -57,7 +57,7 @@ const execFileAsync = promisify(execFile);
 
 const PORT = Number(process.env.PORT || 3000);
 const CLUSTER_SECRET = process.env.CLUSTER_SECRET || 'clusterd-default-hmac-key';
-const WORKER_TTL_MS = 10_000;
+const WORKER_TTL_MS = 30_000;
 const HISTORY_PATH = path.resolve(process.cwd(), 'cluster_history.json');
 
 interface RegisteredWorkerRecord {
@@ -282,95 +282,103 @@ async function probeGpuCached(): Promise<{
 async function setupAdbTunnelsCached(): Promise<string[]> {
   if (process.env.NODE_ENV === 'test') return [];
   const now = Date.now();
-  if (cachedAdbInfo && now - cachedAdbInfo.ts < 10_000) {
+  if (cachedAdbInfo && now - cachedAdbInfo.ts < 5_000) {
     return cachedAdbInfo.serials;
   }
   try {
     const { stdout } = await execFileAsync('adb', ['devices', '-l'], { timeout: 2000 });
     const serials: string[] = [];
-    for (const line of stdout.split('\n').slice(1)) {
+    const deviceLines = stdout.split('\n').slice(1).filter((l) => {
+      const parts = l.trim().split(/\s+/);
+      return parts.length >= 2 && parts[1] === 'device';
+    });
+
+    let fList = '';
+    try {
+      const res = await execFileAsync('adb', ['forward', '--list'], { timeout: 1000 });
+      fList = res.stdout;
+    } catch {}
+
+    for (let i = 0; i < deviceLines.length; i++) {
+      const line = deviceLines[i];
       const parts = line.trim().split(/\s+/);
-      if (parts.length >= 2 && parts[1] === 'device') {
-        const serial = parts[0];
-        serials.push(serial);
-        // Pass explicit `-s <serial>` so multi-device ADB never fails
-        await execFileAsync('adb', ['-s', serial, 'reverse', 'tcp:3000', 'tcp:3000'], {
+      const serial = parts[0];
+      serials.push(serial);
+
+      // Pass explicit `-s <serial>` so multi-device ADB never fails
+      await execFileAsync('adb', ['-s', serial, 'reverse', 'tcp:3000', 'tcp:3000'], {
+        timeout: 1500,
+      }).catch(() => {});
+
+      // Assign unique host port per ADB device: Device 0 -> 50052, Device 1 -> 50053, Device 2 -> 50054
+      let hostPort = 50052 + i;
+      let phonePort = 50055;
+      const m = fList.match(new RegExp(`${serial}\\s+tcp:(\\d+)\\s+tcp:(\\d+)`));
+      if (m && m[1] && m[2]) {
+        hostPort = parseInt(m[1], 10);
+        phonePort = parseInt(m[2], 10);
+      } else {
+        await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${hostPort}`, `tcp:${phonePort}`], {
           timeout: 1500,
         }).catch(() => {});
+      }
 
-        // Discover existing or alternate forward (Qualcomm devices occupy 50052 with radio daemon, so worker binds to 50055)
-        let phonePort = 50055;
-        try {
-          const { stdout: fList } = await execFileAsync('adb', ['forward', '--list'], { timeout: 1000 });
-          const m = fList.match(new RegExp(`${serial}\\s+tcp:50052\\s+tcp:(\\d+)`));
-          if (m && m[1]) {
-            phonePort = parseInt(m[1], 10);
-          }
-        } catch {}
-
-        await execFileAsync('adb', ['-s', serial, 'forward', 'tcp:50052', `tcp:${phonePort}`], {
-          timeout: 1500,
-        }).catch(() => {});
-
-        // Auto-detect and register Android worker over USB loopback if RPC port responds
-        try {
-          let isAlive = await probeTcpPort('127.0.0.1', 50052, 400);
-          if (!isAlive && phonePort !== 50055) {
-            await execFileAsync('adb', ['-s', serial, 'forward', 'tcp:50052', 'tcp:50055'], { timeout: 1500 }).catch(() => {});
-            isAlive = await probeTcpPort('127.0.0.1', 50052, 400);
-            if (isAlive) phonePort = 50055;
-          }
-          if (isAlive) {
-            let modelName = 'Android Device';
-            try {
-              const { stdout: mOut } = await execFileAsync('adb', ['-s', serial, 'shell', 'getprop ro.product.model'], { timeout: 1000 });
-              if (mOut.trim()) modelName = mOut.trim();
-            } catch {}
-            let totalRam = 4096;
-            try {
-              const { stdout: memOut } = await execFileAsync('adb', ['-s', serial, 'shell', "cat /proc/meminfo | grep MemTotal"], { timeout: 1000 });
-              const m = memOut.match(/MemTotal:\s+(\d+)\s+kB/);
-              if (m) totalRam = Math.round(parseInt(m[1], 10) / 1024);
-            } catch {}
-
-            const workerId = `android-usb-${serial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
-            const existing = registeredWorkers.get(workerId) || Array.from(registeredWorkers.values()).find(
-              (w) => (w.ip === '127.0.0.1' || w.ip === 'localhost') && w.rpcPort === 50052
-            );
-            // 50% physical RAM cap (e.g. 1851MB on 3702MB / 4GB total)
-            const halfPhysRam = Math.floor(totalRam * 0.5);
-            const safeCap = existing?.safeCapMb && existing.safeCapMb > 256
-              ? Math.min(halfPhysRam, existing.safeCapMb)
-              : halfPhysRam;
-            const bigCores = probe.bigCores || existing?.bigCores || 4;
-
-            registeredWorkers.set(workerId, {
-              id: existing?.id || workerId,
-              label: existing?.label || `${modelName} (Android)`,
-              platform: 'Android',
-              osType: 'android',
-              ip: '127.0.0.1',
-              rpcPort: 50052,
-              linkType: 'USB-C Tunnel',
-              totalRamMb: totalRam,
-              availableRamMb: Math.round(totalRam * 0.5),
-              safeCapMb: safeCap,
-              vramMb: 0,
-              computeTflops: 1.8,
-              memBwGbps: 28.0,
-              bigCores: bigCores,
-              rttMs: probe.ok && probe.rttMs < 100 ? probe.rttMs : 0.8,
-              pktLossPct: 0,
-              tempC: existing?.tempC || 32.0,
-              cpuUsagePct: 15,
-              gpuUsagePct: 0,
-              handshakeVerified: true,
-              lastSeenMs: now,
-            });
-          }
-        } catch {
-          // Probe failed or app not running yet
+      // Auto-detect and register Android worker over USB loopback if RPC port responds
+      try {
+        let isAlive = await probeTcpPort('127.0.0.1', hostPort, 400);
+        if (!isAlive && phonePort !== 50055) {
+          await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${hostPort}`, 'tcp:50055'], { timeout: 1500 }).catch(() => {});
+          isAlive = await probeTcpPort('127.0.0.1', hostPort, 400);
+          if (isAlive) phonePort = 50055;
         }
+        if (isAlive) {
+          let modelName = 'Android Device';
+          const modelMatch = line.match(/model:([^\s]+)/);
+          if (modelMatch && modelMatch[1]) {
+            modelName = modelMatch[1].replace(/_/g, ' ');
+          }
+          let totalRam = /x216|gta9|tab/i.test(line) ? 8192 : 4096;
+          try {
+            const { stdout: memOut } = await execFileAsync('adb', ['-s', serial, 'shell', 'cat', '/proc/meminfo'], { timeout: 1200 });
+            const memMatch = memOut.match(/MemTotal:\s+(\d+)\s+kB/);
+            if (memMatch) totalRam = Math.round(parseInt(memMatch[1], 10) / 1024);
+          } catch {}
+
+          const workerId = `android-usb-${serial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+          const existing = registeredWorkers.get(workerId);
+          // 50% physical RAM cap (e.g. 1851MB on 3702MB / 4GB total, 3700MB on 8GB total)
+          const halfPhysRam = Math.floor(totalRam * 0.5);
+          const safeCap = existing?.safeCapMb && existing.safeCapMb > 256
+            ? Math.min(halfPhysRam, existing.safeCapMb)
+            : halfPhysRam;
+          const bigCores = existing?.bigCores || 4;
+
+          registeredWorkers.set(workerId, {
+            id: existing?.id || workerId,
+            label: existing?.label || `${modelName} (Android)`,
+            platform: 'Android',
+            osType: 'android',
+            ip: '127.0.0.1',
+            rpcPort: hostPort,
+            linkType: 'USB-C Tunnel',
+            totalRamMb: totalRam,
+            availableRamMb: Math.round(totalRam * 0.5),
+            safeCapMb: safeCap,
+            vramMb: 0,
+            computeTflops: 1.8,
+            memBwGbps: 28.0,
+            bigCores: bigCores,
+            rttMs: 0.8,
+            pktLossPct: 0,
+            tempC: existing?.tempC || 32.0,
+            cpuUsagePct: 15,
+            gpuUsagePct: 0,
+            handshakeVerified: true,
+            lastSeenMs: now,
+          });
+        }
+      } catch {
+        // Probe failed or app not running yet
       }
     }
     cachedAdbInfo = { ts: now, serials };
@@ -489,13 +497,7 @@ async function probeLiveHardware(): Promise<LiveHardwareProbe> {
     if (!w.handshakeVerified) continue;
     const isDup = connectedDevices.some((existing) =>
       isSameAndroidWorker(existing, w) ||
-      (existing.ip === w.ip && existing.rpcPort === w.rpcPort) ||
-      (existing.platform === 'Android' &&
-        w.platform === 'Android' &&
-        (!existing.ip || existing.ip === 'localhost' || existing.ip.startsWith('127.')) &&
-        (!w.ip || w.ip === 'localhost' || w.ip.startsWith('127.')) &&
-        !existing.id.startsWith('vm-') &&
-        !w.id.startsWith('vm-'))
+      (existing.ip === w.ip && existing.rpcPort === w.rpcPort)
     );
     if (isDup) continue;
     const androidHardCap =
@@ -1429,16 +1431,17 @@ export async function createApp() {
         if (existing.platform !== 'Android') continue;
         const matchesSamePhone =
           existingId === id ||
-          existing.ip === ip ||
-          isSameAndroidWorker(existing, { platform, ip, id, label });
+          (existing.ip === ip && existing.rpcPort === rpcPort) ||
+          isSameAndroidWorker(existing, { platform, ip, id, label, rpcPort });
         if (!matchesSamePhone) continue;
 
         const existingIsPrimaryUsb = existing.ip === '127.0.0.1' || existing.ip === 'localhost';
-        if (existingIsPrimaryUsb && !incomingIsPrimaryUsb && existingId !== id) {
-          // Keep preferred USB-C loopback worker; refresh heartbeat timestamp
+        if (existingIsPrimaryUsb && existingId !== id) {
+          // Keep preferred USB-C loopback worker; refresh heartbeat timestamp and telemetry
           existing.lastSeenMs = Date.now();
           if (typeof b.tempC === 'number') existing.tempC = Number(b.tempC);
           if (typeof b.availableRamMb === 'number') existing.availableRamMb = Number(b.availableRamMb);
+          if (typeof b.safeCapMb === 'number' && b.safeCapMb > 256) existing.safeCapMb = Number(b.safeCapMb);
           const snapshot = await computeRuntimeSnapshot();
           const planned = snapshot.plan.nodes.find((n) => n.nodeId === existingId);
           res.json({

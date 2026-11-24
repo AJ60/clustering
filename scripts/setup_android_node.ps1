@@ -15,44 +15,44 @@ if (-not $rawDevices) {
     exit 1
 }
 
-$firstDevice = $rawDevices[0].Line.Trim()
-$serial = ($firstDevice -split "\s+")[0].Trim()
-Write-Host "[OK] Detected authorized Android device: $serial" -ForegroundColor Green
+$devIndex = 0
+foreach ($dev in $rawDevices) {
+    $line = $dev.Line.Trim()
+    $serial = ($line -split "\s+")[0].Trim()
+    $hostPort = 50052 + $devIndex
+    Write-Host "[OK] Configuring Android device ($($devIndex + 1)/$($rawDevices.Count)): $serial (Host Port: $hostPort)" -ForegroundColor Green
 
-# 2. Push compiled Dalvik/ART worker
-$dexPath = Join-Path $PSScriptRoot "silica_worker.dex"
-if (Test-Path $dexPath) {
-    Write-Host "[*] Pushing native silica_worker.dex to /data/local/tmp/..." -ForegroundColor Cyan
-    adb -s $serial push $dexPath /data/local/tmp/silica_worker.dex | Out-Null
-}
-
-# 3. Configure reverse tunnel for phone -> Master heartbeats
-adb -s $serial reverse tcp:3000 tcp:3000 | Out-Null
-
-# 4. Kill previous worker process if running
-adb -s $serial shell "pkill -f com.silica.cluster.WorkerNode 2>/dev/null; pkill -f ggml-rpc-server 2>/dev/null" | Out-Null
-
-# 5. Start background worker node (prefer native ggml-rpc-server on port 50055 if available)
-Write-Host "[*] Launching Silica Worker Node on device in background..." -ForegroundColor Cyan
-$hasNative = (adb -s $serial shell "[ -f /data/local/tmp/ggml-rpc-server ] && echo 1" | Out-String).Trim()
-if ($hasNative -eq "1") {
-    Write-Host "[*] Launching native ggml-rpc-server on port 50055 (Qualcomm-safe)..." -ForegroundColor Cyan
-    adb -s $serial shell "nohup /system/bin/sh -c 'export LD_LIBRARY_PATH=/data/local/tmp; export GGML_VK_VISIBLE_DEVICES=; exec /data/local/tmp/ggml-rpc-server -H 0.0.0.0 -p 50055 -t 4' > /data/local/tmp/rpc55.log 2>&1 &"
-    $boundPort = "50055"
-} else {
-    adb -s $serial shell "nohup /system/bin/sh -c 'CLASSPATH=/data/local/tmp/silica_worker.dex app_process /data/local/tmp com.silica.cluster.WorkerNode' > /data/local/tmp/worker.log 2>&1 &"
-    Start-Sleep -Seconds 2
-    $rawPort = (adb -s $serial shell "toybox grep -o 'BoundPort=[0-9]*' /data/local/tmp/worker.log 2>/dev/null | toybox tail -n 1 | toybox cut -d= -f2" | Out-String).Trim()
-    $boundPort = ($rawPort -replace "[^0-9]", "")
-    if (-not $boundPort) {
-        $boundPort = "50055"
+    # 2. Push compiled Dalvik/ART worker
+    $dexPath = Join-Path $PSScriptRoot "silica_worker.dex"
+    if (Test-Path $dexPath) {
+        adb -s $serial push $dexPath /data/local/tmp/silica_worker.dex 2>$null | Out-Null
     }
-}
-Write-Host "[*] Worker listening on device port: $boundPort" -ForegroundColor Cyan
 
-# 7. Configure ADB forward: PC port 50052 -> Phone port $boundPort
-Write-Host "[*] Forwarding PC port 50052 -> Phone port $boundPort..." -ForegroundColor Cyan
-adb -s $serial forward tcp:50052 "tcp:$boundPort" | Out-Null
+    # 3. Configure reverse tunnel for phone -> Master heartbeats
+    adb -s $serial reverse tcp:3000 tcp:3000 2>$null | Out-Null
+
+    # 4. Kill previous worker process if running
+    adb -s $serial shell "pkill -f com.silica.cluster.WorkerNode 2>/dev/null; pkill -f ggml-rpc-server 2>/dev/null" 2>$null | Out-Null
+
+    # 5. Start background worker node (prefer native ggml-rpc-server on port 50055 if available)
+    $hasNative = (adb -s $serial shell "[ -f /data/local/tmp/ggml-rpc-server ] && echo 1" 2>$null | Out-String).Trim()
+    if ($hasNative -eq "1") {
+        Write-Host "  [*] Launching native ggml-rpc-server on port 50055 (Qualcomm-safe)..." -ForegroundColor Cyan
+        adb -s $serial shell "nohup /system/bin/sh -c 'export LD_LIBRARY_PATH=/data/local/tmp; export GGML_VK_VISIBLE_DEVICES=; exec /data/local/tmp/ggml-rpc-server -H 0.0.0.0 -p 50055 -t 6' > /data/local/tmp/rpc55.log 2>&1 &"
+        $boundPort = "50055"
+    } else {
+        adb -s $serial shell "nohup /system/bin/sh -c 'CLASSPATH=/data/local/tmp/silica_worker.dex app_process /data/local/tmp com.silica.cluster.WorkerNode' > /data/local/tmp/worker.log 2>&1 &"
+        Start-Sleep -Seconds 2
+        $rawPort = (adb -s $serial shell "toybox grep -o 'BoundPort=[0-9]*' /data/local/tmp/worker.log 2>/dev/null | toybox tail -n 1 | toybox cut -d= -f2" 2>$null | Out-String).Trim()
+        $boundPort = ($rawPort -replace "[^0-9]", "")
+        if (-not $boundPort) {
+            $boundPort = "50055"
+        }
+    }
+    Write-Host "  [*] Forwarding PC port $hostPort -> Phone port $boundPort..." -ForegroundColor Cyan
+    adb -s $serial forward "tcp:$hostPort" "tcp:$boundPort" 2>$null | Out-Null
+    $devIndex++
+}
 
 # 8. Verify 32-byte GGUF RPC v9 handshake probe from PC
 Write-Host "[*] Verifying 32-byte GGUF RPC v9 handshake over USB tunnel..." -ForegroundColor Cyan

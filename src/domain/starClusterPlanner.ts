@@ -152,8 +152,8 @@ export function evaluateNodeThermal(
  * (e.g. ADB loopback aliases, different daemon registrations, or similar model names).
  */
 export function isSameAndroidWorker(
-  a: { platform?: string; ip?: string; id?: string; model?: string; label?: string },
-  b: { platform?: string; ip?: string; id?: string; model?: string; label?: string }
+  a: { platform?: string; ip?: string; id?: string; model?: string; label?: string; rpcPort?: number },
+  b: { platform?: string; ip?: string; id?: string; model?: string; label?: string; rpcPort?: number }
 ): boolean {
   // Both nodes MUST be Android (case-insensitive)
   const aPlat = (a.platform || '').toLowerCase();
@@ -168,20 +168,20 @@ export function isSameAndroidWorker(
   // 1. Direct ID match
   if (a.id && b.id && a.id === b.id) return true;
 
-  // 2. Exact IP match
-  if (a.ip && b.ip && a.ip === b.ip) return true;
-
-  // 3. Both are mapped to the local host ADB loopback tunnel (127.0.0.0/8 or localhost)
-  const aIsLoopback = !a.ip || a.ip === 'localhost' || a.ip.startsWith('127.');
-  const bIsLoopback = !b.ip || b.ip === 'localhost' || b.ip.startsWith('127.');
-  if (aIsLoopback && bIsLoopback) {
-    // If neither is a distinct VM, any two loopback Android records are the same physical device
-    if (!a.id?.startsWith('vm-') && !b.id?.startsWith('vm-')) {
-      return true;
-    }
+  // Distinct physical USB devices (different serial numbers or distinct host RPC ports) must NEVER be deduplicated
+  if (a.id?.startsWith('android-usb-') && b.id?.startsWith('android-usb-') && a.id !== b.id) {
+    return false;
+  }
+  const aIsLoopback = !a.ip || a.ip === 'localhost' || a.ip === '127.0.0.1';
+  const bIsLoopback = !b.ip || b.ip === 'localhost' || b.ip === '127.0.0.1';
+  if (aIsLoopback && bIsLoopback && a.rpcPort && b.rpcPort && a.rpcPort !== b.rpcPort) {
+    return false;
   }
 
-  // 4. Normalized label / model similarity (e.g. "Redmi Note 7 Pro" vs "Xiaomi Redmi Note 7 Pro (Android)")
+  // 2. Exact IP match with same port or missing port
+  if (a.ip && b.ip && a.ip === b.ip && (!a.rpcPort || !b.rpcPort || a.rpcPort === b.rpcPort)) return true;
+
+  // 3. Normalized label / model similarity (e.g. "Redmi Note 7 Pro" vs "Xiaomi Redmi Note 7 Pro (Android)")
   const normA = (a.label || a.model || a.id || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const normB = (b.label || b.model || b.id || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   if (normA && normB) {
@@ -189,6 +189,14 @@ export function isSameAndroidWorker(
       return true;
     }
   }
+
+  // 4. Fallback for loopback workers where label is missing but neither is a distinct VM
+  if (aIsLoopback && bIsLoopback && (!a.label || !b.label)) {
+    if (!a.id?.startsWith('vm-') && !b.id?.startsWith('vm-')) {
+      return true;
+    }
+  }
+
   return false;
 }
 
