@@ -40,11 +40,7 @@ import {
 } from './src/domain/backendTuner';
 import { CURATED_HF_GGUF_CATALOG, inferHfModelMetadata } from './src/data/hfModelsCatalog';
 import { parseLocalGgufModel } from './src/data/localModelsScanner';
-import {
-  computeClusterAuthToken,
-  decodeGgufHandshakeFrame,
-  HANDSHAKE_CHALLENGE,
-} from './src/domain/clusterAuth';
+import { decodeGgufHandshakeFrame } from './src/domain/clusterAuth';
 import {
   ClusterHistoryDocument,
   createEmptyHistoryDocument,
@@ -63,7 +59,7 @@ const execFileAsync = promisify(execFile);
 
 const PORT = Number(process.env.PORT || 3000);
 const CLUSTER_SECRET = process.env.CLUSTER_SECRET || 'clusterd-default-hmac-key';
-const WORKER_TTL_MS = 30_000;
+const WORKER_TTL_MS = 90_000;
 const HISTORY_PATH = path.resolve(process.cwd(), 'cluster_history.json');
 
 interface RegisteredWorkerRecord {
@@ -105,6 +101,9 @@ const benchmarkHistory: ClusterBenchmarkResult[] = [];
 let cachedGpuInfo: { ts: number; vramMb: number; gpuName?: string; gpuTempC?: number; gpuUsagePct?: number } | null = null;
 let cachedAdbInfo: { ts: number; serials: string[] } | null = null;
 let spawnedLlamaChild: ChildProcess | null = null;
+let runtimeRpcActive = false;
+let runtimeRpcEndpoints: string[] = [];
+const rpcProbeCache = new Map<string, { ts: number; res: { ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number } }>();
 
 // Turn-boundary drain state machine
 let activeGenerationTurns = 0;
@@ -357,6 +356,25 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
         }).catch(() => {});
       }
 
+      // Do not probe or overwrite an ADB tunnel port while llama-server holds an active RPC session on it!
+      const busyOnRuntime =
+        runtimeRpcActive &&
+        spawnedLlamaChild !== null &&
+        spawnedLlamaChild.exitCode === null &&
+        (runtimeRpcEndpoints.includes(`127.0.0.1:${hostPort}`) ||
+          (lanIp ? runtimeRpcEndpoints.includes(`${lanIp}:${phonePort}`) : false));
+
+      if (busyOnRuntime) {
+        const wId = isWireless
+          ? `android-wifi-${canonicalSerial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+          : `android-usb-${canonicalSerial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+        const existingBusy = registeredWorkers.get(wId);
+        if (existingBusy) {
+          existingBusy.lastSeenMs = now;
+        }
+        continue;
+      }
+
       // Auto-detect and register Android worker via direct Wi-Fi probe or USB loopback RPC probe
       try {
         let isAlive = false;
@@ -468,14 +486,25 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
 }
 
 /**
- * Performs a genuine TCP + 32-byte keyed GGUF/RPC v9/v1.0.0 handshake probe against a worker.
+ * Performs a genuine ggml-rpc v7 HELLO (or GGUF/RPC v9) handshake probe against a worker.
+ * Eliminates false positives on dead ADB forward ports and prevents "Expected HELLO command" log spam.
  */
 async function probeRpcHandshake(
   host: string,
   port: number,
-  timeoutMs = 1500
+  timeoutMs = 1500,
+  forceRefresh = false
 ): Promise<{ ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number }> {
-  return new Promise((resolve) => {
+  const cacheKey = `${host}:${port}`;
+  const now = Date.now();
+  if (!forceRefresh && process.env.NODE_ENV !== 'test') {
+    const cached = rpcProbeCache.get(cacheKey);
+    if (cached && now - cached.ts < 3500) {
+      return cached.res;
+    }
+  }
+
+  const res = await new Promise<{ ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number }>((resolve) => {
     let resolved = false;
     const safeResolve = (val: { ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number }) => {
       if (!resolved) {
@@ -498,15 +527,19 @@ async function probeRpcHandshake(
 
     socket.on('connect', () => {
       connected = true;
-      const authToken = computeClusterAuthToken(CLUSTER_SECRET, HANDSHAKE_CHALLENGE);
-      socket.write(Buffer.from(authToken));
+      // Authentic ggml-rpc v7.x HELLO frame: uint8 cmd=14 + uint64 size=24 (LE) + 24 bytes payload (version=7.0.0)
+      const hello = Buffer.alloc(1 + 8 + 24, 0);
+      hello.writeUInt8(14, 0);
+      hello.writeBigUInt64LE(24n, 1);
+      hello.writeUInt8(7, 9);
+      socket.write(hello);
     });
 
     socket.on('data', (chunk: Buffer) => {
       chunks.push(chunk);
       totalLen += chunk.length;
+      const full = Buffer.concat(chunks);
       if (totalLen >= 32) {
-        const full = Buffer.concat(chunks);
         const decoded = decodeGgufHandshakeFrame(new Uint8Array(full.subarray(0, 32)));
         const rttMs = Math.max(0.4, Date.now() - start);
         socket.destroy();
@@ -520,12 +553,20 @@ async function probeRpcHandshake(
           return;
         }
         safeResolve({ ok: true, rttMs });
+        return;
+      }
+      // Valid ggml-rpc HELLO reply starts with uint64 LE size = 28 (0x1c)
+      if (totalLen >= 12 && full.readUInt32LE(0) === 28 && full.readUInt32LE(4) === 0) {
+        const rttMs = Math.max(0.4, Date.now() - start);
+        socket.destroy();
+        safeResolve({ ok: true, rttMs });
       }
     });
 
     socket.on('close', () => {
-      if (connected) {
-        // Native ggml-rpc-server closes connection when non-RPC command arrives, which confirms port is live
+      // On Windows ADB forwards, a dead phone target emits connect() followed immediately by close() with 0 bytes.
+      // Only treat as live if genuine RPC data arrived.
+      if (connected && totalLen >= 12) {
         safeResolve({ ok: true, rttMs: Math.max(0.4, Date.now() - start) });
       } else {
         safeResolve({ ok: false, rttMs: timeoutMs });
@@ -534,39 +575,59 @@ async function probeRpcHandshake(
 
     socket.on('error', (err: NodeJS.ErrnoException) => {
       socket.destroy();
-      // If TCP connection was established and the native RPC daemon reset the socket (ECONNRESET/EPIPE),
-      // that proves the remote RPC daemon is actively listening and responsive!
-      if (connected && (err.code === 'ECONNRESET' || err.code === 'EPIPE')) {
+      if (connected && totalLen >= 12) {
+        safeResolve({ ok: true, rttMs: Math.max(0.4, Date.now() - start) });
+      } else if (connected && (err.code === 'ECONNRESET' || err.code === 'EPIPE') && !host.startsWith('127.')) {
+        // Non-loopback TCP peer sent an explicit RST after accepting socket -> remote daemon active
         safeResolve({ ok: true, rttMs: Math.max(0.4, Date.now() - start) });
       } else {
         safeResolve({ ok: false, rttMs: timeoutMs });
       }
     });
   });
+
+  if (process.env.NODE_ENV !== 'test') {
+    rpcProbeCache.set(cacheKey, { ts: Date.now(), res });
+  }
+  return res;
 }
 
 async function pruneStaleWorkers(): Promise<void> {
   const now = Date.now();
   const toDelete: string[] = [];
+  const engineHoldingRpc =
+    runtimeRpcActive && spawnedLlamaChild !== null && spawnedLlamaChild.exitCode === null;
+
   for (const [id, worker] of registeredWorkers.entries()) {
+    const endpoint = `${worker.ip}:${worker.rpcPort}`;
+    const lanEndpoint = worker.lanIp && worker.lanPort ? `${worker.lanIp}:${worker.lanPort}` : '';
+    const attachedToLiveEngine =
+      engineHoldingRpc &&
+      (runtimeRpcEndpoints.includes(endpoint) ||
+        (lanEndpoint !== '' && runtimeRpcEndpoints.includes(lanEndpoint)));
+
+    if (attachedToLiveEngine) {
+      // Single-client ggml-rpc-server blocks incoming secondary probes while serving llama-server.
+      // Refresh heartbeat while the engine process holding this RPC connection is healthy.
+      worker.lastSeenMs = now;
+      continue;
+    }
+
     if (now - worker.lastSeenMs > WORKER_TTL_MS) {
       toDelete.push(id);
       continue;
     }
-    // In live runtime, verify that the worker is actively responsive.
-    // For local ADB-forwarded loopback workers (127.0.0.1/localhost), the host ADB port stays open
-    // even when the worker on the device is stopped. Therefore, we probe the 32-byte RPC handshake
-    // to strictly verify the worker daemon on the phone is actually alive.
     if (process.env.NODE_ENV !== 'test') {
       const isLoopback = worker.ip === '127.0.0.1' || worker.ip === 'localhost' || worker.ip.startsWith('127.');
-      const probeTimeout = isLoopback ? 400 : 2000;
-      let alive = (await probeRpcHandshake(worker.ip, worker.rpcPort, probeTimeout)).ok || (await probeTcpPort(worker.ip, worker.rpcPort, probeTimeout));
+      const probeTimeout = isLoopback ? 600 : 2000;
+      const rpcAlive = (await probeRpcHandshake(worker.ip, worker.rpcPort, probeTimeout)).ok;
+      let alive = rpcAlive || (!isLoopback && (await probeTcpPort(worker.ip, worker.rpcPort, probeTimeout)));
       if (!alive && worker.lanIp && worker.lanPort) {
-        alive = (await probeRpcHandshake(worker.lanIp, worker.lanPort, 1200)).ok || (await probeTcpPort(worker.lanIp, worker.lanPort, 1200));
-        if (alive) {
-          // Worker reachable directly via Wi-Fi; update connection destination
+        const lanAlive = (await probeRpcHandshake(worker.lanIp, worker.lanPort, 1200)).ok;
+        if (lanAlive) {
           worker.ip = worker.lanIp;
           worker.rpcPort = worker.lanPort;
+          alive = true;
         }
       }
       if (!alive) {
@@ -972,15 +1033,23 @@ async function computeRuntimeSnapshot(): Promise<RuntimeClusterSnapshot> {
   const learned = historyStore.profiles[profileKey] ?? null;
   const plan = planStarCluster(nodes, activeModel, undefined, tuningConfig, learned);
 
-  // If live engine is running without RPC (e.g. Master direct fallback or no workers),
-  // ensure the plan honestly attributes 100% compute to Master and sets worker layers to 0
-  if (engineStatus.running && (!registeredWorkers.size || !plan.cliArgs.includes('--rpc'))) {
+  // If live llama-server engine is running WITHOUT active RPC (e.g. retracted to Master-only fallback or 0 RPCs),
+  // reflect reality honestly: attribute 100% compute to Master and mark workers Standby (0 layers).
+  const isRunningWithoutRpc =
+    engineStatus.running &&
+    engineStatus.serverType === 'llama-server' &&
+    (!runtimeRpcActive || runtimeRpcEndpoints.length === 0);
+
+  if (isRunningWithoutRpc || (engineStatus.running && (!registeredWorkers.size || !plan.cliArgs.includes('--rpc')))) {
     for (const node of plan.nodes) {
       if (node.role === 'Master') {
         node.allocatedLayers = activeModel.layers;
         node.layerStart = 0;
         node.layerEnd = activeModel.layers - 1;
         node.allocatedMb = Math.round(plan.neededMb);
+        node.statusNote = isRunningWithoutRpc && registeredWorkers.size > 0
+          ? 'Master Fallback Active (0 RPC active)'
+          : node.statusNote;
       } else {
         node.allocatedLayers = 0;
         node.layerStart = -1;
@@ -988,7 +1057,7 @@ async function computeRuntimeSnapshot(): Promise<RuntimeClusterSnapshot> {
         node.allocatedMb = 0;
         const isStillRegistered = registeredWorkers.has(node.nodeId) || registeredWorkers.size > 0;
         node.isConnected = isStillRegistered;
-        node.statusNote = isStillRegistered ? 'Standby (0 layers assigned)' : 'Offline';
+        node.statusNote = isStillRegistered ? 'Standby (RPC not attached)' : 'Offline';
       }
     }
     plan.tensorSplit = [100];
@@ -1130,6 +1199,8 @@ export async function createApp() {
       return { ok: false, statusCode: 400, spawned: false, message: msg };
     }
 
+    runtimeRpcActive = false;
+    runtimeRpcEndpoints = [];
     const snap = await computeRuntimeSnapshot();
     const finalCliArgs = [...snap.plan.cliArgs];
     const mIdx = finalCliArgs.indexOf('-m');
@@ -1148,38 +1219,39 @@ export async function createApp() {
 
     // Verify RPC targets in live runtime (in unit test mode, allow mock binary to inspect --rpc flags)
     let activeRpcLabel = '';
+    let verifiedRpcs: string[] = [];
     const rpcIdx = finalCliArgs.indexOf('--rpc');
     if (rpcIdx >= 0 && rpcIdx + 1 < finalCliArgs.length) {
       const rawRpcs = finalCliArgs[rpcIdx + 1].split(',').map((s) => s.trim()).filter(Boolean);
       if (process.env.NODE_ENV === 'test') {
+        verifiedRpcs = rawRpcs;
         activeRpcLabel = rawRpcs.join(',');
       } else {
-        const verifiedRpcs: string[] = [];
         for (const target of rawRpcs) {
           const [rHost, rPortStr] = target.split(':');
           const rPort = Number(rPortStr || 50055);
           const isLoopback = rHost === '127.0.0.1' || rHost === 'localhost' || rHost.startsWith('127.');
-          let probe = await probeRpcHandshake(rHost, rPort, isLoopback ? 800 : 2500);
-          let isAlive = probe.ok || (await probeTcpPort(rHost, rPort, isLoopback ? 400 : 2500));
+          // Never trust probeTcpPort on Windows ADB loopback (adb.exe accepts TCP even if phone port is dead)
+          let probe = await probeRpcHandshake(rHost, rPort, isLoopback ? 800 : 2500, true);
+          let isAlive = probe.ok || (!isLoopback && (await probeTcpPort(rHost, rPort, 2000)));
           if (!isAlive) {
-            // Give remote worker 500ms grace in case socket was resetting after process reload
-            await new Promise((resolve) => setTimeout(resolve, 500));
-            probe = await probeRpcHandshake(rHost, rPort, isLoopback ? 800 : 2500);
-            isAlive = probe.ok || (await probeTcpPort(rHost, rPort, isLoopback ? 400 : 2500));
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            probe = await probeRpcHandshake(rHost, rPort, isLoopback ? 800 : 2500, true);
+            isAlive = probe.ok || (!isLoopback && (await probeTcpPort(rHost, rPort, 2000)));
           }
           if (!isAlive && isLoopback) {
             for (const w of registeredWorkers.values()) {
               if (w.lanIp && w.lanPort) {
-                const lanAlive = (await probeRpcHandshake(w.lanIp, w.lanPort, 2000)).ok || (await probeTcpPort(w.lanIp, w.lanPort, 2000));
+                const lanAlive = (await probeRpcHandshake(w.lanIp, w.lanPort, 1800, true)).ok;
                 if (lanAlive) {
-                  verifiedRpcs.push(`${w.lanIp}:${w.lanPort}`);
+                  const lanTarget = `${w.lanIp}:${w.lanPort}`;
+                  if (!verifiedRpcs.includes(lanTarget)) verifiedRpcs.push(lanTarget);
                   isAlive = true;
                   break;
                 }
               }
             }
-          }
-          if (isAlive && !verifiedRpcs.includes(target)) {
+          } else if (isAlive && !verifiedRpcs.includes(target)) {
             verifiedRpcs.push(target);
           }
         }
@@ -1188,9 +1260,34 @@ export async function createApp() {
           if (tsIdx >= 0) finalCliArgs.splice(tsIdx, 2);
           const newRpcIdx = finalCliArgs.indexOf('--rpc');
           if (newRpcIdx >= 0) finalCliArgs.splice(newRpcIdx, 2);
+          // Re-clamp -ngl to Master safe GPU layers when all RPC workers dropped
+          const nglIdx = finalCliArgs.indexOf('-ngl');
+          if (nglIdx >= 0 && nglIdx + 1 < finalCliArgs.length) {
+            const masterSafeLayers = snap.plan.nodes.find((n) => n.role === 'Master')?.nglLayers ?? 8;
+            finalCliArgs[nglIdx + 1] = String(Math.min(Number(finalCliArgs[nglIdx + 1]) || 0, masterSafeLayers));
+          }
         } else {
           finalCliArgs[rpcIdx + 1] = verifiedRpcs.join(',');
           activeRpcLabel = verifiedRpcs.join(',');
+          // If some RPC targets dropped out, keep --tensor-split count aligned with [RPC0..k, MasterCUDA]
+          if (verifiedRpcs.length !== rawRpcs.length) {
+            const masterSafeLayers = snap.plan.nodes.find((n) => n.role === 'Master')?.nglLayers ?? 0;
+            const survivingWorkers = snap.plan.nodes.filter(
+              (n) => n.role === 'Worker' && n.allocatedLayers > 0 && verifiedRpcs.includes(`${n.ip}:${n.rpcPort}`)
+            );
+            const workerWeights = verifiedRpcs.map((_, idx) => survivingWorkers[idx]?.allocatedLayers ?? 2);
+            const splitWeights = masterSafeLayers > 0 ? [...workerWeights, masterSafeLayers] : workerWeights;
+            const totalW = splitWeights.reduce((a, b) => a + b, 0) || 1;
+            const newNgl = splitWeights.reduce((a, b) => a + b, 0);
+            const nglIdx = finalCliArgs.indexOf('-ngl');
+            if (nglIdx >= 0 && nglIdx + 1 < finalCliArgs.length) {
+              finalCliArgs[nglIdx + 1] = String(newNgl);
+            }
+            const tsIdx = finalCliArgs.indexOf('--tensor-split');
+            if (tsIdx >= 0 && tsIdx + 1 < finalCliArgs.length) {
+              finalCliArgs[tsIdx + 1] = splitWeights.map((w) => ((w / totalW) * 100).toFixed(1)).join(',');
+            }
+          }
         }
       }
     }
@@ -1262,6 +1359,18 @@ export async function createApp() {
       if (ready) {
         spawnedLlamaChild = child;
         upstreamBaseUrl = engineOrigin;
+        runtimeRpcActive = finalCliArgs.includes('--rpc') && verifiedRpcs.length > 0;
+        runtimeRpcEndpoints = runtimeRpcActive ? [...verifiedRpcs] : [];
+        if (runtimeRpcActive) {
+          const refreshedAt = Date.now();
+          for (const w of registeredWorkers.values()) {
+            const ep = `${w.ip}:${w.rpcPort}`;
+            const lanEp = w.lanIp && w.lanPort ? `${w.lanIp}:${w.lanPort}` : '';
+            if (runtimeRpcEndpoints.includes(ep) || (lanEp && runtimeRpcEndpoints.includes(lanEp))) {
+              w.lastSeenMs = refreshedAt;
+            }
+          }
+        }
         engineStatus.running = true;
         engineStatus.upstreamUrl = upstreamBaseUrl;
         engineStatus.serverType = 'llama-server';
@@ -1323,11 +1432,13 @@ export async function createApp() {
         if (fbReady) {
           spawnedLlamaChild = fallbackChild;
           upstreamBaseUrl = engineOrigin;
+          runtimeRpcActive = false;
+          runtimeRpcEndpoints = [];
           engineStatus.running = true;
           engineStatus.upstreamUrl = upstreamBaseUrl;
           engineStatus.serverType = 'llama-server';
           engineStatus.lastError = null;
-          const msg = `Live stock llama-server running on Master ${engineOrigin} (${path.basename(modelLocalPath)})`;
+          const msg = `Live stock llama-server running on Master ${engineOrigin} (Master Fallback — 0 RPC active)`;
           return { ok: true, statusCode: 200, spawned: true, message: msg };
         }
         if (fallbackChild.exitCode === null) {
@@ -1606,7 +1717,7 @@ export async function createApp() {
           const usbStillAlive =
             process.env.NODE_ENV === 'test'
               ? true
-              : await probeTcpPort(existing.ip, existing.rpcPort, 400);
+              : (await probeRpcHandshake(existing.ip, existing.rpcPort, 500)).ok;
           if (usbStillAlive) {
             // Keep preferred USB-C loopback worker; refresh heartbeat timestamp and telemetry
             existing.lastSeenMs = Date.now();
@@ -1645,7 +1756,7 @@ export async function createApp() {
       }
     }
 
-    // Attempt live 32-byte GGUF/RPC v9 handshake unless WebGPU browser worker or unit test
+    // Attempt authentic ggml-rpc HELLO / GGUF handshake unless WebGPU browser worker or unit test
     let rttMs = Number(b.rttMs || (ip === '127.0.0.1' ? 0.8 : platform === 'WebGPU' ? 7.5 : 4.2));
     let handshakeVerified =
       process.env.NODE_ENV === 'test' ||
@@ -1654,12 +1765,12 @@ export async function createApp() {
     if (!handshakeVerified && ip) {
       const isLoopback = ip === '127.0.0.1' || ip === 'localhost' || ip.startsWith('127.');
       const probeTimeout = isLoopback ? 1200 : 2500;
-      const tcpTimeout = isLoopback ? 400 : 2000;
-      const probe = await probeRpcHandshake(ip, rpcPort, probeTimeout);
+      const tcpTimeout = 2000;
+      const probe = await probeRpcHandshake(ip, rpcPort, probeTimeout, true);
       if (probe.ok) {
         handshakeVerified = true;
         rttMs = probe.rttMs;
-      } else {
+      } else if (!isLoopback) {
         const tcpOpen = await probeTcpPort(ip, rpcPort, tcpTimeout);
         if (tcpOpen) {
           handshakeVerified = true;
@@ -1995,6 +2106,8 @@ export async function createApp() {
       spawnedLlamaChild = null;
     }
     upstreamBaseUrl = '';
+    runtimeRpcActive = false;
+    runtimeRpcEndpoints = [];
     engineStatus.running = false;
     engineStatus.upstreamUrl = null;
     engineStatus.serverType = 'offline';

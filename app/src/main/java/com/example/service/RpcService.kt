@@ -617,69 +617,84 @@ class RpcService : Service(), ComponentCallbacks2 {
             val chosenPort = DEFAULT_RPC_PORT
 
             if (activeBin != null) {
-                try {
-                    val libDir = activeBin.parentFile?.absolutePath ?: nativeDir
-                    val shellCmd = "export LD_LIBRARY_PATH=\"$libDir:$nativeDir\"; export XDG_CACHE_HOME=\"${cacheDir.absolutePath}\"; export HOME=\"${cacheDir.absolutePath}\"; export GGML_VK_VISIBLE_DEVICES=; exec \"${activeBin.absolutePath}\" -H $hostIp -p $chosenPort -t ${snap.bigCoreCount} -c -d CPU"
+                var restartAttempt = 0
+                while (isActive) {
+                    var proc: Process? = null
+                    try {
+                        val currentSnap = _telemetry.value
+                        val threads = currentSnap.bigCoreCount.coerceIn(2, 8)
+                        val libDir = activeBin.parentFile?.absolutePath ?: nativeDir
+                        // Keep GGML_VK_VISIBLE_DEVICES="" + -d CPU to prevent Mali/mobile driver SIGSEGVs under MoE IQ4_XS RPC buffers
+                        val shellCmd = "export LD_LIBRARY_PATH=\"$libDir:$nativeDir\"; export XDG_CACHE_HOME=\"${cacheDir.absolutePath}\"; export HOME=\"${cacheDir.absolutePath}\"; export GGML_VK_VISIBLE_DEVICES=; exec \"${activeBin.absolutePath}\" -H $hostIp -p $chosenPort -t $threads -c -d CPU"
 
-                    val pb = ProcessBuilder("/system/bin/sh", "-c", shellCmd)
-                    pb.directory(cacheDir)
-                    val env = pb.environment()
-                    env["HOME"] = cacheDir.absolutePath
-                    env["XDG_CACHE_HOME"] = cacheDir.absolutePath
-                    env["CACHE_DIR"] = cacheDir.absolutePath
-                    env["LD_LIBRARY_PATH"] = "$libDir:$nativeDir"
-                    env["GGML_VK_VISIBLE_DEVICES"] = ""
-                    val proc = pb.start()
-                    nativeProcess = proc
-                    _telemetry.update {
-                        it.copy(
-                            bindAddress = "$hostIp:$chosenPort",
-                            pairingQrPayload = "clusterd://pair?master=${it.pairedMasterAddress.substringAfter("http://").substringBefore(" ")}&rpc=$chosenPort&secret=${it.clusterSecret}"
-                        )
-                    }
-                    appendLog("Spawned native ${activeBin.name} on $hostIp:$chosenPort (-t ${snap.bigCoreCount}, -c cache: ${cacheDir.name})")
+                        val pb = ProcessBuilder("/system/bin/sh", "-c", shellCmd)
+                        pb.directory(cacheDir)
+                        val env = pb.environment()
+                        env["HOME"] = cacheDir.absolutePath
+                        env["XDG_CACHE_HOME"] = cacheDir.absolutePath
+                        env["CACHE_DIR"] = cacheDir.absolutePath
+                        env["LD_LIBRARY_PATH"] = "$libDir:$nativeDir"
+                        env["GGML_VK_VISIBLE_DEVICES"] = ""
+                        proc = pb.start()
+                        nativeProcess = proc
 
-                    // Drain stdout and stderr into event logs
-                    launch {
-                        runCatching {
-                            proc.inputStream.bufferedReader().useLines { lines ->
-                                lines.forEach { line -> appendLog("[rpc] $line") }
+                        _telemetry.update {
+                            it.copy(
+                                bindAddress = "$hostIp:$chosenPort",
+                                workerState = if (usbOnly) WorkerRunState.RUNNING_USB else WorkerRunState.RUNNING_WIFI,
+                                pairingQrPayload = "clusterd://pair?master=${it.pairedMasterAddress.substringAfter("http://").substringBefore(" ")}&rpc=$chosenPort&secret=${it.clusterSecret}"
+                            )
+                        }
+                        updateNotification()
+                        appendLog("Spawned native ${activeBin.name} on $hostIp:$chosenPort (-t $threads, -c cache: ${cacheDir.name})")
+
+                        val outJob = launch {
+                            runCatching {
+                                proc.inputStream.bufferedReader().useLines { lines ->
+                                    lines.forEach { line -> appendLog("[rpc] $line") }
+                                }
                             }
                         }
-                    }
-                    launch {
-                        runCatching {
-                            proc.errorStream.bufferedReader().useLines { lines ->
-                                lines.forEach { line -> appendLog("[rpc] $line") }
+                        val errJob = launch {
+                            runCatching {
+                                proc.errorStream.bufferedReader().useLines { lines ->
+                                    lines.forEach { line -> appendLog("[rpc] $line") }
+                                }
                             }
                         }
-                    }
 
-                    delay(800)
-                    if (!proc.isAlive) {
-                        val exit = proc.exitValue()
-                        appendLog("Native rpc process exited early with code $exit, falling back to embedded socket")
+                        val exitCode = proc.waitFor()
+                        outJob.cancel()
+                        errJob.cancel()
                         nativeProcess = null
+
+                        if (!isActive) break
+                        restartAttempt += 1
+                        val backoffMs = min(8000L, 1200L * restartAttempt)
+                        appendLog("[watchdog] Native RPC server exited (code $exitCode) — restarting in ${backoffMs}ms...")
+                        _telemetry.update { it.copy(workerState = WorkerRunState.PROBING) }
+                        updateNotification()
+                        delay(backoffMs)
+                    } catch (e: Exception) {
+                        nativeProcess = null
+                        if (!isActive) break
+                        appendLog("[watchdog] Native exec error: ${e.message} — retrying in 2000ms")
+                        delay(2000L)
+                    } finally {
+                        runCatching {
+                            if (proc?.isAlive == true) proc.destroyForcibly()
+                        }
                     }
-                } catch (e: Exception) {
-                    appendLog("Native exec fallback to embedded GGUF v9 socket responder: ${e.message}")
-                    nativeProcess = null
                 }
             } else {
-                appendLog("Native librpc_server_exec.so not packaged in APK — running embedded GGUF/v1.0.0 handshake responder on $hostIp:$chosenPort (install native rpc-server -c to offload layers)")
-            }
-
-            _telemetry.update {
-                it.copy(
-                    bindAddress = "$hostIp:$chosenPort",
-                    workerState = if (usbOnly) WorkerRunState.RUNNING_USB else WorkerRunState.RUNNING_WIFI,
-                    activeLayersAssigned = (it.safeCapMb / 110L).toInt().coerceIn(2, 24)
-                )
-            }
-            updateNotification()
-
-            // Embedded protocol listener on chosenPort if native binary wasn't occupying the port
-            if (nativeProcess == null) {
+                appendLog("Native librpc_server_exec.so not packaged in APK — running embedded GGUF/v1.0.0 handshake responder on $hostIp:$chosenPort")
+                _telemetry.update {
+                    it.copy(
+                        bindAddress = "$hostIp:$chosenPort",
+                        workerState = if (usbOnly) WorkerRunState.RUNNING_USB else WorkerRunState.RUNNING_WIFI
+                    )
+                }
+                updateNotification()
                 try {
                     val sock = ServerSocket()
                     sock.reuseAddress = true

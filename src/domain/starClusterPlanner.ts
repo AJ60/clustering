@@ -186,10 +186,17 @@ export function isSameAndroidWorker(
   // 2. Exact IP match with same port or missing port
   if (a.ip && b.ip && a.ip === b.ip && (!a.rpcPort || !b.rpcPort || a.rpcPort === b.rpcPort)) return true;
 
-  // 3. Normalized label / model similarity (e.g. "Redmi Note 7 Pro" vs "Xiaomi Redmi Note 7 Pro (Android)")
-  const normA = (a.label || a.model || a.id || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  const normB = (b.label || b.model || b.id || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  if (normA && normB) {
+  // 3. Normalized label / model similarity (strip transport/vendor tags like "(USB)", "samsung", "(Android)")
+  const normalizeModelToken = (raw?: string) =>
+    (raw || '')
+      .toLowerCase()
+      .replace(/\((usb|wi-?fi|android|adb|lan|p2p|tunnel|rpc)\)/gi, ' ')
+      .replace(/\b(usb|wifi|wi-fi|android|samsung|xiaomi|google|oneplus|motorola|realme|oppo|vivo|redmi|poco)\b/gi, ' ')
+      .replace(/[^a-z0-9]/g, '');
+
+  const normA = normalizeModelToken(a.label || a.model || a.id);
+  const normB = normalizeModelToken(b.label || b.model || b.id);
+  if (normA && normB && normA.length >= 3 && normB.length >= 3) {
     if (normA === normB || normA.includes(normB) || normB.includes(normA)) {
       return true;
     }
@@ -649,20 +656,36 @@ export function planStarCluster(
     let totalWorkerLayers = 0;
 
     const msum = manualParts.reduce((a, b) => a + b, 0);
+    // Reserve ~180 MB per worker for RPC compute buffers inside safeRamMb
     let workerIdx = 0;
     for (const w of workers) {
-      // Safe cap constraint: worker can hold at most effectiveCapMb / mbPerLayer
-      const maxCapLayers = Math.max(0, Math.floor(w.effectiveCapMb / Math.max(1, mbPerLayer)));
-      // Throughput-proportional share with an active worker offload minimum (at least 2 layers if capacity fits)
+      const maxCapLayers = Math.max(
+        0,
+        Math.floor(Math.max(0, w.effectiveCapMb - 180) / Math.max(1, mbPerLayer))
+      );
       const scoreShare = w.score / totalScore;
       const manualShare =
         hasManualSplit && manualParts.length === workers.length + 1 && manualParts[workerIdx + 1]
           ? manualParts[workerIdx + 1] / msum
           : null;
-      const targetLayers = Math.max(
-        1,
-        Math.round(totalLayers * (manualShare ?? scoreShare))
-      );
+
+      let targetLayers: number;
+      if (manualShare !== null) {
+        targetLayers = Math.max(1, Math.round(totalLayers * manualShare));
+      } else {
+        // Capacity-aware auto-balancing: when model exceeds Master VRAM, utilize 50–75% of worker's
+        // safe RAM pool (bounded cleanly for latency) rather than starving workers at 1 layer.
+        const fastLink = w.rttMs <= 25 && w.pktLossPct < 1.0;
+        const utilFraction = fastLink ? 0.72 : 0.45;
+        const capDrivenTarget = Math.max(2, Math.floor(maxCapLayers * utilFraction));
+        const maxAutoShareLayers = Math.max(1, Math.ceil(totalLayers * 0.25));
+        const scoreDriven = Math.max(1, Math.round(totalLayers * scoreShare));
+        targetLayers = Math.min(
+          maxAutoShareLayers,
+          Math.max(scoreDriven, Math.min(maxCapLayers, capDrivenTarget))
+        );
+      }
+
       const allocated = Math.max(0, Math.min(maxCapLayers, targetLayers));
       workerLayerMap.set(w.nodeId, allocated);
       totalWorkerLayers += allocated;
@@ -868,37 +891,26 @@ export function planStarCluster(
   // Any layers beyond -ngl are executed by Master CPU.
   const cliNgl = activeWorkers.length > 0 ? masterGpuLayers + totalWorkerLayers : masterGpuLayers;
 
-  // In llama.cpp, --tensor-split defines how the offloaded layers (-ngl) are distributed among backend devices.
-  // Device 0 = Master GPU (if present), Device 1..k = RPC Workers.
+  // In llama.cpp, --tensor-split follows device registration order inside `llama_prepare_model_devices`:
+  // RPC backends (RPC0..RPCk) are registered BEFORE local CUDA devices (CUDA0).
+  // Ordering split weights as [Worker0..k, MasterCUDA] ensures Master GPU gets its safe VRAM share and Worker gets its RAM share.
   let cliTensorSplitCsv = '';
   if (activeWorkers.length > 0 && cliNgl > 0) {
-    if (masterGpuLayers > 0) {
-      const splitWeights = [masterGpuLayers, ...activeWorkers.map((w) => w.allocatedLayers)];
-      const totalW = splitWeights.reduce((a, b) => a + b, 0) || 1;
-      let running = 0;
-      const pcts = splitWeights.map((w, idx) => {
-        if (idx === splitWeights.length - 1) {
-          return Number(Math.max(0, 100 - running).toFixed(1));
-        }
-        const p = Number(((w / totalW) * 100).toFixed(1));
-        running += p;
-        return p;
-      });
-      cliTensorSplitCsv = pcts.map((v) => v.toFixed(1)).join(',');
-    } else {
-      const splitWeights = activeWorkers.map((w) => w.allocatedLayers);
-      const totalW = splitWeights.reduce((a, b) => a + b, 0) || 1;
-      let running = 0;
-      const pcts = splitWeights.map((w, idx) => {
-        if (idx === splitWeights.length - 1) {
-          return Number(Math.max(0, 100 - running).toFixed(1));
-        }
-        const p = Number(((w / totalW) * 100).toFixed(1));
-        running += p;
-        return p;
-      });
-      cliTensorSplitCsv = pcts.map((v) => v.toFixed(1)).join(',');
-    }
+    const splitWeights =
+      masterGpuLayers > 0
+        ? [...activeWorkers.map((w) => w.allocatedLayers), masterGpuLayers]
+        : activeWorkers.map((w) => w.allocatedLayers);
+    const totalW = splitWeights.reduce((a, b) => a + b, 0) || 1;
+    let running = 0;
+    const pcts = splitWeights.map((w, idx) => {
+      if (idx === splitWeights.length - 1) {
+        return Number(Math.max(0, 100 - running).toFixed(1));
+      }
+      const p = Number(((w / totalW) * 100).toFixed(1));
+      running += p;
+      return p;
+    });
+    cliTensorSplitCsv = pcts.map((v) => v.toFixed(1)).join(',');
   } else if (tensorSplit.length > 1) {
     cliTensorSplitCsv = tensorSplitCsv;
   }
@@ -935,7 +947,12 @@ export function planStarCluster(
   if (effectiveConfig.contBatching !== false) cliArgs.push('--cont-batching');
   if ((effectiveConfig.cacheReuse ?? 256) > 0) cliArgs.push('--cache-reuse', String(effectiveConfig.cacheReuse ?? 256));
   if (useNoMmap) cliArgs.push('--no-mmap');
-  if (effectiveConfig.moeCpuOffload && model.architecture === 'MoE') cliArgs.push('-ot', '.ffn_.*_exps.=CPU');
+  // Smart MoE Placement: Only emit blanket `-ot .ffn_.*_exps.=CPU` when offloading full-model attention (`cliNgl >= model.layers`)
+  // or GPU-only 0-offload fallback. When `cliNgl < model.layers`, omitting blanket `.ffn_.*_exps.=CPU` keeps full MoE layers
+  // (attention + experts) intact inside CUDA0 and RPC0, eliminating ~700 cross-bus graph splits/token and putting both GPUs/workers to work.
+  if (effectiveConfig.moeCpuOffload && model.architecture === 'MoE' && (cliNgl === 0 || cliNgl >= model.layers)) {
+    cliArgs.push('-ot', '.ffn_.*_exps.=CPU');
+  }
   if (workerRpcs.length > 0) cliArgs.push('--rpc', workerRpcs.join(','));
   if (cliTensorSplitCsv && (activeWorkers.length > 0 ? (masterGpuLayers > 0 || activeWorkers.length > 1) : tensorSplit.length > 1)) {
     cliArgs.push('--tensor-split', cliTensorSplitCsv);

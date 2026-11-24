@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -43,6 +44,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -72,12 +74,14 @@ fun SilicaLayerShardingCard(
         "L${masterNode.layerStart}–L${masterNode.layerEnd}"
     } else if (masterReachable) "L0–L24" else "Offline"
 
-    val phoneLayers = phoneNode?.allocatedLayers ?: telemetry.activeLayersAssigned.coerceAtLeast(3)
+    val phoneLayers = phoneNode?.allocatedLayers ?: telemetry.activeLayersAssigned
     val phoneRange = if (phoneNode != null && phoneNode.allocatedLayers > 0) {
         "L${phoneNode.layerStart}–L${phoneNode.layerEnd}"
-    } else {
+    } else if (phoneLayers > 0) {
         val start = masterLayers
         "L$start–L${start + phoneLayers - 1}"
+    } else {
+        "Standby"
     }
 
     val totalLayers = (masterLayers + phoneLayers).coerceAtLeast(28)
@@ -186,25 +190,36 @@ fun SilicaLayerShardingCard(
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF0284C7)))
                         Text(
-                            text = "Master Host: $masterRange ($masterLayers L · $masterSharePct%)",
+                            text = "Master: $masterRange (${masterLayers}L · $masterSharePct%)",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFF38BDF8),
-                            fontSize = 11.sp
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF10B981)))
                         Text(
-                            text = "This Phone: $phoneRange ($phoneLayers L · $phoneSharePct%)",
+                            text = "Phone: $phoneRange (${phoneLayers}L · $phoneSharePct%)",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFF34D399),
                             fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
                         )
                     }
                 }
@@ -220,12 +235,14 @@ fun SilicaLayerShardingCard(
                     Box(
                         modifier = Modifier
                             .weight(masterRatio)
+                            .fillMaxHeight()
                             .background(Color(0xFF0284C7))
                     )
-                    Spacer(modifier = Modifier.width(2.dp).background(cs.surface))
+                    Spacer(modifier = Modifier.width(2.dp).fillMaxHeight().background(cs.surface))
                     Box(
                         modifier = Modifier
                             .weight(phoneRatio)
+                            .fillMaxHeight()
                             .background(Color(0xFF10B981))
                     )
                 }
@@ -233,20 +250,25 @@ fun SilicaLayerShardingCard(
                 // Mini layer badge pill strip
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "VRAM: ${(masterNode?.allocatedMb ?: 1024L)} MB allocated",
+                        text = "Host: ${(masterNode?.allocatedMb ?: 0L)} MB",
                         style = MaterialTheme.typography.labelSmall,
                         color = cs.onSurfaceVariant,
-                        fontSize = 10.sp
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
                     )
                     Text(
-                        text = "Phone RAM: $phoneCachedMb MB ($phoneRange)",
+                        text = "Worker: $phoneCachedMb MB ($phoneRange)",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFF34D399),
                         fontSize = 10.sp,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        textAlign = TextAlign.End
                     )
                 }
             }
@@ -262,19 +284,24 @@ fun SilicaLayerShardingCard(
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Phone RAM Cache Residency ($phoneLayers Layers Active)",
+                        text = "RAM Residency (${phoneLayers}L Active)",
                         style = MaterialTheme.typography.bodySmall,
                         color = cs.onSurfaceVariant,
-                        fontSize = 11.sp
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
                     )
                     Text(
-                        text = "$phoneCachedMb MB / $phoneSafeCapMb MB Safe Cap (${(cacheRatio * 100).toInt()}%)",
+                        text = "$phoneCachedMb / $phoneSafeCapMb MB (${(cacheRatio * 100).toInt()}%)",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (cacheRatio < 0.7f) Color(0xFF34D399) else cs.tertiary,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1
                     )
                 }
                 LinearProgressIndicator(
@@ -295,23 +322,24 @@ fun SilicaLayerShardingCard(
                 phoneSharePct = phoneSharePct
             )
 
-            // 4. Telemetry Tiles: Latency, Live Speed & Link
+            // 4. Telemetry Tiles: Live Speed, Link Transport & Worker Workload
+            val isUsbLink = telemetry.workerState.name.contains("USB", ignoreCase = true)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 LayerStatTile(
                     title = "SPEED",
-                    value = if (liveStreamingTokPerSec > 0f) "${"%.1f".format(liveStreamingTokPerSec)} tok/s" else "~68.6 tok/s",
-                    sub = "ARM NEON",
+                    value = if (liveStreamingTokPerSec > 0f) "${"%.1f".format(liveStreamingTokPerSec)} tok/s" else "Ready",
+                    sub = if (telemetry.hasDotProd) "ARMv8.2 DotProd" else "ARM NEON",
                     icon = Icons.Outlined.Speed,
                     tint = Color(0xFF34D399),
                     modifier = Modifier.weight(1f)
                 )
                 LayerStatTile(
-                    title = "LINK / RTT",
-                    value = "0.5 ms",
-                    sub = "USB-C Tunnel",
+                    title = "TRANSPORT",
+                    value = if (isUsbLink) "USB Tunnel" else "Wi-Fi LAN",
+                    sub = if (masterReachable) "Synced" else "Local Only",
                     icon = Icons.Outlined.Hub,
                     tint = Color(0xFF38BDF8),
                     modifier = Modifier.weight(1f)
@@ -319,7 +347,7 @@ fun SilicaLayerShardingCard(
                 LayerStatTile(
                     title = "WORKLOAD",
                     value = "${phoneLayers}L Sharded",
-                    sub = "$phoneCachedMb MB resident",
+                    sub = "$phoneCachedMb MB active",
                     icon = Icons.Outlined.Memory,
                     tint = cs.primary,
                     modifier = Modifier.weight(1f)

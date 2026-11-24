@@ -43,6 +43,9 @@ export const ClusterVisualizerTab: React.FC<ClusterVisualizerTabProps> = ({
   const rawWorkers = plan.nodes.filter(
     (n) => n.role === 'Worker' && n.isConnected && (n.allocatedLayers ?? 0) > 0
   );
+  const standbyWorkers = plan.nodes.filter(
+    (n) => n.role === 'Worker' && n.isConnected && (n.allocatedLayers ?? 0) === 0
+  );
 
   // Strict deduplication of physical devices
   const workers: PlannedStarNode[] = useMemo(() => {
@@ -178,6 +181,23 @@ export const ClusterVisualizerTab: React.FC<ClusterVisualizerTabProps> = ({
           )}
         </div>
       </div>
+
+      {standbyWorkers.length > 0 && (
+        <div className="px-4 py-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-200 text-xs flex items-center justify-between gap-3">
+          <span>
+            <strong>Standby / Fallback:</strong> {standbyWorkers.map((w) => `${w.label} (${w.statusNote || '0L assigned'})`).join(', ')}
+          </span>
+          {onAutoBalance && (
+            <button
+              type="button"
+              onClick={onAutoBalance}
+              className="px-2.5 py-1 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 font-medium shrink-0"
+            >
+              Re-Attach RPC
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Topology Canvas Section */}
       <div className="rounded-xl border border-slate-800 bg-[#0B0F17] p-4 overflow-x-auto shadow-inner">

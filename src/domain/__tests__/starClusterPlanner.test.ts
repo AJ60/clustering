@@ -196,10 +196,10 @@ describe('starClusterPlanner', () => {
     assert.ok(nglIdx >= 0);
     assert.equal(plan.cliArgs[nglIdx + 1], '14');
 
-    // CLI --tensor-split must divide the 14 offloaded layers between Master GPU and Worker RPC (8 : 6 -> 57.1 : 42.9)
+    // CLI --tensor-split must follow llama.cpp backend order [RPC0, CUDA0] -> [Worker (6), Master GPU (8)] = 42.9,57.1
     const tsIdx = plan.cliArgs.indexOf('--tensor-split');
     assert.ok(tsIdx >= 0);
-    assert.equal(plan.cliArgs[tsIdx + 1], '57.1,42.9');
+    assert.equal(plan.cliArgs[tsIdx + 1], '42.9,57.1');
 
     // User-facing tensorSplit array must reflect overall 85% / 15% allocation
     assert.deepEqual(plan.tensorSplit, [85.0, 15.0]);
