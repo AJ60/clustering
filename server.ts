@@ -82,6 +82,8 @@ interface RegisteredWorkerRecord {
   gpuUsagePct: number;
   handshakeVerified: boolean;
   rpcNativeReady?: boolean;
+  lanIp?: string;
+  lanPort?: number;
   lastSeenMs: number;
 }
 
@@ -307,18 +309,13 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
       const s = line.trim().split(/\s+/)[0];
       if (!s) continue;
       const isWireless = s.includes(':') || s.includes('.');
-      let canonical = s;
-      if (isWireless) {
-        try {
-          const { stdout: roSerial } = await execFileAsync('adb', ['-s', s, 'shell', 'getprop', 'ro.serialno'], { timeout: 1200 });
-          const trimmed = roSerial.trim().toLowerCase();
-          if (trimmed) canonical = trimmed;
-        } catch {}
-        // If this device is already connected via physical USB cable, prioritize USB and skip the wireless ADB clone
-        if (usbSerials.has(canonical.toLowerCase())) {
-          continue;
-        }
+      // If any physical USB cable is attached, prioritize physical USB and skip wireless ADB clones immediately
+      if (isWireless && usbSerials.size > 0) {
+        continue;
       }
+      const canonical = isWireless
+        ? `wifi-${s.split(':')[0].replace(/[^a-z0-9]/gi, '-')}`
+        : s;
       eligibleDevices.push({ line, serial: s, isWireless, canonicalSerial: canonical });
     }
 
@@ -409,6 +406,8 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
             cpuUsagePct: 15,
             gpuUsagePct: 0,
             handshakeVerified: true,
+            lanIp: existing?.lanIp,
+            lanPort: existing?.lanPort,
             lastSeenMs: now,
           });
         }
@@ -921,7 +920,9 @@ async function computeRuntimeSnapshot(): Promise<RuntimeClusterSnapshot> {
         node.layerStart = -1;
         node.layerEnd = -1;
         node.allocatedMb = 0;
-        node.isConnected = false;
+        const isStillRegistered = registeredWorkers.has(node.nodeId) || registeredWorkers.size > 0;
+        node.isConnected = isStillRegistered;
+        node.statusNote = isStillRegistered ? 'Standby (0 layers assigned)' : 'Offline';
       }
     }
     plan.tensorSplit = [100];
@@ -1082,7 +1083,19 @@ export async function createApp() {
             probe = await probeRpcHandshake(rHost, rPort, isLoopback ? 800 : 2500);
             isAlive = probe.ok || (await probeTcpPort(rHost, rPort, isLoopback ? 400 : 2500));
           }
-          if (isAlive) {
+          if (!isAlive && isLoopback) {
+            for (const w of registeredWorkers.values()) {
+              if (w.lanIp && w.lanPort) {
+                const lanAlive = (await probeRpcHandshake(w.lanIp, w.lanPort, 2000)).ok || (await probeTcpPort(w.lanIp, w.lanPort, 2000));
+                if (lanAlive) {
+                  verifiedRpcs.push(`${w.lanIp}:${w.lanPort}`);
+                  isAlive = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (isAlive && !verifiedRpcs.includes(target)) {
             verifiedRpcs.push(target);
           }
         }
@@ -1186,6 +1199,12 @@ export async function createApp() {
           if (a === '--slot-save-path' || arr[idx - 1] === '--slot-save-path') return false;
           return true;
         });
+        // On fallback, clamp -ngl to Master GPU safe layer capacity to prevent WDDM Shared GPU Memory spill
+        const nglIdx = retryArgs.indexOf('-ngl');
+        if (nglIdx >= 0 && nglIdx + 1 < retryArgs.length) {
+          const masterSafeLayers = snap.plan.nodes.find((n) => n.role === 'Master')?.nglLayers ?? 8;
+          retryArgs[nglIdx + 1] = String(Math.min(Number(retryArgs[nglIdx + 1]) || 0, masterSafeLayers));
+        }
         const isFallbackNodeScript = bin.endsWith('.js') || bin.endsWith('.mjs');
         const fbSpawnBin = isFallbackNodeScript ? process.execPath : bin;
         const fbSpawnArgs = isFallbackNodeScript ? [bin, ...retryArgs] : retryArgs;
@@ -1487,15 +1506,17 @@ export async function createApp() {
           const usbStillAlive =
             process.env.NODE_ENV === 'test'
               ? true
-              : isLoopbackCandidate
-                ? await probeTcpPort(existing.ip, existing.rpcPort, 300)
-                : false;
+              : await probeTcpPort(existing.ip, existing.rpcPort, 400);
           if (usbStillAlive) {
             // Keep preferred USB-C loopback worker; refresh heartbeat timestamp and telemetry
             existing.lastSeenMs = Date.now();
             if (typeof b.tempC === 'number') existing.tempC = Number(b.tempC);
             if (typeof b.availableRamMb === 'number') existing.availableRamMb = Number(b.availableRamMb);
             if (typeof b.safeCapMb === 'number' && b.safeCapMb > 256) existing.safeCapMb = Number(b.safeCapMb);
+            if (!isLoopbackCandidate) {
+              existing.lanIp = ip;
+              existing.lanPort = rpcPort;
+            }
             const snapshot = await computeRuntimeSnapshot();
             const planned = snapshot.plan.nodes.find((n) => n.nodeId === existingId);
             res.json({

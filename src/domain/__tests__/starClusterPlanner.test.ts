@@ -9,7 +9,7 @@ import {
   scoreClusterNode,
   buildStarClusterNodes,
 } from '../starClusterPlanner.ts';
-import { GGUF_MODEL_PRESETS } from '../../types/starCluster.ts';
+import { GGUF_MODEL_PRESETS, StarClusterNode, GgufModelPreset, BackendTuningConfig } from '../../types/starCluster.ts';
 import { createDefaultBackendTuningConfig } from '../backendTuner.ts';
 import { createInitialTelemetryState } from '../../service/nodeClusterService.ts';
 
@@ -98,5 +98,114 @@ describe('starClusterPlanner', () => {
       expectedNextLayer = node.layerEnd + 1;
     }
     assert.equal(expectedNextLayer, model.layers, 'All model layers must be covered');
+  });
+
+  it('safely balances GPU offload layers (-ngl) and device --tensor-split under manual split without VRAM overflow', () => {
+    const master: StarClusterNode = {
+      nodeId: 'master-pc',
+      label: 'Windows Master RTX 3050',
+      role: 'Master',
+      platform: 'Desktop',
+      osType: 'windows',
+      ip: '127.0.0.1',
+      rpcPort: 50052,
+      backendDriver: 'NVIDIA RTX 3050 Laptop',
+      linkType: 'Local',
+      totalRamMb: 32768,
+      availableRamMb: 24000,
+      vramFreeMb: 4096,
+      vramTotalMb: 4096,
+      memBwGbps: 195.0,
+      computeTflops: 9.0,
+      physicalCores: 8,
+      rttMs: 0.1,
+      pktLossPct: 0,
+      bandwidthMbps: 10000,
+      tempC: 42,
+      cpuUsagePct: 15,
+      gpuUsagePct: 5,
+      handshakeVerified: true,
+      heartbeatAgeS: 0,
+      isConnected: true,
+    };
+
+    const worker: StarClusterNode = {
+      nodeId: 'android-worker',
+      label: 'Galaxy Tab A9+',
+      role: 'Worker',
+      platform: 'Android',
+      osType: 'android',
+      ip: '192.168.1.8',
+      rpcPort: 50055,
+      backendDriver: 'ARM NEON / Vulkan',
+      linkType: 'Wi-Fi LAN',
+      totalRamMb: 8192,
+      availableRamMb: 4000,
+      vramFreeMb: 0,
+      vramTotalMb: 0,
+      memBwGbps: 28.0,
+      computeTflops: 1.8,
+      physicalCores: 4,
+      rttMs: 45.0,
+      pktLossPct: 0,
+      bandwidthMbps: 220,
+      tempC: 32,
+      cpuUsagePct: 10,
+      gpuUsagePct: 0,
+      handshakeVerified: true,
+      heartbeatAgeS: 0,
+      isConnected: true,
+    };
+
+    const moe35b: GgufModelPreset = {
+      id: 'moe-35b',
+      name: 'Qwen 35B MoE',
+      quant: 'IQ4_XS',
+      architecture: 'MoE',
+      sizeMb: 17281,
+      layers: 41,
+      totalParamsB: 35,
+      activeParamsB: 5.2,
+      contextLengthDefault: 4096,
+      maxContextLength: 262144,
+      hfRepo: 'local/moe-35b',
+      hfUrl: 'file://model.gguf',
+      summary: '35B MoE',
+      tags: ['moe'],
+    };
+
+    const manualConfig: BackendTuningConfig = {
+      ...config,
+      manualTensorSplit: '85, 15',
+      contextLength: 4096,
+    };
+
+    const plan = planStarCluster([master, worker], moe35b, undefined, manualConfig);
+
+    // Master gets 35 layers (85%), Worker gets 6 layers (15%)
+    const plannedMaster = plan.nodes.find((n) => n.role === 'Master')!;
+    const plannedWorker = plan.nodes.find((n) => n.role === 'Worker')!;
+    assert.equal(plannedMaster.allocatedLayers, 35);
+    assert.equal(plannedWorker.allocatedLayers, 6);
+
+    // Master dedicated VRAM only holds 8 layers safely (no 15GB Shared Memory spillover)
+    assert.equal(plannedMaster.nglLayers, 8);
+
+    // CLI -ngl must be 14 (8 Master GPU + 6 Worker RPC)
+    const nglIdx = plan.cliArgs.indexOf('-ngl');
+    assert.ok(nglIdx >= 0);
+    assert.equal(plan.cliArgs[nglIdx + 1], '14');
+
+    // CLI --tensor-split must divide the 14 offloaded layers between Master GPU and Worker RPC (8 : 6 -> 57.1 : 42.9)
+    const tsIdx = plan.cliArgs.indexOf('--tensor-split');
+    assert.ok(tsIdx >= 0);
+    assert.equal(plan.cliArgs[tsIdx + 1], '57.1,42.9');
+
+    // User-facing tensorSplit array must reflect overall 85% / 15% allocation
+    assert.deepEqual(plan.tensorSplit, [85.0, 15.0]);
+
+    // autoNkvo must be enabled to prevent KV cache from overflowing 4GB VRAM
+    assert.equal(plan.autoNkvo, true);
+    assert.ok(plan.cliArgs.includes('-nkvo'));
   });
 });

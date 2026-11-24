@@ -488,7 +488,7 @@ export function planStarCluster(
   const autoNkvo =
     effectiveConfig.noKvOffload !== null && effectiveConfig.noKvOffload !== undefined
       ? effectiveConfig.noKvOffload
-      : (masterVramTotal > 0 && masterVramTotal <= 4300 && effectiveConfig.contextLength >= 32768) ||
+      : (masterVramTotal > 0 && masterVramTotal <= 4300 && (effectiveConfig.contextLength >= 4096 || model.totalParamsB >= 7)) ||
         Boolean(learned?.learnedKvOffload);
 
   const evaluated: PlannedStarNode[] = rawNodes.map((n) => {
@@ -844,9 +844,54 @@ export function planStarCluster(
 
   // Build exact verified stock llama.cpp v1.0.0 CLI args
   const modelArg = model.isLocal && model.localPath ? model.localPath : `./models/${model.id}.gguf`;
-  const workerRpcs = activeWithAlloc
-    .filter((n) => n.role === 'Worker')
+  const activeWorkers = activeWithAlloc.filter((n) => n.role === 'Worker');
+  const workerRpcs = activeWorkers
     .map((n) => `${n.ip || '127.0.0.1'}:${n.rpcPort || 50052}`);
+
+  const masterGpuLayers =
+    effectiveConfig.gpuOffloadLayers !== null && effectiveConfig.gpuOffloadLayers !== undefined
+      ? Math.max(0, Math.min(model.layers, effectiveConfig.gpuOffloadLayers))
+      : (masterNode?.nglLayers ?? 0);
+  const totalWorkerLayers = activeWorkers.reduce((acc, w) => acc + w.allocatedLayers, 0);
+
+  // In llama.cpp, -ngl specifies the total number of offloaded layers across ALL backend devices (Master GPU + all RPC workers).
+  // Any layers beyond -ngl are executed by Master CPU.
+  const cliNgl = activeWorkers.length > 0 ? masterGpuLayers + totalWorkerLayers : masterGpuLayers;
+
+  // In llama.cpp, --tensor-split defines how the offloaded layers (-ngl) are distributed among backend devices.
+  // Device 0 = Master GPU (if present), Device 1..k = RPC Workers.
+  let cliTensorSplitCsv = '';
+  if (activeWorkers.length > 0 && cliNgl > 0) {
+    if (masterGpuLayers > 0) {
+      const splitWeights = [masterGpuLayers, ...activeWorkers.map((w) => w.allocatedLayers)];
+      const totalW = splitWeights.reduce((a, b) => a + b, 0) || 1;
+      let running = 0;
+      const pcts = splitWeights.map((w, idx) => {
+        if (idx === splitWeights.length - 1) {
+          return Number(Math.max(0, 100 - running).toFixed(1));
+        }
+        const p = Number(((w / totalW) * 100).toFixed(1));
+        running += p;
+        return p;
+      });
+      cliTensorSplitCsv = pcts.map((v) => v.toFixed(1)).join(',');
+    } else {
+      const splitWeights = activeWorkers.map((w) => w.allocatedLayers);
+      const totalW = splitWeights.reduce((a, b) => a + b, 0) || 1;
+      let running = 0;
+      const pcts = splitWeights.map((w, idx) => {
+        if (idx === splitWeights.length - 1) {
+          return Number(Math.max(0, 100 - running).toFixed(1));
+        }
+        const p = Number(((w / totalW) * 100).toFixed(1));
+        running += p;
+        return p;
+      });
+      cliTensorSplitCsv = pcts.map((v) => v.toFixed(1)).join(',');
+    }
+  } else if (tensorSplit.length > 1) {
+    cliTensorSplitCsv = tensorSplitCsv;
+  }
 
   const cliArgs: string[] = [
     '-m',
@@ -862,10 +907,7 @@ export function planStarCluster(
     '-ctv',
     effectiveConfig.kvCacheQuant,
     '-ngl',
-    String(
-      effectiveConfig.gpuOffloadLayers ??
-      (masterNode?.nglLayers ?? 0)
-    ),
+    String(cliNgl),
     '-b',
     String(learned?.recommendedBatch ?? effectiveConfig.batchSize ?? 1024),
     '-ub',
@@ -885,7 +927,9 @@ export function planStarCluster(
   if (useNoMmap) cliArgs.push('--no-mmap');
   if (effectiveConfig.moeCpuOffload && model.architecture === 'MoE') cliArgs.push('-ot', '.ffn_.*_exps.=CPU');
   if (workerRpcs.length > 0) cliArgs.push('--rpc', workerRpcs.join(','));
-  if (tensorSplit.length > 1) cliArgs.push('--tensor-split', tensorSplitCsv);
+  if (cliTensorSplitCsv && (activeWorkers.length > 0 ? (masterGpuLayers > 0 || activeWorkers.length > 1) : tensorSplit.length > 1)) {
+    cliArgs.push('--tensor-split', cliTensorSplitCsv);
+  }
   if (effectiveConfig.speculativeMode === 'external_draft' && effectiveConfig.draftModelPath?.trim()) {
     cliArgs.push('--model-draft', effectiveConfig.draftModelPath.trim());
     cliArgs.push('--draft-max', String(effectiveConfig.draftMaxTokens ?? 8));
