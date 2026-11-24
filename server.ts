@@ -316,19 +316,16 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
       }
     }
 
-    const eligibleDevices: Array<{ line: string; serial: string; isWireless: boolean; canonicalSerial: string }> = [];
+    const eligibleDevices: Array<{ line: string; serial: string; isWireless: boolean; canonicalSerial: string; lanIp?: string }> = [];
     for (const line of deviceLines) {
       const s = line.trim().split(/\s+/)[0];
       if (!s) continue;
       const isWireless = s.includes(':') || s.includes('.');
-      // If any physical USB cable is attached, prioritize physical USB and skip wireless ADB clones immediately
-      if (isWireless && usbSerials.size > 0) {
-        continue;
-      }
+      const lanIp = isWireless ? s.split(':')[0] : undefined;
       const canonical = isWireless
-        ? `wifi-${s.split(':')[0].replace(/[^a-z0-9]/gi, '-')}`
+        ? `wifi-${(lanIp || s).replace(/[^a-z0-9]/gi, '-')}`
         : s;
-      eligibleDevices.push({ line, serial: s, isWireless, canonicalSerial: canonical });
+      eligibleDevices.push({ line, serial: s, isWireless, canonicalSerial: canonical, lanIp });
     }
 
     let fList = '';
@@ -338,7 +335,7 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
     } catch {}
 
     for (let i = 0; i < eligibleDevices.length; i++) {
-      const { line, serial, isWireless, canonicalSerial } = eligibleDevices[i];
+      const { line, serial, isWireless, canonicalSerial, lanIp } = eligibleDevices[i];
       serials.push(serial);
 
       // Pass explicit `-s <serial>` so multi-device ADB never fails
@@ -360,28 +357,54 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
         }).catch(() => {});
       }
 
-      // Auto-detect and register Android worker over USB loopback via real 32-byte RPC probe
+      // Auto-detect and register Android worker via direct Wi-Fi probe or USB loopback RPC probe
       try {
-        let probe = await probeRpcHandshake('127.0.0.1', hostPort, 500);
-        let isAlive = probe.ok;
-        if (!isAlive) {
-          // Dynamically try candidate ports [50055, 50052, 50054] to connect to active Companion App or native daemon
-          const candidates = [50055, 50052, 50054].filter((p) => p !== phonePort);
-          for (const cand of candidates) {
-            await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${hostPort}`, `tcp:${cand}`], { timeout: 1500 }).catch(() => {});
-            probe = await probeRpcHandshake('127.0.0.1', hostPort, 500);
-            if (probe.ok) {
-              phonePort = cand;
-              isAlive = true;
-              break;
-            }
-          }
-          if (!isAlive) {
-            // Keep canonical 50055 forward so when user starts companion app or daemon it immediately connects
-            await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${hostPort}`, 'tcp:50055'], { timeout: 1500 }).catch(() => {});
-            phonePort = 50055;
+        let isAlive = false;
+        let measuredRtt = isWireless ? 4.2 : 0.8;
+        let activeIp = '127.0.0.1';
+        let activePort = hostPort;
+
+        // 1. If wireless device with known LAN IP, probe direct Wi-Fi port 50055 first
+        if (isWireless && lanIp) {
+          const directProbe = await probeRpcHandshake(lanIp, phonePort, 800);
+          if (directProbe.ok) {
+            isAlive = true;
+            measuredRtt = directProbe.rttMs;
+            activeIp = lanIp;
+            activePort = phonePort;
           }
         }
+
+        // 2. If not alive via direct LAN, probe through ADB forward on hostPort
+        if (!isAlive) {
+          let probe = await probeRpcHandshake('127.0.0.1', hostPort, 500);
+          isAlive = probe.ok;
+          if (probe.ok) {
+            measuredRtt = probe.rttMs;
+            activeIp = '127.0.0.1';
+            activePort = hostPort;
+          } else {
+            // Dynamically try candidate ports [50055, 50052, 50054]
+            const candidates = [50055, 50052, 50054].filter((p) => p !== phonePort);
+            for (const cand of candidates) {
+              await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${hostPort}`, `tcp:${cand}`], { timeout: 1500 }).catch(() => {});
+              probe = await probeRpcHandshake('127.0.0.1', hostPort, 500);
+              if (probe.ok) {
+                phonePort = cand;
+                isAlive = true;
+                measuredRtt = probe.rttMs;
+                activeIp = '127.0.0.1';
+                activePort = hostPort;
+                break;
+              }
+            }
+            if (!isAlive) {
+              await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${hostPort}`, 'tcp:50055'], { timeout: 1500 }).catch(() => {});
+              phonePort = 50055;
+            }
+          }
+        }
+
         if (isAlive) {
           let modelName = 'Android Device';
           const modelMatch = line.match(/model:([^\s]+)/);
@@ -395,7 +418,9 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
             if (memMatch) totalRam = Math.round(parseInt(memMatch[1], 10) / 1024);
           } catch {}
 
-          const workerId = `android-usb-${canonicalSerial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+          const workerId = isWireless
+            ? `android-wifi-${canonicalSerial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+            : `android-usb-${canonicalSerial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
           const existing = registeredWorkers.get(workerId);
           // 50% physical RAM cap (e.g. 1851MB on 3702MB / 4GB total, 3700MB on 8GB total)
           const halfPhysRam = Math.floor(totalRam * 0.5);
@@ -406,11 +431,11 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
 
           registeredWorkers.set(workerId, {
             id: existing?.id || workerId,
-            label: existing?.label || `${modelName} (Android)`,
+            label: existing?.label || `${modelName} (${isWireless ? 'Wi-Fi' : 'USB'})`,
             platform: 'Android',
             osType: 'android',
-            ip: '127.0.0.1',
-            rpcPort: hostPort,
+            ip: activeIp,
+            rpcPort: activePort,
             linkType: isWireless ? 'Wi-Fi LAN' : 'USB-C Tunnel',
             totalRamMb: totalRam,
             availableRamMb: Math.round(totalRam * 0.5),
@@ -419,14 +444,14 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
             computeTflops: 1.8,
             memBwGbps: 28.0,
             bigCores: bigCores,
-            rttMs: 0.8,
+            rttMs: measuredRtt,
             pktLossPct: 0,
             tempC: existing?.tempC || 32.0,
             cpuUsagePct: 15,
             gpuUsagePct: 0,
             handshakeVerified: true,
-            lanIp: existing?.lanIp,
-            lanPort: existing?.lanPort,
+            lanIp: lanIp || existing?.lanIp,
+            lanPort: phonePort,
             lastSeenMs: now,
           });
         }
@@ -451,17 +476,26 @@ async function probeRpcHandshake(
   timeoutMs = 1500
 ): Promise<{ ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number }> {
   return new Promise((resolve) => {
+    let resolved = false;
+    const safeResolve = (val: { ok: boolean; rttMs: number; safeCapMb?: number; bigCores?: number }) => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        resolve(val);
+      }
+    };
+
     const start = Date.now();
     const socket = net.createConnection({ host, port });
     const timer = setTimeout(() => {
       socket.destroy();
-      resolve({ ok: false, rttMs: timeoutMs });
+      safeResolve({ ok: false, rttMs: timeoutMs });
     }, timeoutMs);
 
     const chunks: Buffer[] = [];
     let totalLen = 0;
-
     let connected = false;
+
     socket.on('connect', () => {
       connected = true;
       const authToken = computeClusterAuthToken(CLUSTER_SECRET, HANDSHAKE_CHALLENGE);
@@ -472,13 +506,12 @@ async function probeRpcHandshake(
       chunks.push(chunk);
       totalLen += chunk.length;
       if (totalLen >= 32) {
-        clearTimeout(timer);
         const full = Buffer.concat(chunks);
         const decoded = decodeGgufHandshakeFrame(new Uint8Array(full.subarray(0, 32)));
         const rttMs = Math.max(0.4, Date.now() - start);
         socket.destroy();
         if (decoded) {
-          resolve({
+          safeResolve({
             ok: true,
             rttMs,
             safeCapMb: decoded.safeCapMb,
@@ -486,22 +519,28 @@ async function probeRpcHandshake(
           });
           return;
         }
-        resolve({ ok: true, rttMs });
+        safeResolve({ ok: true, rttMs });
       }
     });
 
     socket.on('close', () => {
-      clearTimeout(timer);
       if (connected) {
         // Native ggml-rpc-server closes connection when non-RPC command arrives, which confirms port is live
-        resolve({ ok: true, rttMs: Math.max(0.4, Date.now() - start) });
+        safeResolve({ ok: true, rttMs: Math.max(0.4, Date.now() - start) });
+      } else {
+        safeResolve({ ok: false, rttMs: timeoutMs });
       }
     });
 
-    socket.on('error', () => {
-      clearTimeout(timer);
+    socket.on('error', (err: NodeJS.ErrnoException) => {
       socket.destroy();
-      resolve({ ok: false, rttMs: timeoutMs });
+      // If TCP connection was established and the native RPC daemon reset the socket (ECONNRESET/EPIPE),
+      // that proves the remote RPC daemon is actively listening and responsive!
+      if (connected && (err.code === 'ECONNRESET' || err.code === 'EPIPE')) {
+        safeResolve({ ok: true, rttMs: Math.max(0.4, Date.now() - start) });
+      } else {
+        safeResolve({ ok: false, rttMs: timeoutMs });
+      }
     });
   });
 }
@@ -521,7 +560,15 @@ async function pruneStaleWorkers(): Promise<void> {
     if (process.env.NODE_ENV !== 'test') {
       const isLoopback = worker.ip === '127.0.0.1' || worker.ip === 'localhost' || worker.ip.startsWith('127.');
       const probeTimeout = isLoopback ? 400 : 2000;
-      const alive = await probeTcpPort(worker.ip, worker.rpcPort, probeTimeout);
+      let alive = (await probeRpcHandshake(worker.ip, worker.rpcPort, probeTimeout)).ok || (await probeTcpPort(worker.ip, worker.rpcPort, probeTimeout));
+      if (!alive && worker.lanIp && worker.lanPort) {
+        alive = (await probeRpcHandshake(worker.lanIp, worker.lanPort, 1200)).ok || (await probeTcpPort(worker.lanIp, worker.lanPort, 1200));
+        if (alive) {
+          // Worker reachable directly via Wi-Fi; update connection destination
+          worker.ip = worker.lanIp;
+          worker.rpcPort = worker.lanPort;
+        }
+      }
       if (!alive) {
         toDelete.push(id);
       }
@@ -2597,11 +2644,10 @@ export async function createApp() {
         }
       } catch (streamErr) {
         // Gate 2 Hot Failover (<400ms): abrupt worker drop / ECONNRESET mid-stream
-        // Retract workers to Master and continue SSE stream seamlessly without closing client connection
+        // Retract layers to Master seamlessly without deleting registered worker inventory
         const failoverStart = Date.now();
-        registeredWorkers.clear();
         emitEngineEvent(
-          `Worker link lost mid-stream (${streamErr instanceof Error ? streamErr.message : 'ECONNRESET'}) — retracting layers to Master`
+          `Worker link lost mid-stream (${streamErr instanceof Error ? streamErr.message : 'ECONNRESET'}) — activating failover stream`
         );
         if (!res.writableEnded) {
           res.write(`: failover-master-retracted elapsed_ms=${Date.now() - failoverStart}\n\n`);

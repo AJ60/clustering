@@ -230,6 +230,9 @@ export const ModelLoadConfigDrawer: React.FC<ModelLoadConfigDrawerProps> = ({
                 }
                 className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#111827] px-3 py-2 font-mono-num text-slate-900 dark:text-slate-100"
               />
+              <span className="text-[11px] text-slate-500 dark:text-slate-400 block pt-0.5">
+                Safe VRAM Cap: {plan.nodes[0]?.nglLayers ?? 8}L max (prevents Windows WDDM Shared Memory spill)
+              </span>
             </label>
 
             <label className="space-y-1.5 block">

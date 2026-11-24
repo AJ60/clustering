@@ -848,10 +848,20 @@ export function planStarCluster(
   const workerRpcs = activeWorkers
     .map((n) => `${n.ip || '127.0.0.1'}:${n.rpcPort || 50052}`);
 
-  const masterGpuLayers =
+  // CRITICAL HARD-GUARD: Master GPU offload (-ngl) MUST NEVER exceed physical Dedicated VRAM.
+  // Excess layers on Master GPU force Windows WDDM to spill into Shared GPU Memory (System RAM),
+  // causing catastrophic 100% RAM saturation and SSD disk thrashing.
+  const masterVramLayerCap =
+    masterNode && masterNode.safeVramMb > 0
+      ? Math.max(1, Math.floor(masterNode.safeVramMb / Math.max(1, mbPerLayer)))
+      : 0;
+
+  const rawMasterGpuLayers =
     effectiveConfig.gpuOffloadLayers !== null && effectiveConfig.gpuOffloadLayers !== undefined
       ? Math.max(0, Math.min(model.layers, effectiveConfig.gpuOffloadLayers))
       : (masterNode?.nglLayers ?? 0);
+
+  const masterGpuLayers = Math.min(rawMasterGpuLayers, masterVramLayerCap);
   const totalWorkerLayers = activeWorkers.reduce((acc, w) => acc + w.allocatedLayers, 0);
 
   // In llama.cpp, -ngl specifies the total number of offloaded layers across ALL backend devices (Master GPU + all RPC workers).

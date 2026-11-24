@@ -829,15 +829,15 @@ export const ChatTab: React.FC<ChatTabProps> = ({
               return (
                 <div
                   key={turn.id}
-                  className={`flex flex-col ${turn.role === 'user' ? 'items-end' : 'items-start'}`}
+                  className={`w-full flex flex-col ${turn.role === 'user' ? 'items-end' : 'items-start'}`}
                 >
                   <div
                     className={`rounded-2xl text-xs sm:text-sm space-y-3 transition-all ${
                       turn.role === 'user'
                         ? 'max-w-[85%] sm:max-w-[75%] px-4 py-3 bg-emerald-600 text-white shadow-md'
                         : turn.isError
-                          ? 'w-full max-w-4xl min-w-[320px] sm:min-w-[480px] p-4 sm:p-5 border border-rose-500/40 bg-rose-500/10 text-rose-300'
-                          : 'w-full max-w-4xl min-w-[320px] sm:min-w-[480px] p-4 sm:p-5 border border-slate-800/90 bg-[#0F172A]/90 text-slate-100 shadow-sm'
+                          ? 'w-full max-w-4xl p-4 sm:p-5 border border-rose-500/40 bg-rose-500/10 text-rose-300'
+                          : 'w-full max-w-4xl p-4 sm:p-5 border border-slate-800/90 bg-[#0F172A]/90 text-slate-100 shadow-sm'
                     }`}
                   >
                     {/* Assistant Message Header Pill */}
@@ -899,7 +899,7 @@ export const ChatTab: React.FC<ChatTabProps> = ({
                           )}
                         </button>
                         {showThink && (
-                          <pre className="p-3.5 text-xs font-mono text-slate-300 whitespace-pre-wrap leading-relaxed border-t border-slate-800/80 max-h-64 overflow-y-auto select-text">
+                          <pre className="p-3.5 text-xs font-mono text-slate-300 whitespace-pre-wrap break-words leading-relaxed border-t border-slate-800/80 max-h-64 overflow-y-auto select-text">
                             {turn.reasoning}
                           </pre>
                         )}
@@ -938,7 +938,7 @@ export const ChatTab: React.FC<ChatTabProps> = ({
                                   )}
                                 </div>
                                 {trace.detail && (
-                                  <pre className="text-slate-400 max-h-32 overflow-y-auto whitespace-pre-wrap text-[10px] pt-1">
+                                  <pre className="text-slate-400 max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-[10px] pt-1">
                                     {trace.detail}
                                   </pre>
                                 )}
@@ -950,7 +950,7 @@ export const ChatTab: React.FC<ChatTabProps> = ({
                     )}
 
                     {/* Content with Markdown code blocks */}
-                    <div className="leading-relaxed">
+                    <div className="leading-relaxed break-words">
                       {turn.isError ? (
                         <div className="flex items-center gap-2 text-rose-300">
                           <AlertCircle className="w-4 h-4 shrink-0" />
