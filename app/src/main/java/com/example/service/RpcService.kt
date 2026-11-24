@@ -620,7 +620,8 @@ class RpcService : Service(), ComponentCallbacks2 {
                         activeBin.absolutePath,
                         "-H", hostIp,
                         "-p", chosenPort.toString(),
-                        "-t", snap.bigCoreCount.toString()
+                        "-t", snap.bigCoreCount.toString(),
+                        "-c"
                     )
                     val env = pb.environment()
                     env["HOME"] = applicationContext.filesDir.absolutePath
