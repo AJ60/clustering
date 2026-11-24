@@ -547,6 +547,12 @@ export function planStarCluster(
 
   const neededMb = Math.round(model.sizeMb + totalKvCacheMb + (effectiveMmproj ? model.mmprojSizeMb ?? 512 : 0));
 
+  const manualParts = (effectiveConfig.manualTensorSplit ?? '')
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .filter((v) => Number.isFinite(v) && v > 0);
+  const hasManualSplit = manualParts.length > 1;
+
   // Evaluate fast-tier pool (Master + USB/Ethernet) to prune slow/lossy Wi-Fi or Edge ARM SBCs.
   const fastTierPoolMb = evaluated
     .filter(
@@ -580,9 +586,10 @@ export function planStarCluster(
         continue;
       }
       if (
+        !hasManualSplit &&
         fastTierFits &&
         (node.platform === 'Edge ARM' ||
-          (node.linkType === 'Wi-Fi LAN' && (node.rttMs > 40 || node.pktLossPct > 1.5)))
+          (node.linkType === 'Wi-Fi LAN' && (node.rttMs > 200 || node.pktLossPct > 1.5)))
       ) {
         node.pruned = true;
         node.pruneReason = `Pruned slow/lossy link (p95 ${node.rttMs.toFixed(1)}ms, ${node.pktLossPct}% loss)`;
@@ -641,15 +648,25 @@ export function planStarCluster(
     const workerLayerMap = new Map<string, number>();
     let totalWorkerLayers = 0;
 
+    const msum = manualParts.reduce((a, b) => a + b, 0);
+    let workerIdx = 0;
     for (const w of workers) {
       // Safe cap constraint: worker can hold at most effectiveCapMb / mbPerLayer
       const maxCapLayers = Math.max(0, Math.floor(w.effectiveCapMb / Math.max(1, mbPerLayer)));
       // Throughput-proportional share with an active worker offload minimum (at least 2 layers if capacity fits)
       const scoreShare = w.score / totalScore;
-      const targetLayers = Math.max(2, Math.round(totalLayers * scoreShare));
+      const manualShare =
+        hasManualSplit && manualParts.length === workers.length + 1 && manualParts[workerIdx + 1]
+          ? manualParts[workerIdx + 1] / msum
+          : null;
+      const targetLayers = Math.max(
+        1,
+        Math.round(totalLayers * (manualShare ?? scoreShare))
+      );
       const allocated = Math.max(0, Math.min(maxCapLayers, targetLayers));
       workerLayerMap.set(w.nodeId, allocated);
       totalWorkerLayers += allocated;
+      workerIdx++;
     }
 
     // Master must retain at least layer 0 + embedding
@@ -729,11 +746,6 @@ export function planStarCluster(
   const activeWithAlloc = active.filter((n) => n.allocatedMb > 0);
   const totalAlloc = activeWithAlloc.reduce((acc, n) => acc + n.allocatedMb, 0) || 1;
   const tensorSplit: number[] = [];
-
-  const manualParts = (effectiveConfig.manualTensorSplit ?? '')
-    .split(',')
-    .map((s) => Number(s.trim()))
-    .filter((v) => Number.isFinite(v) && v > 0);
 
   if (manualParts.length === activeWithAlloc.length && manualParts.length > 0) {
     const msum = manualParts.reduce((a, b) => a + b, 0);

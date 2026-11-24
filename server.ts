@@ -293,16 +293,43 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
       return parts.length >= 2 && parts[1] === 'device';
     });
 
+    // Detect if physical USB serial is already present, avoiding duplicate tunnels over wireless ADB
+    const usbSerials = new Set<string>();
+    for (const line of deviceLines) {
+      const s = line.trim().split(/\s+/)[0];
+      if (s && !s.includes(':') && !s.includes('.')) {
+        usbSerials.add(s.toLowerCase());
+      }
+    }
+
+    const eligibleDevices: Array<{ line: string; serial: string; isWireless: boolean; canonicalSerial: string }> = [];
+    for (const line of deviceLines) {
+      const s = line.trim().split(/\s+/)[0];
+      if (!s) continue;
+      const isWireless = s.includes(':') || s.includes('.');
+      let canonical = s;
+      if (isWireless) {
+        try {
+          const { stdout: roSerial } = await execFileAsync('adb', ['-s', s, 'shell', 'getprop', 'ro.serialno'], { timeout: 1200 });
+          const trimmed = roSerial.trim().toLowerCase();
+          if (trimmed) canonical = trimmed;
+        } catch {}
+        // If this device is already connected via physical USB cable, prioritize USB and skip the wireless ADB clone
+        if (usbSerials.has(canonical.toLowerCase())) {
+          continue;
+        }
+      }
+      eligibleDevices.push({ line, serial: s, isWireless, canonicalSerial: canonical });
+    }
+
     let fList = '';
     try {
       const res = await execFileAsync('adb', ['forward', '--list'], { timeout: 1000 });
       fList = res.stdout;
     } catch {}
 
-    for (let i = 0; i < deviceLines.length; i++) {
-      const line = deviceLines[i];
-      const parts = line.trim().split(/\s+/);
-      const serial = parts[0];
+    for (let i = 0; i < eligibleDevices.length; i++) {
+      const { line, serial, isWireless, canonicalSerial } = eligibleDevices[i];
       serials.push(serial);
 
       // Pass explicit `-s <serial>` so multi-device ADB never fails
@@ -313,7 +340,8 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
       // Assign unique host port per ADB device: Device 0 -> 50052, Device 1 -> 50053, Device 2 -> 50054
       let hostPort = 50052 + i;
       let phonePort = 50055;
-      const m = fList.match(new RegExp(`${serial}\\s+tcp:(\\d+)\\s+tcp:(\\d+)`));
+      const escapedSerial = serial.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const m = fList.match(new RegExp(`${escapedSerial}\\s+tcp:(\\d+)\\s+tcp:(\\d+)`));
       if (m && m[1] && m[2]) {
         hostPort = parseInt(m[1], 10);
         phonePort = parseInt(m[2], 10);
@@ -351,7 +379,7 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
             if (memMatch) totalRam = Math.round(parseInt(memMatch[1], 10) / 1024);
           } catch {}
 
-          const workerId = `android-usb-${serial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+          const workerId = `android-usb-${canonicalSerial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
           const existing = registeredWorkers.get(workerId);
           // 50% physical RAM cap (e.g. 1851MB on 3702MB / 4GB total, 3700MB on 8GB total)
           const halfPhysRam = Math.floor(totalRam * 0.5);
@@ -367,7 +395,7 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
             osType: 'android',
             ip: '127.0.0.1',
             rpcPort: hostPort,
-            linkType: 'USB-C Tunnel',
+            linkType: isWireless ? 'Wi-Fi LAN' : 'USB-C Tunnel',
             totalRamMb: totalRam,
             availableRamMb: Math.round(totalRam * 0.5),
             safeCapMb: safeCap,
@@ -1046,16 +1074,16 @@ export async function createApp() {
           const [rHost, rPortStr] = target.split(':');
           const rPort = Number(rPortStr || 50055);
           const isLoopback = rHost === '127.0.0.1' || rHost === 'localhost' || rHost.startsWith('127.');
-          const probe = await probeRpcHandshake(rHost, rPort, isLoopback ? 800 : 2000);
-          const isAlive = probe.ok || (await probeTcpPort(rHost, rPort, isLoopback ? 400 : 2000));
+          let probe = await probeRpcHandshake(rHost, rPort, isLoopback ? 800 : 2500);
+          let isAlive = probe.ok || (await probeTcpPort(rHost, rPort, isLoopback ? 400 : 2500));
+          if (!isAlive) {
+            // Give remote worker 500ms grace in case socket was resetting after process reload
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            probe = await probeRpcHandshake(rHost, rPort, isLoopback ? 800 : 2500);
+            isAlive = probe.ok || (await probeTcpPort(rHost, rPort, isLoopback ? 400 : 2500));
+          }
           if (isAlive) {
             verifiedRpcs.push(target);
-          } else {
-            for (const [wId, wRec] of registeredWorkers.entries()) {
-              if (wRec.ip === rHost && wRec.rpcPort === rPort) {
-                registeredWorkers.delete(wId);
-              }
-            }
           }
         }
         if (verifiedRpcs.length === 0) {
@@ -1174,7 +1202,6 @@ export async function createApp() {
         });
         const fbReady = await waitForServerHealth(engineOrigin, loadWaitMs, fallbackChild);
         if (fbReady) {
-          registeredWorkers.clear();
           spawnedLlamaChild = fallbackChild;
           upstreamBaseUrl = engineOrigin;
           engineStatus.running = true;
@@ -1315,7 +1342,10 @@ export async function createApp() {
     // If engine is currently running, hot-reload engine process with the newly activated model
     if (engineStatus.running && (body.reloadIfRunning || spawnedLlamaChild)) {
       if (spawnedLlamaChild) {
-        try { spawnedLlamaChild.kill('SIGTERM'); } catch {}
+        try {
+          spawnedLlamaChild.kill('SIGTERM');
+          await new Promise((r) => setTimeout(r, 500));
+        } catch {}
         spawnedLlamaChild = null;
       }
       await launchLlamaServer();
@@ -1774,6 +1804,8 @@ export async function createApp() {
     if (spawnedLlamaChild) {
       try {
         spawnedLlamaChild.kill('SIGTERM');
+        // On Windows, give the killed engine process 500ms to exit cleanly and release socket handles
+        await new Promise((resolve) => setTimeout(resolve, 500));
       } catch {
         // ignore
       }
@@ -1822,6 +1854,8 @@ export async function createApp() {
     if (spawnedLlamaChild) {
       try {
         spawnedLlamaChild.kill('SIGTERM');
+        // On Windows, give the killed engine process 500ms to exit cleanly and release socket handles
+        await new Promise((resolve) => setTimeout(resolve, 500));
       } catch {
         // ignore
       }
