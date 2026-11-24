@@ -33,13 +33,15 @@ target/
 silica-core/target/
 silica-core/Cargo.lock
 
+android/
 .gradle/
 build/
 app/build/
 local.properties
 debug.keystore
 android/**/build/
-android/**/.gradle/
+android/**/android/
+.gradle/
 android/local.properties
 *.apk
 *.aab

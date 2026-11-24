@@ -360,19 +360,26 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
         }).catch(() => {});
       }
 
-      // Auto-detect and register Android worker over USB loopback if RPC port responds
+      // Auto-detect and register Android worker over USB loopback via real 32-byte RPC probe
       try {
-        let isAlive = await probeTcpPort('127.0.0.1', hostPort, 400);
+        let probe = await probeRpcHandshake('127.0.0.1', hostPort, 500);
+        let isAlive = probe.ok;
         if (!isAlive) {
           // Dynamically try candidate ports [50055, 50052, 50054] to connect to active Companion App or native daemon
           const candidates = [50055, 50052, 50054].filter((p) => p !== phonePort);
           for (const cand of candidates) {
             await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${hostPort}`, `tcp:${cand}`], { timeout: 1500 }).catch(() => {});
-            isAlive = await probeTcpPort('127.0.0.1', hostPort, 400);
-            if (isAlive) {
+            probe = await probeRpcHandshake('127.0.0.1', hostPort, 500);
+            if (probe.ok) {
               phonePort = cand;
+              isAlive = true;
               break;
             }
+          }
+          if (!isAlive) {
+            // Keep canonical 50055 forward so when user starts companion app or daemon it immediately connects
+            await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${hostPort}`, 'tcp:50055'], { timeout: 1500 }).catch(() => {});
+            phonePort = 50055;
           }
         }
         if (isAlive) {
