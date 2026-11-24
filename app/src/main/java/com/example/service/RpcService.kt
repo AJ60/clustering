@@ -57,8 +57,8 @@ enum class ComputeBackend(val label: String) {
 enum class WorkerRunState(val badge: String) {
     STOPPED("STOPPED"),
     PROBING("PROBING HARDWARE"),
-    RUNNING_USB("ONLINE (USB 127.0.0.1:50052)"),
-    RUNNING_WIFI("ONLINE (Wi-Fi HMAC Proxy)"),
+    RUNNING_USB("ONLINE (USB :50055)"),
+    RUNNING_WIFI("ONLINE (Wi-Fi :50055)"),
     THROTTLED_THERMAL("PAUSED (THERMAL / BATTERY)"),
     SHEDDING_MEMORY("EMERGENCY SHED_LAYERS (LMKD GUARD)")
 }
@@ -88,7 +88,7 @@ data class DeviceTelemetryState(
     val thermalStatusLabel: String = "THERMAL_STATUS_NONE",
     val workerState: WorkerRunState = WorkerRunState.STOPPED,
     val usbLoopbackOnly: Boolean = true,
-    val bindAddress: String = "127.0.0.1:50052",
+    val bindAddress: String = "0.0.0.0:50055",
     val clusterSecret: String = "clusterd-default-hmac-key",
     val nativeBinaryPath: String = "",
     val nativeBinaryPresent: Boolean = false,
@@ -96,9 +96,9 @@ data class DeviceTelemetryState(
     val activeLayersAssigned: Int = 0,
     val handshakesCompleted: Int = 0,
     val lastTrimLevel: Int = 0,
-    val pairedMasterAddress: String = "Not Paired (USB 127.0.0.1:50052 Ready)",
+    val pairedMasterAddress: String = "Not Paired (:50055 Ready)",
     val isScanningMaster: Boolean = false,
-    val pairingQrPayload: String = "clusterd://pair?master=127.0.0.1:3000&rpc=50052&secret=clusterd-default-hmac-key",
+    val pairingQrPayload: String = "clusterd://pair?master=127.0.0.1:3000&rpc=50055&secret=clusterd-default-hmac-key",
     val calibration: CalibrationProfile = CalibrationProfile(),
     val diagnosticReport: DiagnosticReport? = null,
     val isDiagnosing: Boolean = false,
@@ -112,8 +112,9 @@ data class DeviceTelemetryState(
 class RpcService : Service(), ComponentCallbacks2 {
 
     companion object {
+        const val DEFAULT_RPC_PORT = 50055
         const val CHANNEL_ID = "clusterd_worker_channel"
-        const val NOTIFICATION_ID = 50052
+        const val NOTIFICATION_ID = 50055
         const val ACTION_START_WORKER = "com.example.service.action.START_WORKER"
         const val ACTION_STOP_FREE_RAM = "com.example.service.action.STOP_FREE_RAM"
         const val ACTION_SIMULATE_TRIM = "com.example.service.action.SIMULATE_TRIM"
@@ -463,15 +464,15 @@ class RpcService : Service(), ComponentCallbacks2 {
                 _telemetry.update {
                     it.copy(
                         usbLoopbackOnly = usbOnly,
-                        bindAddress = if (usbOnly) "127.0.0.1:50052" else "0.0.0.0:50052",
+                        bindAddress = "0.0.0.0:$DEFAULT_RPC_PORT",
                         clusterSecret = secret
                     )
                 }
                 appendLog(
                     if (usbOnly) {
-                        "Switched bind policy to USB ADB Loopback (127.0.0.1:50052)"
+                        "Switched bind policy to USB ADB Loopback (:50055)"
                     } else {
-                        "Switched bind policy to Wi-Fi Proxy with HMAC cluster_secret enforcement"
+                        "Switched bind policy to Wi-Fi Proxy with HMAC cluster_secret enforcement (:50055)"
                     }
                 )
                 if (wasRunning) {
@@ -492,15 +493,15 @@ class RpcService : Service(), ComponentCallbacks2 {
                             pairedMasterAddress = masterAddr,
                             clusterSecret = secret,
                             usbLoopbackOnly = isUsb,
-                            bindAddress = if (isUsb) "127.0.0.1:50052" else "0.0.0.0:50052",
-                            pairingQrPayload = "clusterd://pair?master=$masterAddr&rpc=50052&secret=$secret"
+                            bindAddress = "0.0.0.0:$DEFAULT_RPC_PORT",
+                            pairingQrPayload = "clusterd://pair?master=$masterAddr&rpc=$DEFAULT_RPC_PORT&secret=$secret"
                         )
                     }
                     appendLog("Paired via QR with Master $masterAddr (${if (isUsb) "USB Loopback" else "Wi-Fi LAN"})")
                     startForegroundSafely()
                     startWorkerPipeline(usbOnly = isUsb, clusterSecret = secret)
                     serviceScope.launch {
-                        // Allow TCP :50052 listener to bind before notifying Master so Master's
+                        // Allow TCP listener to bind before notifying Master so Master's
                         // immediate handshake probe succeeds without ECONNREFUSED.
                         delay(200L)
                         lastPairedMasterHostPort = masterAddr
@@ -563,7 +564,7 @@ class RpcService : Service(), ComponentCallbacks2 {
             it.copy(
                 workerState = WorkerRunState.PROBING,
                 usbLoopbackOnly = usbOnly,
-                bindAddress = if (usbOnly) "127.0.0.1:50052" else "0.0.0.0:50052",
+                bindAddress = "0.0.0.0:$DEFAULT_RPC_PORT",
                 clusterSecret = clusterSecret
             )
         }
@@ -600,7 +601,7 @@ class RpcService : Service(), ComponentCallbacks2 {
         runCatching { serverSocket?.close() }
         runCatching { nativeProcess?.destroyForcibly() }
 
-        val hostIp = if (usbOnly) "127.0.0.1" else "0.0.0.0"
+        val hostIp = "0.0.0.0"
         val snap = _telemetry.value
         val nativeDir = applicationContext.applicationInfo.nativeLibraryDir ?: ""
         val candidateFiles = listOf(
@@ -613,8 +614,7 @@ class RpcService : Service(), ComponentCallbacks2 {
 
         rpcServerJob = serviceScope.launch(Dispatchers.IO) {
             val cacheDir = TensorCacheManager.getCacheDir(applicationContext)
-            // Prioritize Qualcomm-safe port 50055 for USB/Wi-Fi cluster pairing
-            val chosenPort = 50055
+            val chosenPort = DEFAULT_RPC_PORT
 
             if (activeBin != null) {
                 try {
@@ -902,8 +902,8 @@ class RpcService : Service(), ComponentCallbacks2 {
      * Step 1: Broadcasts `CLUSTERD_DISCOVER` on UDP :50050 across LAN (`255.255.255.255`),
      *         Android Emulator host (`10.0.2.2`), and USB loopback (`127.0.0.1`) to find a
      *         Windows or Linux Master without triggering an early TCP probe race condition.
-     * Step 2: Binds this Android worker's TCP :50052 listener with the discovered secret.
-     * Step 3: Registers with the Master via both UDP `CLUSTERD_REGISTER:50052` and HTTP
+     * Step 2: Binds this Android worker's TCP :50055 listener with the discovered secret.
+     * Step 3: Registers with the Master via both UDP `CLUSTERD_REGISTER:50055` and HTTP
      *         `POST /api/nodes/add` fallback so the Master's handshake succeeds immediately.
      */
     private fun autoDetectMasterNode() {
@@ -989,27 +989,27 @@ class RpcService : Service(), ComponentCallbacks2 {
                         pairedMasterAddress = "$master (Auto-Detected)",
                         clusterSecret = discoveredSecret,
                         usbLoopbackOnly = useUsb,
-                        bindAddress = if (useUsb) "127.0.0.1:50052" else "0.0.0.0:50052",
-                        pairingQrPayload = "clusterd://pair?master=$master&rpc=50052&secret=$discoveredSecret"
+                        bindAddress = "0.0.0.0:$DEFAULT_RPC_PORT",
+                        pairingQrPayload = "clusterd://pair?master=$master&rpc=$DEFAULT_RPC_PORT&secret=$discoveredSecret"
                     )
                 }
-                appendLog("Auto-Detected Master at $master! Binding TCP :50052 before registering.")
+                appendLog("Auto-Detected Master at $master! Binding TCP :50055 before registering.")
                 startWorkerPipeline(usbOnly = useUsb, clusterSecret = discoveredSecret)
                 delay(200L)
                 notifyMasterViaUdpOrHttp(master, useUsb)
                 startMasterHeartbeatLoop(master, useUsb)
             } else {
-                // Default to plug-and-play USB ADB loopback (127.0.0.1:50052) so adb forward works out of the box
+                // Default to plug-and-play USB ADB loopback & Wi-Fi LAN (:50055) so both work out of the box
                 lastPairedMasterHostPort = "127.0.0.1:3000"
                 _telemetry.update {
                     it.copy(
                         isScanningMaster = false,
-                        pairedMasterAddress = "USB ADB Tunnel (127.0.0.1:50052 Ready)",
+                        pairedMasterAddress = "USB ADB Tunnel (:50055 Ready)",
                         usbLoopbackOnly = true,
-                        bindAddress = "127.0.0.1:50052"
+                        bindAddress = "0.0.0.0:$DEFAULT_RPC_PORT"
                     )
                 }
-                appendLog("Ready on USB ADB Tunnel (127.0.0.1:50052) & Wi-Fi QR Pairing.")
+                appendLog("Ready on USB ADB Tunnel & Wi-Fi LAN (:50055) & QR Pairing.")
                 startWorkerPipeline(usbOnly = true, clusterSecret = discoveredSecret)
                 delay(200L)
                 notifyMasterViaUdpOrHttp("127.0.0.1:3000", true)

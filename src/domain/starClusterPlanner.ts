@@ -178,6 +178,11 @@ export function isSameAndroidWorker(
     return false;
   }
 
+  // Distinct LAN IP addresses are always distinct physical devices on Wi-Fi (e.g. 2 phones on same Wi-Fi)
+  if (!aIsLoopback && !bIsLoopback && a.ip && b.ip && a.ip !== b.ip) {
+    return false;
+  }
+
   // 2. Exact IP match with same port or missing port
   if (a.ip && b.ip && a.ip === b.ip && (!a.rpcPort || !b.rpcPort || a.rpcPort === b.rpcPort)) return true;
 
@@ -593,11 +598,14 @@ export function planStarCluster(
   const totalSafePoolMb = active.reduce((acc, n) => acc + n.effectiveCapMb, 0);
   const totalVramPoolMb = active.reduce((acc, n) => acc + n.safeVramMb, 0);
 
-  // Smart mmap switch: ONLY pass --no-mmap when totalSafePoolMb >= neededMb * 1.15.
+  // Smart mmap switch: Pass --no-mmap ONLY when totalSafePoolMb >= neededMb * 1.15
+  // AND for large models (neededMb > 10,000), require safe headroom >= 2.0x to avoid saturating host RAM.
   const useNoMmap =
     effectiveConfig.forceNoMmap !== null && effectiveConfig.forceNoMmap !== undefined
       ? effectiveConfig.forceNoMmap
-      : totalSafePoolMb >= neededMb * 1.15;
+      : neededMb > 10000
+        ? totalSafePoolMb >= neededMb * 2.0
+        : totalSafePoolMb >= neededMb * 1.15;
 
   // Reset layer allocations across all evaluated nodes
   for (const n of evaluated) {
@@ -844,7 +852,7 @@ export function planStarCluster(
     '-ngl',
     String(
       effectiveConfig.gpuOffloadLayers ??
-      (workerRpcs.length > 0 ? 999 : (masterNode?.nglLayers ?? 0))
+      (masterNode?.nglLayers ?? 0)
     ),
     '-b',
     String(learned?.recommendedBatch ?? effectiveConfig.batchSize ?? 1024),

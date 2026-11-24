@@ -474,17 +474,10 @@ async function pruneStaleWorkers(): Promise<void> {
     // to strictly verify the worker daemon on the phone is actually alive.
     if (process.env.NODE_ENV !== 'test') {
       const isLoopback = worker.ip === '127.0.0.1' || worker.ip === 'localhost' || worker.ip.startsWith('127.');
-      if (isLoopback) {
-        // If llama-server or native RPC is running, probe non-destructively via TCP
-        const tcpAlive = await probeTcpPort(worker.ip, worker.rpcPort, 400);
-        if (!tcpAlive) {
-          toDelete.push(id);
-        }
-      } else {
-        const alive = await probeTcpPort(worker.ip, worker.rpcPort, 400);
-        if (!alive) {
-          toDelete.push(id);
-        }
+      const probeTimeout = isLoopback ? 400 : 2000;
+      const alive = await probeTcpPort(worker.ip, worker.rpcPort, probeTimeout);
+      if (!alive) {
+        toDelete.push(id);
       }
     }
   }
@@ -1051,9 +1044,10 @@ export async function createApp() {
         const verifiedRpcs: string[] = [];
         for (const target of rawRpcs) {
           const [rHost, rPortStr] = target.split(':');
-          const rPort = Number(rPortStr || 50052);
-          const probe = await probeRpcHandshake(rHost, rPort, 800);
-          const isAlive = probe.ok || (await probeTcpPort(rHost, rPort, 400));
+          const rPort = Number(rPortStr || 50055);
+          const isLoopback = rHost === '127.0.0.1' || rHost === 'localhost' || rHost.startsWith('127.');
+          const probe = await probeRpcHandshake(rHost, rPort, isLoopback ? 800 : 2000);
+          const isAlive = probe.ok || (await probeTcpPort(rHost, rPort, isLoopback ? 400 : 2000));
           if (isAlive) {
             verifiedRpcs.push(target);
           } else {
@@ -1459,21 +1453,33 @@ export async function createApp() {
 
         const existingIsPrimaryUsb = existing.ip === '127.0.0.1' || existing.ip === 'localhost';
         if (existingIsPrimaryUsb && existingId !== id) {
-          // Keep preferred USB-C loopback worker; refresh heartbeat timestamp and telemetry
-          existing.lastSeenMs = Date.now();
-          if (typeof b.tempC === 'number') existing.tempC = Number(b.tempC);
-          if (typeof b.availableRamMb === 'number') existing.availableRamMb = Number(b.availableRamMb);
-          if (typeof b.safeCapMb === 'number' && b.safeCapMb > 256) existing.safeCapMb = Number(b.safeCapMb);
-          const snapshot = await computeRuntimeSnapshot();
-          const planned = snapshot.plan.nodes.find((n) => n.nodeId === existingId);
-          res.json({
-            ok: true,
-            registered: existingId,
-            deduplicated: true,
-            assignedLayers: planned?.allocatedLayers ?? 0,
-            snapshot,
-          });
-          return;
+          const isLoopbackCandidate = ip === '127.0.0.1' || ip === 'localhost' || ip.startsWith('127.');
+          const usbStillAlive =
+            process.env.NODE_ENV === 'test'
+              ? true
+              : isLoopbackCandidate
+                ? await probeTcpPort(existing.ip, existing.rpcPort, 300)
+                : false;
+          if (usbStillAlive) {
+            // Keep preferred USB-C loopback worker; refresh heartbeat timestamp and telemetry
+            existing.lastSeenMs = Date.now();
+            if (typeof b.tempC === 'number') existing.tempC = Number(b.tempC);
+            if (typeof b.availableRamMb === 'number') existing.availableRamMb = Number(b.availableRamMb);
+            if (typeof b.safeCapMb === 'number' && b.safeCapMb > 256) existing.safeCapMb = Number(b.safeCapMb);
+            const snapshot = await computeRuntimeSnapshot();
+            const planned = snapshot.plan.nodes.find((n) => n.nodeId === existingId);
+            res.json({
+              ok: true,
+              registered: existingId,
+              deduplicated: true,
+              assignedLayers: planned?.allocatedLayers ?? 0,
+              snapshot,
+            });
+            return;
+          } else {
+            // USB link is dead or phone switched over to Wi-Fi LAN; delete stale USB entry
+            registeredWorkers.delete(existingId);
+          }
         }
         if (existingId !== id) {
           deduplicated = true;
@@ -1489,12 +1495,15 @@ export async function createApp() {
       Boolean(b.skipHandshakeProbe) ||
       platform === 'WebGPU';
     if (!handshakeVerified && ip) {
-      const probe = await probeRpcHandshake(ip, rpcPort, 1200);
+      const isLoopback = ip === '127.0.0.1' || ip === 'localhost' || ip.startsWith('127.');
+      const probeTimeout = isLoopback ? 1200 : 2500;
+      const tcpTimeout = isLoopback ? 400 : 2000;
+      const probe = await probeRpcHandshake(ip, rpcPort, probeTimeout);
       if (probe.ok) {
         handshakeVerified = true;
         rttMs = probe.rttMs;
-      } else if (b.allowHttpRegistration === true || ip === '127.0.0.1') {
-        const tcpOpen = await probeTcpPort(ip, rpcPort, 400);
+      } else {
+        const tcpOpen = await probeTcpPort(ip, rpcPort, tcpTimeout);
         if (tcpOpen) {
           handshakeVerified = true;
         }
