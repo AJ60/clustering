@@ -16,6 +16,20 @@ echo " Target Master : ${MASTER_URL}"
 echo " Tunnel        : USB-C ADB Reverse Tunnel"
 echo "=================================================================="
 
+# If native ggml-rpc-server exists, launch it in background with -c persistent tensor cache
+if [ -f "/data/local/tmp/ggml-rpc-server" ]; then
+    mkdir -p /data/local/tmp/silica_tensor_cache
+    if ! pgrep -f "ggml-rpc-server" >/dev/null 2>&1; then
+        echo "[*] Launching native ggml-rpc-server with persistent tensor cache (-c)..."
+        (cd /data/local/tmp/silica_tensor_cache && \
+         export XDG_CACHE_HOME=/data/local/tmp/silica_tensor_cache \
+         export HOME=/data/local/tmp/silica_tensor_cache \
+         export LD_LIBRARY_PATH=/data/local/tmp \
+         export GGML_VK_VISIBLE_DEVICES= \
+         nohup /data/local/tmp/ggml-rpc-server -H 0.0.0.0 -p 50055 -t 6 -c > /data/local/tmp/rpc55.log 2>&1 &)
+    fi
+fi
+
 # If standalone Dalvik/ART worker exists, launch it directly
 if [ -f "/data/local/tmp/silica_worker.dex" ]; then
     echo "[*] Launching high-performance Dalvik/ART WorkerNode..."

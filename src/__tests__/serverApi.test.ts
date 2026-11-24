@@ -611,4 +611,84 @@ describe('Silica Cluster Server & Systems Verification', () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it('verifies tensor cache stats, layer storage, and pre-streaming verification', async () => {
+    // 1. Initial cache stats must be accessible
+    const statsRes = await fetch(`${baseUrl}/api/cache/stats`);
+    assert.equal(statsRes.status, 200);
+    const statsJson = (await statsRes.json()) as { ok: boolean; stats: { enabled: boolean; dir: string } };
+    assert.equal(statsJson.ok, true);
+    assert.equal(statsJson.stats.enabled, true);
+    assert.ok(statsJson.stats.dir.length > 0);
+
+    // 2. Clear cache to guarantee known state
+    await fetch(`${baseUrl}/api/cache/clear`, { method: 'POST' });
+
+    // 3. Verify check before storing -> missing layers reported
+    const preVerifyRes = await fetch(`${baseUrl}/api/cache/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelId: 'test-cache-moe-model', layerStart: 0, layerEnd: 2 }),
+    });
+    assert.equal(preVerifyRes.status, 200);
+    const preVerifyJson = (await preVerifyRes.json()) as {
+      ok: boolean;
+      result: { allCached: boolean; missingLayers: number[]; cachedLayers: number[] };
+    };
+    assert.equal(preVerifyJson.ok, true);
+    assert.equal(preVerifyJson.result.allCached, false);
+    assert.deepEqual(preVerifyJson.result.missingLayers, [0, 1, 2]);
+
+    // 4. Store layer 0 and layer 1 into flash cache
+    const store0 = await fetch(`${baseUrl}/api/cache/store-layer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelId: 'test-cache-moe-model', layerIdx: 0 }),
+    });
+    assert.equal(store0.status, 200);
+    const store1 = await fetch(`${baseUrl}/api/cache/store-layer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelId: 'test-cache-moe-model', layerIdx: 1 }),
+    });
+    assert.equal(store1.status, 200);
+
+    // 5. Verify partial cache
+    const partialVerify = await fetch(`${baseUrl}/api/cache/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelId: 'test-cache-moe-model', layerStart: 0, layerEnd: 2 }),
+    });
+    const partialJson = (await partialVerify.json()) as {
+      ok: boolean;
+      result: { allCached: boolean; cachedLayers: number[]; missingLayers: number[]; tensorResidency: string };
+    };
+    assert.equal(partialJson.result.allCached, false);
+    assert.deepEqual(partialJson.result.cachedLayers, [0, 1]);
+    assert.deepEqual(partialJson.result.missingLayers, [2]);
+    assert.equal(partialJson.result.tensorResidency, 'Partial Cache');
+
+    // 6. Store remaining layer 2 -> must achieve 100% allCached flash residency (<200ms launch)
+    await fetch(`${baseUrl}/api/cache/store-layer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelId: 'test-cache-moe-model', layerIdx: 2 }),
+    });
+    const fullVerify = await fetch(`${baseUrl}/api/cache/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelId: 'test-cache-moe-model', layerStart: 0, layerEnd: 2 }),
+    });
+    const fullJson = (await fullVerify.json()) as {
+      ok: boolean;
+      result: { allCached: boolean; hitRatePct: number; tensorResidency: string; estimatedLaunchTimeMs: number };
+    };
+    assert.equal(fullJson.result.allCached, true);
+    assert.equal(fullJson.result.hitRatePct, 100);
+    assert.equal(fullJson.result.tensorResidency, 'Flash Cache');
+    assert.ok(fullJson.result.estimatedLaunchTimeMs < 200);
+
+    // 7. Cleanup
+    await fetch(`${baseUrl}/api/cache/clear`, { method: 'POST' });
+  });
 });

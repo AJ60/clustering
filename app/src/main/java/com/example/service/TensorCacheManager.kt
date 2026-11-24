@@ -15,6 +15,15 @@ data class TensorCacheStats(
     val statusLabel: String = "Ready (auto-caches layer shards on first run)"
 )
 
+data class ShardSpanCacheResult(
+    val totalLayers: Int,
+    val cachedLayers: List<Int>,
+    val missingLayers: List<Int>,
+    val allCached: Boolean,
+    val hitRatePct: Int,
+    val cachedBytes: Long
+)
+
 /**
  * Persistent local flash/RAM cache for streamed GGUF model layer weights and KV buffers.
  * Eliminates repeated multi-hundred-MB transfers over slow Wi-Fi when reconnecting to a Master Hub.
@@ -22,6 +31,7 @@ data class TensorCacheStats(
 object TensorCacheManager {
 
     private const val CACHE_DIR_NAME = "silica_tensor_cache"
+    private val STANDALONE_CACHE_DIR = File("/data/local/tmp/silica_tensor_cache")
     @Volatile
     private var totalHits = 0
     @Volatile
@@ -40,14 +50,63 @@ object TensorCacheManager {
         return File(getCacheDir(context), "${safeModel}_layer_${layerIndex}.bin")
     }
 
+    /**
+     * Resolves existing cached layer file across app internal cache and standalone /data/local/tmp cache.
+     */
+    fun findCachedLayerFile(context: Context, modelId: String, layerIndex: Int): File? {
+        val safeModel = modelId.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+        val candidates = listOf(
+            File(getCacheDir(context), "${safeModel}_layer_${layerIndex}.bin"),
+            File(getCacheDir(context), "${safeModel}_L${layerIndex}.bin"),
+            File(getCacheDir(context), "${safeModel}.layer_${layerIndex}.gguf"),
+            File(STANDALONE_CACHE_DIR, "${safeModel}_layer_${layerIndex}.bin"),
+            File(STANDALONE_CACHE_DIR, "${safeModel}_L${layerIndex}.bin"),
+            File(STANDALONE_CACHE_DIR, "${safeModel}.layer_${layerIndex}.gguf"),
+            File(STANDALONE_CACHE_DIR, "layer_${layerIndex}.bin")
+        )
+        return candidates.firstOrNull { it.exists() && it.isFile && it.length() > 0L }
+    }
+
     fun hasLayerCached(context: Context, modelId: String, layerIndex: Int): Boolean {
-        val file = getCachedLayerFile(context, modelId, layerIndex)
-        val exists = file.exists() && file.length() > 0L
-        if (exists) {
+        val file = findCachedLayerFile(context, modelId, layerIndex)
+        val exists = file != null && file.exists() && file.length() > 0L
+        if (exists && file != null) {
             totalHits++
             totalBandwidthSavedBytes += file.length()
         }
         return exists
+    }
+
+    /**
+     * Verifies layer range [layerStart..layerEnd] on local flash storage before streaming.
+     */
+    fun checkLayerRangeCached(
+        context: Context,
+        modelId: String,
+        layerStart: Int,
+        layerEnd: Int
+    ): ShardSpanCacheResult {
+        if (layerEnd < layerStart || layerStart < 0) {
+            return ShardSpanCacheResult(0, emptyList(), emptyList(), true, 100, 0L)
+        }
+        val total = layerEnd - layerStart + 1
+        val cached = mutableListOf<Int>()
+        val missing = mutableListOf<Int>()
+        var bytes = 0L
+
+        for (idx in layerStart..layerEnd) {
+            val f = findCachedLayerFile(context, modelId, idx)
+            if (f != null) {
+                cached.add(idx)
+                bytes += f.length()
+            } else {
+                missing.add(idx)
+            }
+        }
+
+        val allCached = missing.isEmpty()
+        val hitRate = if (total > 0) (cached.size * 100) / total else 100
+        return ShardSpanCacheResult(total, cached, missing, allCached, hitRate, bytes)
     }
 
     fun putLayerData(context: Context, modelId: String, layerIndex: Int, data: ByteArray): File {
