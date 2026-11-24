@@ -2325,6 +2325,29 @@ export async function createApp() {
     }
   });
 
+  app.post('/api/tools/cluster-status', async (_req: Request, res: Response) => {
+    const snap = await computeRuntimeSnapshot();
+    const nodes = snap.plan.nodes.map((n) => ({
+      name: n.label,
+      role: n.role,
+      allocatedLayers: `${n.allocatedLayers} layers (${n.sharePct}%)`,
+      safeCapMb: `${n.effectiveCapMb} MB`,
+      linkType: n.linkType,
+      rttMs: `${n.rttMs} ms`,
+      tempC: `${n.tempC}°C`,
+      status: n.isConnected ? 'Online' : 'Offline',
+    }));
+    res.json({
+      ok: true,
+      model: snap.activeModel.name,
+      engineStatus: snap.engineStatus?.serverType || 'stopped',
+      activeWorkers: nodes.filter((n) => n.role === 'Worker').length,
+      nodes,
+      throughputEst: `~${snap.plan.estimatedClusterTokPerSec} tok/s`,
+      memoryCoverage: `${snap.plan.coveragePct}%`,
+    });
+  });
+
   // OpenAI-compatible /v1/models
   app.get('/v1/models', async (_req: Request, res: Response) => {
     const snap = await computeRuntimeSnapshot();
