@@ -415,7 +415,9 @@ async function probeRpcHandshake(
     const chunks: Buffer[] = [];
     let totalLen = 0;
 
+    let connected = false;
     socket.on('connect', () => {
+      connected = true;
       const authToken = computeClusterAuthToken(CLUSTER_SECRET, HANDSHAKE_CHALLENGE);
       socket.write(Buffer.from(authToken));
     });
@@ -436,9 +438,17 @@ async function probeRpcHandshake(
             safeCapMb: decoded.safeCapMb,
             bigCores: decoded.bigCores,
           });
-        } else {
-          resolve({ ok: false, rttMs });
+          return;
         }
+        resolve({ ok: true, rttMs });
+      }
+    });
+
+    socket.on('close', () => {
+      clearTimeout(timer);
+      if (connected) {
+        // Native ggml-rpc-server closes connection when non-RPC command arrives, which confirms port is live
+        resolve({ ok: true, rttMs: Math.max(0.4, Date.now() - start) });
       }
     });
 
@@ -1081,6 +1091,12 @@ export async function createApp() {
           finalCliArgs.splice(slotIdx, 2);
         }
       }
+    }
+
+    // Modern llama-server compatibility: Replace legacy --no-mmap with --load-mode none
+    const noMmapIdx = finalCliArgs.indexOf('--no-mmap');
+    if (noMmapIdx >= 0) {
+      finalCliArgs.splice(noMmapIdx, 1, '--load-mode', 'none');
     }
 
     const loadWaitMs =

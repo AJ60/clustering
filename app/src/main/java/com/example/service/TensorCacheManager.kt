@@ -95,24 +95,27 @@ object TensorCacheManager {
 
     fun getStats(context: Context, enabled: Boolean = true): TensorCacheStats {
         val dir = getCacheDir(context)
-        val files = dir.listFiles()?.filter { it.isFile && (it.name.endsWith(".bin") || it.name.endsWith(".meta")) }
-            ?: emptyList()
-        val binFiles = files.filter { it.name.endsWith(".bin") }
-        val totalBytes = files.sumOf { it.length() }
+        val allFiles = if (dir.exists()) {
+            dir.walkTopDown().filter { it.isFile }.toList()
+        } else {
+            emptyList()
+        }
+        val totalBytes = allFiles.sumOf { it.length() }
         val totalMb = totalBytes / (1024f * 1024f)
+        val shardFiles = allFiles.filter { !it.name.endsWith(".meta") && !it.name.endsWith(".tmp") }
         val savedMb = totalBandwidthSavedBytes / (1024f * 1024f)
 
         val status = when {
             !enabled -> "Paused (layers stream directly without disk caching)"
-            binFiles.isNotEmpty() -> "Active (${"%.1f".format(totalMb)} MB • ${binFiles.size} cached shards)"
-            files.isNotEmpty() -> "Indexed (${files.size} model shard manifest ready)"
+            shardFiles.isNotEmpty() -> "Active (${"%.1f".format(totalMb)} MB • ${shardFiles.size} cached shards)"
+            allFiles.isNotEmpty() -> "Indexed (${allFiles.size} model shard manifest ready)"
             else -> "Ready (auto-caches layer shards on first run)"
         }
 
         return TensorCacheStats(
             cachedBytes = totalBytes,
             cachedMb = totalMb,
-            layerCount = binFiles.size,
+            layerCount = shardFiles.size,
             hitCount = totalHits,
             bandwidthSavedMb = savedMb,
             isEnabled = enabled,

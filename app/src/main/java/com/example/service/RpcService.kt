@@ -346,7 +346,7 @@ class RpcService : Service(), ComponentCallbacks2 {
                 File(context.filesDir, "librpc_server_exec.so"),
                 File("/data/local/tmp/ggml-rpc-server")
             )
-            val execFile = candidateExecs.firstOrNull { it.exists() && it.canExecute() }
+            val execFile = candidateExecs.firstOrNull { it.exists() && (it.canExecute() || it.name.endsWith(".so")) }
                 ?: File(nativeDir, "librpc_server_exec.so")
 
             val backend = when {
@@ -609,31 +609,26 @@ class RpcService : Service(), ComponentCallbacks2 {
             File(applicationContext.filesDir, "librpc_server_exec.so"),
             File("/data/local/tmp/ggml-rpc-server")
         )
-        val activeBin = candidateFiles.firstOrNull { it.exists() && it.canExecute() }
+        val activeBin = candidateFiles.firstOrNull { it.exists() && (it.canExecute() || it.name.endsWith(".so")) }
 
         rpcServerJob = serviceScope.launch(Dispatchers.IO) {
             val cacheDir = TensorCacheManager.getCacheDir(applicationContext)
-            // Prioritize Qualcomm-safe port 50055 first, then 50052, then 50054
-            val chosenPort = if (isPortFree(50055)) 50055 else if (isPortFree(50052)) 50052 else 50054
+            // Prioritize Qualcomm-safe port 50055 for USB/Wi-Fi cluster pairing
+            val chosenPort = 50055
 
             if (activeBin != null) {
                 try {
-                    val pb = ProcessBuilder(
-                        activeBin.absolutePath,
-                        "-H", hostIp,
-                        "-p", chosenPort.toString(),
-                        "-t", snap.bigCoreCount.toString(),
-                        "-c"
-                    )
+                    val libDir = activeBin.parentFile?.absolutePath ?: nativeDir
+                    val shellCmd = "export LD_LIBRARY_PATH=\"$libDir:$nativeDir\"; export XDG_CACHE_HOME=\"${cacheDir.absolutePath}\"; export HOME=\"${cacheDir.absolutePath}\"; export GGML_VK_VISIBLE_DEVICES=; exec \"${activeBin.absolutePath}\" -H $hostIp -p $chosenPort -t ${snap.bigCoreCount} -c -d CPU"
+
+                    val pb = ProcessBuilder("/system/bin/sh", "-c", shellCmd)
                     pb.directory(cacheDir)
                     val env = pb.environment()
                     env["HOME"] = cacheDir.absolutePath
+                    env["XDG_CACHE_HOME"] = cacheDir.absolutePath
                     env["CACHE_DIR"] = cacheDir.absolutePath
-                    val ldPath = "${activeBin.parentFile?.absolutePath ?: nativeDir}:${nativeDir}:${env["LD_LIBRARY_PATH"] ?: ""}"
-                    env["LD_LIBRARY_PATH"] = ldPath
-                    if (!snap.vulkanProbePassed || snap.legacyGraphicsMode || Build.VERSION.SDK_INT < 30) {
-                        env["GGML_VK_VISIBLE_DEVICES"] = ""
-                    }
+                    env["LD_LIBRARY_PATH"] = "$libDir:$nativeDir"
+                    env["GGML_VK_VISIBLE_DEVICES"] = ""
                     val proc = pb.start()
                     nativeProcess = proc
                     _telemetry.update {
@@ -660,7 +655,7 @@ class RpcService : Service(), ComponentCallbacks2 {
                         }
                     }
 
-                    delay(300)
+                    delay(800)
                     if (!proc.isAlive) {
                         val exit = proc.exitValue()
                         appendLog("Native rpc process exited early with code $exit, falling back to embedded socket")
@@ -1507,10 +1502,11 @@ object HardwareProbe {
     fun probeVulkan50ms(): VulkanProbeResult {
         val startNs = System.nanoTime()
         return try {
-            val hw = (Build.HARDWARE + " " + Build.BOARD + " " + Build.MODEL + " " + getSocModelIfAvailable()).lowercase()
+            val hw = (Build.HARDWARE + " " + Build.BOARD + " " + Build.MODEL + " " + Build.PRODUCT + " " + getSocModelIfAvailable()).lowercase()
             val legacyGpuMarkers = listOf(
-                "adreno 3", "adreno 4", "adreno 5", "adreno 61",
-                "mali-400", "mali-450", "mali-t", "mali-g51", "mali-g52", "mali-g71", "mali-g72",
+                "adreno 3", "adreno 4", "adreno 5", "adreno 61", "adreno 62", "adreno 63",
+                "sm6", "sm71", "sm72", "sdm6", "sdm7", "holi", "bengal", "trinket", "taro", "gta9p",
+                "mali-400", "mali-450", "mali-t", "mali-g51", "mali-g52", "mali-g57", "mali-g71", "mali-g72",
                 "powervr", "sgx", "rogue", "vivante", "tegra",
                 "swiftshader", "llvmpipe", "ranchu", "goldfish"
             )
@@ -1524,7 +1520,7 @@ object HardwareProbe {
             val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
             val reason = when {
                 !vulkanLibExists -> "libvulkan.so missing -> CPU NEON safe mode (${elapsedMs}ms)"
-                isLegacyBrokenGpu -> "Legacy GPU/Emulator detected -> CPU NEON safe fallback (${elapsedMs}ms)"
+                isLegacyBrokenGpu -> "Adreno 6xx / mid-range GPU lacking VK_KHR_16bit_storage -> CPU NEON safe fallback (${elapsedMs}ms)"
                 !apiSupportsReliableVkCompute -> "API ${Build.VERSION.SDK_INT} < 30 -> CPU NEON safe fallback (${elapsedMs}ms)"
                 else -> "Vulkan Compute 16-bit storage verified (${elapsedMs}ms)"
             }
