@@ -889,11 +889,11 @@ class SilicaViewModel(
             }
 
             // 2. This Local Device (accurately unified with Master's shard assignment)
-            val phoneLayers = phoneNode?.allocatedLayers ?: localLayers
+            val phoneLayers = phoneNode?.allocatedLayers ?: 0
             val phoneRange = if (phoneNode != null && phoneNode.allocatedLayers > 0) {
                 "L${phoneNode.layerStart}–L${phoneNode.layerEnd} (${phoneNode.allocatedLayers} L)"
-            } else if (localLayers > 0) {
-                "L0–L${localLayers - 1} ($localLayers L)"
+            } else if (phoneLayers > 0) {
+                "L0–L${phoneLayers - 1} ($phoneLayers L)"
             } else "Standby"
 
             result += ClusterPeerUi(
@@ -904,7 +904,7 @@ class SilicaViewModel(
                 backendDriver = phoneNode?.backendDriver ?: telemetry.activeBackend.label.substringBefore(" ("),
                 layerRangeLabel = phoneRange,
                 allocatedLayers = phoneLayers,
-                allocatedMb = phoneNode?.allocatedMb ?: telemetry.safeCapMb,
+                allocatedMb = phoneNode?.allocatedMb ?: 0L,
                 estimatedTokPerSec = phoneNode?.estimatedTokPerSec ?: localTps,
                 latencyMs = 0L,
                 isOnline = localOnline,

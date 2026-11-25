@@ -699,9 +699,13 @@ export function planStarCluster(
         masterCanHoldSolo &&
         (isMoeExpertOffload || model.sizeMb >= 12000)
       ) {
-        // Keep CPU-only mobile nodes synced in cool Standby so Master CUDA Attention + CPU MoE hits peak tok/s
-        targetLayers = 0;
-        w.statusNote = 'Standby (Master fits model · avoiding mobile CPU bottleneck & heat)';
+        // When master fits solo, allocate 1 lightweight boundary layer on fast USB links so the phone
+        // actively participates in cluster compute without CPU thermal saturation or 1 tok/s choke.
+        const fastLink = w.rttMs <= 25 && w.pktLossPct < 1.0;
+        targetLayers = fastLink && maxCapLayers >= 1 ? 1 : 0;
+        w.statusNote = targetLayers > 0
+          ? 'Active Shard (1L balanced edge compute)'
+          : 'Standby (Master fits model · slow Wi-Fi link)';
       } else {
         const fastLink = w.rttMs <= 25 && w.pktLossPct < 1.0;
         const utilFraction = isPassiveAndroidCpuOnly
