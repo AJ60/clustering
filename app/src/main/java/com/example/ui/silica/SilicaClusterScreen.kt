@@ -442,13 +442,19 @@ private fun StarTopologyCanvas(
     modifier: Modifier = Modifier
 ) {
     val cs = MaterialTheme.colorScheme
-    val transition = rememberInfiniteTransition(label = "topology_pulse")
-    val phase by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(2400, easing = LinearEasing), RepeatMode.Restart),
-        label = "packet_phase"
-    )
+    val hasActiveRemotePeer = peers.any { it.isOnline && !it.isMaster }
+    val phase = if (hasActiveRemotePeer) {
+        val transition = rememberInfiniteTransition(label = "topology_pulse")
+        val animated by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(2400, easing = LinearEasing), RepeatMode.Restart),
+            label = "packet_phase"
+        )
+        animated
+    } else {
+        0f
+    }
 
     Canvas(modifier = modifier) {
         val center = Offset(size.width / 2f, size.height / 2f)

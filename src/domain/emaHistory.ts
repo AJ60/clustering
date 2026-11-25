@@ -50,7 +50,7 @@ export function recordEmaObservation(
         emaPeakVramMb: Math.max(0, obs.peakVramMb),
         recommendedBatch: Math.max(128, Math.min(2048, obs.batchSize)),
         recommendedUbatch: Math.max(64, Math.min(512, obs.ubatchSize)),
-        learnedKvOffload: obs.usedNkvo,
+        learnedKvOffload: Boolean(obs.oomOrFail),
         nodeEfficiency: {},
         throttleEvents: 0,
         oomEvents: 0,

@@ -167,13 +167,19 @@ fun SilicaCommandScreen(
         }
     }
 
-    val pulseTransition = rememberInfiniteTransition(label = "node_pulse")
-    val pulseAlpha by pulseTransition.animateFloat(
-        initialValue = 0.45f,
-        targetValue = 1.0f,
-        animationSpec = infiniteRepeatable(tween(950), RepeatMode.Reverse),
-        label = "led_alpha"
-    )
+    val isProbing = tel.workerState == WorkerRunState.PROBING
+    val pulseAlpha = if (isProbing) {
+        val pulseTransition = rememberInfiniteTransition(label = "node_pulse")
+        val animated by pulseTransition.animateFloat(
+            initialValue = 0.45f,
+            targetValue = 1.0f,
+            animationSpec = infiniteRepeatable(tween(950), RepeatMode.Reverse),
+            label = "led_alpha"
+        )
+        animated
+    } else {
+        1.0f
+    }
 
     val statusColor by animateColorAsState(
         targetValue = when {

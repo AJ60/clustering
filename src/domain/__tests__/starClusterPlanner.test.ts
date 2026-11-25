@@ -208,4 +208,91 @@ describe('starClusterPlanner', () => {
     assert.equal(plan.autoNkvo, true);
     assert.ok(plan.cliArgs.includes('-nkvo'));
   });
+
+  it('offloads all MoE Attention layers to 4GB VRAM with q8_0 KV and keeps Android CPU worker in cool Standby when Master fits solo', () => {
+    const master3050: StarClusterNode = {
+      nodeId: 'master-rtx3050',
+      label: 'Windows Master (RTX 3050 4GB)',
+      role: 'Master',
+      platform: 'Desktop',
+      osType: 'windows',
+      ip: '127.0.0.1',
+      rpcPort: 0,
+      linkType: 'Local',
+      totalRamMb: 32768,
+      availableRamMb: 26000,
+      vramTotalMb: 4096,
+      vramFreeMb: 3960,
+      memBwGbps: 224,
+      rttMs: 0.1,
+      pktLossPct: 0,
+      tempC: 48,
+      isConnected: true,
+      backendDriver: 'CUDA 12.6',
+      computeTflops: 8.9,
+      physicalCores: 8,
+    };
+    const androidCpuPhone: StarClusterNode = {
+      nodeId: 'android-s21fe',
+      label: 'samsung SM-G990E (USB)',
+      role: 'Worker',
+      platform: 'Android',
+      osType: 'android',
+      ip: '127.0.0.1',
+      rpcPort: 50055,
+      linkType: 'USB-C Tunnel',
+      totalRamMb: 7400,
+      availableRamMb: 4200,
+      vramTotalMb: 0,
+      vramFreeMb: 0,
+      memBwGbps: 38,
+      rttMs: 2.5,
+      pktLossPct: 0,
+      tempC: 35,
+      isConnected: true,
+      backendDriver: 'CPU NEON',
+      computeTflops: 0.4,
+      physicalCores: 8,
+      rpcNativeReady: true,
+    };
+    const moe35b = {
+      ...GGUF_MODEL_PRESETS.find((m) => m.architecture === 'MoE')!,
+      id: 'cyber-tiel-35b-a3b-iq4xs',
+      name: 'Cyber-Tiel-Coder-35B-A3B-IQ4_XS',
+      architecture: 'MoE' as const,
+      sizeMb: 17281,
+      layers: 41,
+      totalParamsB: 35.5,
+      activeParamsB: 3.0,
+      headCount: 32,
+      headCountKv: 4,
+      embeddingLength: 2048,
+    };
+
+    const plan = planStarCluster([master3050, androidCpuPhone], moe35b, undefined, {
+      ...createDefaultBackendTuningConfig(moe35b),
+      contextLength: 4096,
+      kvCacheQuant: 'q8_0',
+      moeCpuOffload: true,
+    });
+
+    const masterPlanned = plan.nodes.find((n) => n.nodeId === 'master-rtx3050')!;
+    const phonePlanned = plan.nodes.find((n) => n.nodeId === 'android-s21fe')!;
+
+    // Android CPU worker must stay in Standby (0L) instead of choking MoE generation to 1 tok/s
+    assert.equal(phonePlanned.allocatedLayers, 0);
+    assert.equal(masterPlanned.allocatedLayers, 41);
+
+    // Master GPU must offload all 41 Attention layers (not starved at -ngl 8) + sparse experts on CPU
+    const nglIdx = plan.cliArgs.indexOf('-ngl');
+    assert.ok(nglIdx >= 0);
+    assert.equal(plan.cliArgs[nglIdx + 1], '41');
+    assert.ok(plan.cliArgs.includes('-ot'));
+    assert.ok(plan.cliArgs.includes('.ffn_.*_exps.=CPU'));
+
+    // With q8_0 KV at 4096 ctx, KV stays on GPU (no -nkvo slowdown)
+    assert.equal(plan.autoNkvo, false);
+    assert.ok(!plan.cliArgs.includes('-nkvo'));
+    assert.ok(!plan.cliArgs.includes('--rpc'));
+  });
 });

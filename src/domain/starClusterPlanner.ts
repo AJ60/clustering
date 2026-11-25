@@ -492,11 +492,23 @@ export function planStarCluster(
   const masterNodeRaw = rawNodes.find((n) => n.role === 'Master') ?? rawNodes[0];
   const masterVramTotal = masterNodeRaw?.vramTotalMb ?? masterNodeRaw?.vramFreeMb ?? 0;
 
+  const isMoeExpertOffload = Boolean(effectiveConfig.moeCpuOffload && model.architecture === 'MoE');
+
+  // When KV cache is quantized (e.g. q8_0 / q4_0) and fits cleanly inside GPU VRAM alongside Attention
+  // tensors (<= 25% of VRAM or <= 768 MB), keeping KV on GPU yields ~50-65% faster tok/s (15.3 vs 9.2 tok/s
+  // measured on 4 GB RTX 3050) without spilling to WDDM Shared Memory. Only force -nkvo for unquantized f16
+  // KV caches or huge contexts (>= 8192) on <= 4 GB GPUs.
+  const kvNeedsCpuOffload =
+    masterVramTotal > 0 &&
+    masterVramTotal <= 4300 &&
+    (effectiveConfig.kvCacheQuant === 'f16' ||
+      effectiveConfig.contextLength >= 8192 ||
+      totalKvCacheMb > Math.max(512, masterVramTotal * 0.25));
+
   const autoNkvo =
     effectiveConfig.noKvOffload !== null && effectiveConfig.noKvOffload !== undefined
       ? effectiveConfig.noKvOffload
-      : (masterVramTotal > 0 && masterVramTotal <= 4300 && (effectiveConfig.contextLength >= 4096 || model.totalParamsB >= 7)) ||
-        Boolean(learned?.learnedKvOffload);
+      : kvNeedsCpuOffload || Boolean(learned?.learnedKvOffload && (learned?.oomEvents ?? 0) > 0);
 
   const evaluated: PlannedStarNode[] = rawNodes.map((n) => {
     const strictAndroidCap = computeAndroidSafeCap(
@@ -656,6 +668,15 @@ export function planStarCluster(
     let totalWorkerLayers = 0;
 
     const msum = manualParts.reduce((a, b) => a + b, 0);
+    // Only offload heavy layers onto passive-cooled Android CPU-only workers when Master's safe pool
+    // cannot comfortably hold a large/MoE model (or when explicitly requested via manual tensor split).
+    // Offloading full MoE blocks over RPC to a mobile ARM CPU while Master has 100% RAM headroom
+    // drops throughput ~10-15x (1 tok/s) and triggers sustained 91% CPU / ADPF thermal throttling.
+    const masterSafePoolTotal = master.effectiveCapMb;
+    const masterCanHoldSolo = masterSafePoolTotal >= neededMb * 1.08;
+    const deficitMb = Math.max(0, Math.round(neededMb - masterSafePoolTotal * 0.92));
+    let remainingDeficitLayers = Math.ceil(deficitMb / Math.max(1, mbPerLayer));
+
     // Reserve ~180 MB per worker for RPC compute buffers inside safeRamMb
     let workerIdx = 0;
     for (const w of workers) {
@@ -663,6 +684,7 @@ export function planStarCluster(
         0,
         Math.floor(Math.max(0, w.effectiveCapMb - 180) / Math.max(1, mbPerLayer))
       );
+      const isPassiveAndroidCpuOnly = w.platform === 'Android' && w.safeVramMb <= 0;
       const scoreShare = w.score / totalScore;
       const manualShare =
         hasManualSplit && manualParts.length === workers.length + 1 && manualParts[workerIdx + 1]
@@ -672,18 +694,39 @@ export function planStarCluster(
       let targetLayers: number;
       if (manualShare !== null) {
         targetLayers = Math.max(1, Math.round(totalLayers * manualShare));
+      } else if (
+        isPassiveAndroidCpuOnly &&
+        masterCanHoldSolo &&
+        (isMoeExpertOffload || model.sizeMb >= 12000)
+      ) {
+        // Keep CPU-only mobile nodes synced in cool Standby so Master CUDA Attention + CPU MoE hits peak tok/s
+        targetLayers = 0;
+        w.statusNote = 'Standby (Master fits model · avoiding mobile CPU bottleneck & heat)';
       } else {
-        // Capacity-aware auto-balancing: when model exceeds Master VRAM, utilize 50–75% of worker's
-        // safe RAM pool (bounded cleanly for latency) rather than starving workers at 1 layer.
         const fastLink = w.rttMs <= 25 && w.pktLossPct < 1.0;
-        const utilFraction = fastLink ? 0.72 : 0.45;
-        const capDrivenTarget = Math.max(2, Math.floor(maxCapLayers * utilFraction));
+        const utilFraction = isPassiveAndroidCpuOnly
+          ? fastLink
+            ? 0.30
+            : 0.18
+          : fastLink
+            ? 0.72
+            : 0.45;
+        const capDrivenTarget = Math.max(
+          isPassiveAndroidCpuOnly ? 1 : 2,
+          Math.floor(maxCapLayers * utilFraction)
+        );
         const maxAutoShareLayers = Math.max(1, Math.ceil(totalLayers * 0.25));
         const scoreDriven = Math.max(1, Math.round(totalLayers * scoreShare));
-        targetLayers = Math.min(
+        const desired = Math.min(
           maxAutoShareLayers,
           Math.max(scoreDriven, Math.min(maxCapLayers, capDrivenTarget))
         );
+        if (isPassiveAndroidCpuOnly && !masterCanHoldSolo && remainingDeficitLayers > 0) {
+          targetLayers = Math.min(desired, remainingDeficitLayers);
+          remainingDeficitLayers = Math.max(0, remainingDeficitLayers - targetLayers);
+        } else {
+          targetLayers = desired;
+        }
       }
 
       const allocated = Math.max(0, Math.min(maxCapLayers, targetLayers));
@@ -796,12 +839,17 @@ export function planStarCluster(
   }
 
   const mbPerLayer = model.sizeMb / Math.max(1, model.layers);
+  // When sparse MoE experts (.ffn_.*_exps.) are routed to CPU, each GPU-offloaded layer only
+  // places Attention + Shared-Expert tensors (~17% of block size, floor ~48 MB) into Dedicated VRAM.
+  const effectiveVramMbPerLayer = isMoeExpertOffload
+    ? Math.max(48, mbPerLayer * 0.17)
+    : mbPerLayer;
   for (const node of activeWithAlloc) {
     const layerShare = node.allocatedLayers / Math.max(1, model.layers);
     node.activeParamsB = Number((model.activeParamsB * layerShare).toFixed(2));
     node.totalParamsB = Number((model.totalParamsB * layerShare).toFixed(2));
     const gpuLayerCap =
-      node.safeVramMb > 0 ? Math.floor(node.safeVramMb / Math.max(1, mbPerLayer)) : 0;
+      node.safeVramMb > 0 ? Math.floor(node.safeVramMb / Math.max(1, effectiveVramMbPerLayer)) : 0;
     node.nglLayers = Math.min(node.allocatedLayers, gpuLayerCap);
     const effectiveBw = node.nglLayers > 0 ? Math.max(node.memBwGbps, 195) : node.memBwGbps;
     const nodeTok =
@@ -876,7 +924,7 @@ export function planStarCluster(
   // causing catastrophic 100% RAM saturation and SSD disk thrashing.
   const masterVramLayerCap =
     masterNode && masterNode.safeVramMb > 0
-      ? Math.max(1, Math.floor(masterNode.safeVramMb / Math.max(1, mbPerLayer)))
+      ? Math.max(1, Math.floor(masterNode.safeVramMb / Math.max(1, effectiveVramMbPerLayer)))
       : 0;
 
   const rawMasterGpuLayers =

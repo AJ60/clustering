@@ -95,16 +95,21 @@ fun SilicaLayerShardingCard(
     val phoneSafeCapMb = telemetry.safeCapMb.coerceAtLeast(800L)
     val cacheRatio = (phoneCachedMb.toFloat() / phoneSafeCapMb.toFloat()).coerceIn(0.05f, 1f)
 
-    val pulse = rememberInfiniteTransition(label = "compute_pulse")
-    val pulseAlpha by pulse.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(650),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulse_alpha"
-    )
+    val pulseAlpha = if (isStreamingChat) {
+        val pulse = rememberInfiniteTransition(label = "compute_pulse")
+        val animated by pulse.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(650),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "pulse_alpha"
+        )
+        animated
+    } else {
+        1f
+    }
 
     Surface(
         shape = MaterialTheme.shapes.large,
@@ -364,16 +369,21 @@ private fun ComputeActivityGraph(
     phoneSharePct: Int
 ) {
     val cs = MaterialTheme.colorScheme
-    val pulse = rememberInfiniteTransition(label = "graph_pulse")
-    val waveOffset by pulse.animateFloat(
-        initialValue = 0.2f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(450),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "wave_offset"
-    )
+    val waveOffset = if (isStreaming) {
+        val pulse = rememberInfiniteTransition(label = "graph_pulse")
+        val animated by pulse.animateFloat(
+            initialValue = 0.2f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(450),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "wave_offset"
+        )
+        animated
+    } else {
+        0.2f
+    }
 
     Surface(
         shape = RoundedCornerShape(8.dp),

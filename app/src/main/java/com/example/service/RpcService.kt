@@ -622,7 +622,14 @@ class RpcService : Service(), ComponentCallbacks2 {
                     var proc: Process? = null
                     try {
                         val currentSnap = _telemetry.value
-                        val threads = currentSnap.bigCoreCount.coerceIn(2, 8)
+                        if (currentSnap.workerState == WorkerRunState.THROTTLED_THERMAL ||
+                            currentSnap.workerState == WorkerRunState.SHEDDING_MEMORY
+                        ) {
+                            appendLog("Skipping native RPC spawn while halted for ${currentSnap.workerState.name}.")
+                            break
+                        }
+                        // Cap default ARM threads to 4 big/prime cores to prevent passive mobile thermal throttling
+                        val threads = currentSnap.bigCoreCount.coerceIn(2, 4)
                         val libDir = activeBin.parentFile?.absolutePath ?: nativeDir
                         // Keep GGML_VK_VISIBLE_DEVICES="" + -d CPU to prevent Mali/mobile driver SIGSEGVs under MoE IQ4_XS RPC buffers
                         val shellCmd = "export LD_LIBRARY_PATH=\"$libDir:$nativeDir\"; export XDG_CACHE_HOME=\"${cacheDir.absolutePath}\"; export HOME=\"${cacheDir.absolutePath}\"; export GGML_VK_VISIBLE_DEVICES=; exec \"${activeBin.absolutePath}\" -H $hostIp -p $chosenPort -t $threads -c -d CPU"
@@ -668,7 +675,15 @@ class RpcService : Service(), ComponentCallbacks2 {
                         errJob.cancel()
                         nativeProcess = null
 
-                        if (!isActive) break
+                        val postExitState = _telemetry.value.workerState
+                        if (!isActive ||
+                            postExitState == WorkerRunState.THROTTLED_THERMAL ||
+                            postExitState == WorkerRunState.SHEDDING_MEMORY ||
+                            postExitState == WorkerRunState.STOPPED
+                        ) {
+                            appendLog("Native RPC server halted cleanly (state=${postExitState.name}, code $exitCode); watchdog paused.")
+                            break
+                        }
                         restartAttempt += 1
                         val backoffMs = min(8000L, 1200L * restartAttempt)
                         appendLog("[watchdog] Native RPC server exited (code $exitCode) — restarting in ${backoffMs}ms...")
@@ -834,6 +849,8 @@ class RpcService : Service(), ComponentCallbacks2 {
                             else -> "ADPF ThermalHeadroom ${"%.2f".format(bat.thermalHeadroom)} (>= 0.90)"
                         }
                         appendLog("AUTO-PAUSED compute: $reason. Waiting for -5°C drop & 30s cooldown.")
+                        // Publish throttled state BEFORE killing the native process so the watchdog sees THROTTLED_THERMAL immediately
+                        _telemetry.update { it.copy(workerState = WorkerRunState.THROTTLED_THERMAL) }
                         pauseNativeCompute()
                     }
                 } else if (current.workerState == WorkerRunState.THROTTLED_THERMAL) {
