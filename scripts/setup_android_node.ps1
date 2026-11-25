@@ -22,11 +22,9 @@ foreach ($dev in $rawDevices) {
     $hostPort = 50052 + $devIndex
     Write-Host "[OK] Configuring Android device ($($devIndex + 1)/$($rawDevices.Count)): $serial (Host Port: $hostPort)" -ForegroundColor Green
 
-    # 2. Push compiled Dalvik/ART worker
-    $dexPath = Join-Path $PSScriptRoot "silica_worker.dex"
-    if (Test-Path $dexPath) {
-        adb -s $serial push $dexPath /data/local/tmp/silica_worker.dex 2>$null | Out-Null
-    }
+    # 2. Clean up any rogue legacy dex workers and ensure official companion app is running
+    adb -s $serial shell "pkill -9 -f com.silica.cluster.WorkerNode 2>/dev/null; rm -f /data/local/tmp/silica_worker.dex 2>/dev/null" | Out-Null
+    adb -s $serial shell "am start-foreground-service -n com.aistudio.clusterlab.kxmpzq/com.example.service.RpcService 2>/dev/null" | Out-Null
 
     # 3. Configure reverse tunnel for phone -> Master heartbeats
     adb -s $serial reverse tcp:3000 tcp:3000 2>$null | Out-Null
@@ -53,13 +51,9 @@ foreach ($dev in $rawDevices) {
             adb -s $serial shell "mkdir -p /data/local/tmp/silica_tensor_cache; cd /data/local/tmp/silica_tensor_cache; nohup /system/bin/sh -c 'export XDG_CACHE_HOME=/data/local/tmp/silica_tensor_cache; export HOME=/data/local/tmp/silica_tensor_cache; export LD_LIBRARY_PATH=/data/local/tmp; export GGML_VK_VISIBLE_DEVICES=; exec /data/local/tmp/ggml-rpc-server -H 0.0.0.0 -p 50055 -t 6 -c' > /data/local/tmp/rpc55.log 2>&1 &"
             $boundPort = "50055"
         } else {
-            adb -s $serial shell "nohup /system/bin/sh -c 'CLASSPATH=/data/local/tmp/silica_worker.dex app_process /data/local/tmp com.silica.cluster.WorkerNode' > /data/local/tmp/worker.log 2>&1 &"
-            Start-Sleep -Seconds 2
-            $rawPort = (adb -s $serial shell "toybox grep -o 'BoundPort=[0-9]*' /data/local/tmp/worker.log 2>/dev/null | toybox tail -n 1 | toybox cut -d= -f2" 2>$null | Out-String).Trim()
-            $boundPort = ($rawPort -replace "[^0-9]", "")
-            if (-not $boundPort) {
-                $boundPort = "50055"
-            }
+            # Start RpcService companion app on port 50055
+            adb -s $serial shell "am start-foreground-service -n com.aistudio.clusterlab.kxmpzq/com.example.service.RpcService 2>/dev/null" | Out-Null
+            $boundPort = "50055"
         }
     }
     Write-Host "  [*] Forwarding PC port $hostPort -> Phone port $boundPort..." -ForegroundColor Cyan

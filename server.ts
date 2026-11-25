@@ -292,6 +292,8 @@ async function probeGpuCached(): Promise<{
   return cachedGpuInfo;
 }
 
+const reversedSerials = new Set<string>();
+
 async function setupAdbTunnelsCached(): Promise<string[]> {
   if (process.env.NODE_ENV === 'test') return [];
   const now = Date.now();
@@ -333,14 +335,35 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
       fList = res.stdout;
     } catch {}
 
+    const isEngineActive =
+      spawnedLlamaChild !== null &&
+      spawnedLlamaChild.exitCode === null;
+
     for (let i = 0; i < eligibleDevices.length; i++) {
       const { line, serial, isWireless, canonicalSerial, lanIp } = eligibleDevices[i];
       serials.push(serial);
 
-      // Pass explicit `-s <serial>` so multi-device ADB never fails
-      await execFileAsync('adb', ['-s', serial, 'reverse', 'tcp:3000', 'tcp:3000'], {
-        timeout: 1500,
-      }).catch(() => {});
+      const wId = isWireless
+        ? `android-wifi-${canonicalSerial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+        : `android-usb-${canonicalSerial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+
+      // While llama-server is actively running and utilizing RPC, do NOT run ADB reverse/forward
+      // or probe candidate ports over USB, which creates USB bus contention and drops active RPC connections.
+      if (isEngineActive) {
+        const existingBusy = registeredWorkers.get(wId);
+        if (existingBusy) {
+          existingBusy.lastSeenMs = now;
+        }
+        continue;
+      }
+
+      // Pass explicit `-s <serial>` so multi-device ADB never fails (only reverse once per connection)
+      if (!reversedSerials.has(serial)) {
+        await execFileAsync('adb', ['-s', serial, 'reverse', 'tcp:3000', 'tcp:3000'], {
+          timeout: 1500,
+        }).catch(() => {});
+        reversedSerials.add(serial);
+      }
 
       // Assign unique host port per ADB device: Device 0 -> 50052, Device 1 -> 50053, Device 2 -> 50054
       let hostPort = 50052 + i;
@@ -354,26 +377,13 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
         await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${hostPort}`, `tcp:${phonePort}`], {
           timeout: 1500,
         }).catch(() => {});
-        if (i === 0) {
-          await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${phonePort}`, `tcp:${phonePort}`], {
-            timeout: 1500,
-          }).catch(() => {});
-        }
       }
 
-      // Do not probe or overwrite an ADB tunnel port while llama-server is running/holding RPC sessions!
-      const busyOnRuntime =
-        spawnedLlamaChild !== null &&
-        spawnedLlamaChild.exitCode === null;
-
-      if (busyOnRuntime) {
-        const wId = isWireless
-          ? `android-wifi-${canonicalSerial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
-          : `android-usb-${canonicalSerial.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
-        const existingBusy = registeredWorkers.get(wId);
-        if (existingBusy) {
-          existingBusy.lastSeenMs = now;
-        }
+      // If this USB device already has an active, verified worker record with a fresh heartbeat,
+      // refresh timestamp and avoid hammering the busy RPC port with redundant TCP connects.
+      const existingWorker = registeredWorkers.get(wId);
+      if (existingWorker && existingWorker.handshakeVerified && (now - existingWorker.lastSeenMs < WORKER_TTL_MS)) {
+        existingWorker.lastSeenMs = now;
         continue;
       }
 
@@ -387,7 +397,7 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
 
         // 1. If wireless device with known LAN IP, probe direct Wi-Fi port 50055 first
         if (isWireless && lanIp) {
-          const directProbe = await probeRpcHandshake(lanIp, phonePort, 800);
+          const directProbe = await probeRpcHandshake(lanIp, phonePort, 1200);
           if (directProbe.ok) {
             isAlive = true;
             measuredRtt = directProbe.rttMs;
@@ -399,7 +409,7 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
 
         // 2. If not alive via direct LAN, probe through ADB forward on hostPort
         if (!isAlive) {
-          let probe = await probeRpcHandshake('127.0.0.1', hostPort, 500);
+          let probe = await probeRpcHandshake('127.0.0.1', hostPort, 1200);
           isAlive = probe.ok;
           if (probe.ok) {
             measuredRtt = probe.rttMs;
@@ -411,7 +421,7 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
             const candidates = [50055, 50052, 50054].filter((p) => p !== phonePort);
             for (const cand of candidates) {
               await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${hostPort}`, `tcp:${cand}`], { timeout: 1500 }).catch(() => {});
-              probe = await probeRpcHandshake('127.0.0.1', hostPort, 500);
+              probe = await probeRpcHandshake('127.0.0.1', hostPort, 1200);
               if (probe.ok) {
                 phonePort = cand;
                 isAlive = true;
@@ -484,6 +494,9 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
         // Probe failed or app not running yet
       }
     }
+    for (const s of reversedSerials) {
+      if (!serials.includes(s)) reversedSerials.delete(s);
+    }
     cachedAdbInfo = { ts: now, serials };
     return serials;
   } catch {
@@ -549,14 +562,14 @@ async function probeRpcHandshake(
       // Valid native ggml-rpc v7.x HELLO reply starts with uint64 LE size = 28 (0x1c)
       if (totalLen >= 8 && full.readUInt32LE(0) === 28 && full.readUInt32LE(4) === 0) {
         const rttMs = Math.max(0.4, Date.now() - start);
-        socket.destroy();
+        socket.end();
         safeResolve({ ok: true, rttMs, nativeRpc: true });
         return;
       }
       if (totalLen >= 32) {
         const decoded = decodeGgufHandshakeFrame(new Uint8Array(full.subarray(0, 32)));
         const rttMs = Math.max(0.4, Date.now() - start);
-        socket.destroy();
+        socket.end();
         if (decoded) {
           safeResolve({
             ok: true,
@@ -636,6 +649,13 @@ async function pruneStaleWorkers(): Promise<void> {
       continue;
     }
 
+    // If worker has already completed genuine handshake and sent an HTTP heartbeat recently (<45s),
+    // trust its live telemetry and avoid disruptive TCP connections that cause "Expected HELLO command" log spam.
+    const isRecentlyActive = worker.handshakeVerified && now - worker.lastSeenMs < 45_000;
+    if (isRecentlyActive) {
+      continue;
+    }
+
     if (process.env.NODE_ENV !== 'test') {
       const probeTimeout = isLoopback ? 600 : 2000;
       const rpcProbe = await probeRpcHandshake(worker.ip, worker.rpcPort, probeTimeout);
@@ -653,8 +673,8 @@ async function pruneStaleWorkers(): Promise<void> {
       if (alive) {
         worker.lastSeenMs = now;
         worker.handshakeVerified = true;
-      } else {
-        // Mark unverified rather than deleting immediately within TTL window
+      } else if (now - worker.lastSeenMs >= WORKER_TTL_MS) {
+        // Only mark unverified if no HTTP heartbeat has arrived throughout the full TTL window
         worker.handshakeVerified = false;
       }
     }
@@ -962,11 +982,11 @@ function probeTcpPort(host: string, port: number, timeoutMs = 800): Promise<bool
         hello.writeBigUInt64LE(24n, 1);
         hello.writeUInt8(7, 9);
         s.write(hello, () => {
-          s.destroy();
+          s.end();
           resolve(true);
         });
       } else {
-        s.destroy();
+        s.end();
         resolve(true);
       }
     });
@@ -1760,9 +1780,47 @@ export async function createApp() {
         .replace(/[^a-z0-9]+/g, '-')
         .slice(0, 24)}`;
 
+    // In production, reject rogue hardcoded legacy Redmi registrations if no actual Xiaomi device is connected
+    if (process.env.NODE_ENV !== 'test' && /redmi/i.test(`${id} ${label}`)) {
+      const hasRealRedmi = cachedAdbInfo?.serials.some((s) => /redmi|xiaomi/i.test(s)) ?? false;
+      if (!hasRealRedmi) {
+        res.status(400).json({ ok: false, error: 'Ignored rogue Redmi worker registration' });
+        return;
+      }
+    }
+
+    // 0. Fast-path heartbeat refresh: never drop or probe an already-verified worker during heartbeats
+    const directExisting = registeredWorkers.get(id);
+    if (directExisting) {
+      directExisting.lastSeenMs = Date.now();
+      if (typeof b.tempC === 'number') directExisting.tempC = Number(b.tempC);
+      if (typeof b.availableRamMb === 'number') directExisting.availableRamMb = Number(b.availableRamMb);
+      if (typeof b.cpuUsagePct === 'number') directExisting.cpuUsagePct = Number(b.cpuUsagePct);
+      if (typeof b.safeCapMb === 'number' && b.safeCapMb > 256) directExisting.safeCapMb = Number(b.safeCapMb);
+      if (typeof b.cachedBytes === 'number') directExisting.cachedBytes = Number(b.cachedBytes);
+      if (typeof b.cachedShards === 'number') directExisting.cachedShards = Number(b.cachedShards);
+      if (typeof b.cacheHits === 'number') directExisting.cacheHits = Number(b.cacheHits);
+      if (typeof b.cacheStatus === 'string') directExisting.cacheStatus = String(b.cacheStatus);
+      if (Array.isArray(b.cachedLayers)) directExisting.cachedLayers = b.cachedLayers as number[];
+      if (typeof b.allLayersCached === 'boolean') directExisting.allLayersCached = b.allLayersCached;
+      directExisting.handshakeVerified = true;
+
+      const snapshot = await computeRuntimeSnapshot();
+      const planned = snapshot.plan.nodes.find((n) => n.nodeId === id);
+      res.json({
+        ok: true,
+        registered: id,
+        deduplicated: false,
+        assignedLayers: planned?.allocatedLayers ?? 0,
+        snapshot,
+      });
+      return;
+    }
+
     // Smart Android deduplication: strictly prefer USB-C loopback (127.0.0.1) over secondary/LAN IPs
     let deduplicated = false;
     if (platform === 'Android') {
+      const isEngineActive = spawnedLlamaChild !== null && spawnedLlamaChild.exitCode === null;
       for (const [existingId, existing] of registeredWorkers.entries()) {
         if (existing.platform !== 'Android') continue;
         const matchesSamePhone =
@@ -1771,13 +1829,30 @@ export async function createApp() {
           isSameAndroidWorker(existing, { platform, ip, id, label, rpcPort });
         if (!matchesSamePhone) continue;
 
+        if (isEngineActive) {
+          // Engine is actively holding RPC connections; keep existing verified worker without probing or deleting
+          existing.lastSeenMs = Date.now();
+          const snapshot = await computeRuntimeSnapshot();
+          const planned = snapshot.plan.nodes.find((n) => n.nodeId === existingId);
+          res.json({
+            ok: true,
+            registered: existingId,
+            deduplicated: true,
+            assignedLayers: planned?.allocatedLayers ?? 0,
+            snapshot,
+          });
+          return;
+        }
+
         const existingIsPrimaryUsb = existing.ip === '127.0.0.1' || existing.ip === 'localhost';
         if (existingIsPrimaryUsb && existingId !== id) {
           const isLoopbackCandidate = ip === '127.0.0.1' || ip === 'localhost' || ip.startsWith('127.');
+          const isUsbDeviceAttached =
+            cachedAdbInfo?.serials.some((s) => existingId.toLowerCase().includes(s.toLowerCase())) ?? false;
           const usbStillAlive =
-            process.env.NODE_ENV === 'test'
+            process.env.NODE_ENV === 'test' || isUsbDeviceAttached
               ? true
-              : (await probeRpcHandshake(existing.ip, existing.rpcPort, 500)).ok;
+              : (await probeRpcHandshake(existing.ip, existing.rpcPort, 1200)).ok;
           if (usbStillAlive) {
             // Keep preferred USB-C loopback worker; refresh heartbeat timestamp and telemetry
             existing.lastSeenMs = Date.now();
@@ -1804,10 +1879,24 @@ export async function createApp() {
               snapshot,
             });
             return;
-          } else {
-            // USB link is dead or phone switched over to Wi-Fi LAN; delete stale USB entry
-            registeredWorkers.delete(existingId);
           }
+        }
+        // If existing worker is already verified, update its telemetry in-place without deleting or dropping connection
+        if (existing.handshakeVerified) {
+          existing.lastSeenMs = Date.now();
+          if (typeof b.tempC === 'number') existing.tempC = Number(b.tempC);
+          if (typeof b.availableRamMb === 'number') existing.availableRamMb = Number(b.availableRamMb);
+          if (typeof b.safeCapMb === 'number' && b.safeCapMb > 256) existing.safeCapMb = Number(b.safeCapMb);
+          const snapshot = await computeRuntimeSnapshot();
+          const planned = snapshot.plan.nodes.find((n) => n.nodeId === existingId);
+          res.json({
+            ok: true,
+            registered: existingId,
+            deduplicated: true,
+            assignedLayers: planned?.allocatedLayers ?? 0,
+            snapshot,
+          });
+          return;
         }
         if (existingId !== id) {
           deduplicated = true;

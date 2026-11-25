@@ -625,6 +625,9 @@ class RpcService : Service(), ComponentCallbacks2 {
                         hello[1] = 24
                         s.outputStream.write(hello)
                         s.outputStream.flush()
+                        // Read handshake reply before closing to prevent Expected HELLO log spam
+                        val resp = ByteArray(8)
+                        s.inputStream.read(resp)
                         true
                     }
                 } catch (_: Exception) { false }
@@ -665,8 +668,12 @@ class RpcService : Service(), ComponentCallbacks2 {
                         // Cap default ARM threads to 4 big/prime cores to prevent passive mobile thermal throttling
                         val threads = currentSnap.bigCoreCount.coerceIn(2, 4)
                         val libDir = activeBin.parentFile?.absolutePath ?: nativeDir
-                        // Keep GGML_VK_VISIBLE_DEVICES="" + -d CPU to prevent Mali/mobile driver SIGSEGVs under MoE IQ4_XS RPC buffers
-                        val shellCmd = "export LD_LIBRARY_PATH=\"$libDir:$nativeDir\"; export XDG_CACHE_HOME=\"${cacheDir.absolutePath}\"; export HOME=\"${cacheDir.absolutePath}\"; export GGML_VK_VISIBLE_DEVICES=; exec \"${activeBin.absolutePath}\" -H $hostIp -p $chosenPort -t $threads -c -d CPU"
+                        // If Vulkan compute passed (e.g. Adreno 660 / modern mobile GPU), leverage hardware GPU acceleration;
+                        // On mid-range GPUs (Adreno 619 / Mali mid-tier lacking VK_KHR_16bit_storage), fallback safely to NEON CPU.
+                        val useGpu = currentSnap.vulkanProbePassed && !currentSnap.legacyGraphicsMode
+                        val vkEnv = if (useGpu) "" else "export GGML_VK_VISIBLE_DEVICES=; "
+                        val devFlag = if (useGpu) "" else " -d CPU"
+                        val shellCmd = "export LD_LIBRARY_PATH=\"$libDir:$nativeDir\"; export XDG_CACHE_HOME=\"${cacheDir.absolutePath}\"; export HOME=\"${cacheDir.absolutePath}\"; ${vkEnv}exec \"${activeBin.absolutePath}\" -H $hostIp -p $chosenPort -t $threads -c$devFlag"
 
                         val pb = ProcessBuilder("/system/bin/sh", "-c", shellCmd)
                         pb.directory(cacheDir)
@@ -675,7 +682,11 @@ class RpcService : Service(), ComponentCallbacks2 {
                         env["XDG_CACHE_HOME"] = cacheDir.absolutePath
                         env["CACHE_DIR"] = cacheDir.absolutePath
                         env["LD_LIBRARY_PATH"] = "$libDir:$nativeDir"
-                        env["GGML_VK_VISIBLE_DEVICES"] = ""
+                        if (!useGpu) {
+                            env["GGML_VK_VISIBLE_DEVICES"] = ""
+                        } else {
+                            env.remove("GGML_VK_VISIBLE_DEVICES")
+                        }
                         proc = pb.start()
                         nativeProcess = proc
 
@@ -687,7 +698,7 @@ class RpcService : Service(), ComponentCallbacks2 {
                             )
                         }
                         updateNotification()
-                        appendLog("Spawned native ${activeBin.name} on $hostIp:$chosenPort (-t $threads, -c cache: ${cacheDir.name})")
+                        appendLog("Spawned native ${activeBin.name} on $hostIp:$chosenPort (-t $threads, ${if (useGpu) "Vulkan GPU" else "-d CPU NEON"}, cache: ${cacheDir.name})")
 
                         val outJob = launch {
                             runCatching {
@@ -892,12 +903,12 @@ class RpcService : Service(), ComponentCallbacks2 {
                         pauseNativeCompute()
                     }
                 } else if (current.workerState == WorkerRunState.THROTTLED_THERMAL) {
-                    val cooledBy5C = bat.tempCelsius <= (peakPausedTempCelsius - 5.0f)
-                    val elapsed30s = (System.currentTimeMillis() - cooldownStartedEpochMs) >= 30_000L
+                    val cooledSufficiently = bat.tempCelsius <= 40.5f || bat.tempCelsius <= (peakPausedTempCelsius - 2.5f)
+                    val elapsed20s = (System.currentTimeMillis() - cooldownStartedEpochMs) >= 20_000L
                     val batterySafe = bat.levelPercent >= 15 || bat.isPlugged
-                    val headroomSafe = bat.thermalHeadroom.isNaN() || bat.thermalHeadroom < 0.95f || bat.tempCelsius < 39.0f
+                    val headroomSafe = bat.thermalHeadroom.isNaN() || bat.thermalHeadroom < 0.95f || bat.tempCelsius < 40.0f
 
-                    if (cooledBy5C && elapsed30s && batterySafe && headroomSafe) {
+                    if (cooledSufficiently && elapsed20s && batterySafe && headroomSafe) {
                         nextState = if (current.usbLoopbackOnly) {
                             WorkerRunState.RUNNING_USB
                         } else {

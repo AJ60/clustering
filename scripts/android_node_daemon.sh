@@ -6,8 +6,13 @@
 # ==============================================================================
 
 MASTER_URL="${1:-http://127.0.0.1:3000}"
-NODE_ID="android-redmi-note-7-pro"
-LABEL="Redmi Note 7 Pro (Android)"
+RAW_MODEL=$(getprop ro.product.model 2>/dev/null || echo "Android Device")
+RAW_MANUF=$(getprop ro.product.manufacturer 2>/dev/null || echo "")
+RAW_SERIAL=$(getprop ro.serialno 2>/dev/null || echo "worker")
+CLEAN_MODEL=$(echo "${RAW_MODEL}" | tr -cd 'A-Za-z0-9_ -' | tr '_' ' ')
+CLEAN_MANUF=$(echo "${RAW_MANUF}" | tr -cd 'A-Za-z0-9_ -' | tr '_' ' ')
+LABEL="${CLEAN_MANUF} ${CLEAN_MODEL} (Android)"
+NODE_ID="android-$(echo "${RAW_MANUF}-${RAW_MODEL}-${RAW_SERIAL}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' | cut -c1-28)"
 INTERVAL=4
 
 echo "=================================================================="
@@ -30,11 +35,9 @@ if [ -f "/data/local/tmp/ggml-rpc-server" ]; then
     fi
 fi
 
-# If standalone Dalvik/ART worker exists, launch it directly
-if [ -f "/data/local/tmp/silica_worker.dex" ]; then
-    echo "[*] Launching high-performance Dalvik/ART WorkerNode..."
-    exec /system/bin/sh -c 'CLASSPATH=/data/local/tmp/silica_worker.dex app_process /data/local/tmp com.silica.cluster.WorkerNode'
-fi
+# Clean up any legacy silica_worker.dex if present
+rm -f /data/local/tmp/silica_worker.dex 2>/dev/null
+pkill -9 -f com.silica.cluster.WorkerNode 2>/dev/null || true
 
 # Fallback toybox loop if dex is absent
 MEM_TOTAL_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 3702708)

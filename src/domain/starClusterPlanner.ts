@@ -168,15 +168,15 @@ export function isSameAndroidWorker(
   // 1. Direct ID match
   if (a.id && b.id && a.id === b.id) return true;
 
-  // Distinct physical USB devices (different serial numbers or distinct host RPC ports) must NEVER be deduplicated
-  if (a.id?.startsWith('android-usb-') && b.id?.startsWith('android-usb-') && a.id !== b.id) {
+  // Distinct physical USB devices with distinct hardware serial numbers must NEVER be deduplicated
+  const aSerial = a.id?.startsWith('android-usb-') ? a.id.slice(12) : '';
+  const bSerial = b.id?.startsWith('android-usb-') ? b.id.slice(12) : '';
+  if (aSerial && bSerial && aSerial !== bSerial) {
     return false;
   }
+
   const aIsLoopback = !a.ip || a.ip === 'localhost' || a.ip === '127.0.0.1';
   const bIsLoopback = !b.ip || b.ip === 'localhost' || b.ip === '127.0.0.1';
-  if (aIsLoopback && bIsLoopback && a.rpcPort && b.rpcPort && a.rpcPort !== b.rpcPort) {
-    return false;
-  }
 
   // Distinct LAN IP addresses are always distinct physical devices on Wi-Fi (e.g. 2 phones on same Wi-Fi)
   if (!aIsLoopback && !bIsLoopback && a.ip && b.ip && a.ip !== b.ip) {
@@ -196,6 +196,14 @@ export function isSameAndroidWorker(
 
   const normA = normalizeModelToken(a.label || a.model || a.id);
   const normB = normalizeModelToken(b.label || b.model || b.id);
+
+  // If two loopback workers have completely different model names, they are distinct physical devices
+  if (aIsLoopback && bIsLoopback && a.rpcPort && b.rpcPort && a.rpcPort !== b.rpcPort) {
+    if (normA && normB && normA !== normB && !normA.includes(normB) && !normB.includes(normA)) {
+      return false;
+    }
+  }
+
   if (normA && normB && normA.length >= 3 && normB.length >= 3) {
     if (normA === normB || normA.includes(normB) || normB.includes(normA)) {
       return true;
@@ -708,13 +716,15 @@ export function planStarCluster(
       ) {
         // When master fits solo, allocate 1 lightweight boundary layer on fast USB links so the phone
         // actively participates in cluster compute without CPU thermal saturation or 1 tok/s choke.
-        const fastLink = w.rttMs <= 25 && w.pktLossPct < 1.0;
+        const isUsb = w.linkType === 'USB-C Tunnel' || w.linkType === 'USB RNDIS';
+        const fastLink = isUsb || (w.rttMs <= 60 && w.pktLossPct < 1.5);
         targetLayers = fastLink && maxCapLayers >= 1 ? 1 : 0;
         w.statusNote = targetLayers > 0
           ? 'Active Shard (1L balanced edge compute)'
           : 'Standby (Master fits model · slow Wi-Fi link)';
       } else {
-        const fastLink = w.rttMs <= 25 && w.pktLossPct < 1.0;
+        const isUsb = w.linkType === 'USB-C Tunnel' || w.linkType === 'USB RNDIS';
+        const fastLink = isUsb || (w.rttMs <= 60 && w.pktLossPct < 1.5);
         const utilFraction = isPassiveAndroidCpuOnly
           ? fastLink
             ? 0.30
