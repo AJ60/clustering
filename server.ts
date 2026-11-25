@@ -354,15 +354,17 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
         await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${hostPort}`, `tcp:${phonePort}`], {
           timeout: 1500,
         }).catch(() => {});
+        if (i === 0) {
+          await execFileAsync('adb', ['-s', serial, 'forward', `tcp:${phonePort}`, `tcp:${phonePort}`], {
+            timeout: 1500,
+          }).catch(() => {});
+        }
       }
 
-      // Do not probe or overwrite an ADB tunnel port while llama-server holds an active RPC session on it!
+      // Do not probe or overwrite an ADB tunnel port while llama-server is running/holding RPC sessions!
       const busyOnRuntime =
-        runtimeRpcActive &&
         spawnedLlamaChild !== null &&
-        spawnedLlamaChild.exitCode === null &&
-        (runtimeRpcEndpoints.includes(`127.0.0.1:${hostPort}`) ||
-          (lanIp ? runtimeRpcEndpoints.includes(`${lanIp}:${phonePort}`) : false));
+        spawnedLlamaChild.exitCode === null;
 
       if (busyOnRuntime) {
         const wId = isWireless
@@ -381,6 +383,7 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
         let measuredRtt = isWireless ? 4.2 : 0.8;
         let activeIp = '127.0.0.1';
         let activePort = hostPort;
+        let isNativeRpc = true;
 
         // 1. If wireless device with known LAN IP, probe direct Wi-Fi port 50055 first
         if (isWireless && lanIp) {
@@ -390,6 +393,7 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
             measuredRtt = directProbe.rttMs;
             activeIp = lanIp;
             activePort = phonePort;
+            if (typeof directProbe.nativeRpc === 'boolean') isNativeRpc = directProbe.nativeRpc;
           }
         }
 
@@ -401,6 +405,7 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
             measuredRtt = probe.rttMs;
             activeIp = '127.0.0.1';
             activePort = hostPort;
+            if (typeof probe.nativeRpc === 'boolean') isNativeRpc = probe.nativeRpc;
           } else {
             // Dynamically try candidate ports [50055, 50052, 50054]
             const candidates = [50055, 50052, 50054].filter((p) => p !== phonePort);
@@ -413,6 +418,7 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
                 measuredRtt = probe.rttMs;
                 activeIp = '127.0.0.1';
                 activePort = hostPort;
+                if (typeof probe.nativeRpc === 'boolean') isNativeRpc = probe.nativeRpc;
                 break;
               }
             }
@@ -468,6 +474,7 @@ async function setupAdbTunnelsCached(): Promise<string[]> {
             cpuUsagePct: 15,
             gpuUsagePct: 0,
             handshakeVerified: true,
+            rpcNativeReady: existing?.rpcNativeReady ?? isNativeRpc,
             lanIp: lanIp || existing?.lanIp,
             lanPort: phonePort,
             lastSeenMs: now,
@@ -540,7 +547,7 @@ async function probeRpcHandshake(
       totalLen += chunk.length;
       const full = Buffer.concat(chunks);
       // Valid native ggml-rpc v7.x HELLO reply starts with uint64 LE size = 28 (0x1c)
-      if (totalLen >= 12 && full.readUInt32LE(0) === 28 && full.readUInt32LE(4) === 0) {
+      if (totalLen >= 8 && full.readUInt32LE(0) === 28 && full.readUInt32LE(4) === 0) {
         const rttMs = Math.max(0.4, Date.now() - start);
         socket.destroy();
         safeResolve({ ok: true, rttMs, nativeRpc: true });
@@ -598,15 +605,19 @@ async function pruneStaleWorkers(): Promise<void> {
   const now = Date.now();
   const toDelete: string[] = [];
   const engineHoldingRpc =
-    runtimeRpcActive && spawnedLlamaChild !== null && spawnedLlamaChild.exitCode === null;
+    (runtimeRpcActive || (engineStatus.running && engineStatus.serverType === 'llama-server')) &&
+    spawnedLlamaChild !== null &&
+    spawnedLlamaChild.exitCode === null;
 
   for (const [id, worker] of registeredWorkers.entries()) {
     const endpoint = `${worker.ip}:${worker.rpcPort}`;
     const lanEndpoint = worker.lanIp && worker.lanPort ? `${worker.lanIp}:${worker.lanPort}` : '';
+    const isLoopback = worker.ip === '127.0.0.1' || worker.ip === 'localhost' || worker.ip.startsWith('127.');
     const attachedToLiveEngine =
       engineHoldingRpc &&
       (runtimeRpcEndpoints.includes(endpoint) ||
-        (lanEndpoint !== '' && runtimeRpcEndpoints.includes(lanEndpoint)));
+        (lanEndpoint !== '' && runtimeRpcEndpoints.includes(lanEndpoint)) ||
+        (isLoopback && runtimeRpcEndpoints.some((ep) => ep.startsWith('127.0.0.1:'))));
 
     if (attachedToLiveEngine) {
       // Single-client ggml-rpc-server blocks incoming secondary probes while serving llama-server.
@@ -619,8 +630,13 @@ async function pruneStaleWorkers(): Promise<void> {
       toDelete.push(id);
       continue;
     }
+
+    // Do NOT probe busy RPC ports while llama-server is actively running
+    if (spawnedLlamaChild !== null && spawnedLlamaChild.exitCode === null) {
+      continue;
+    }
+
     if (process.env.NODE_ENV !== 'test') {
-      const isLoopback = worker.ip === '127.0.0.1' || worker.ip === 'localhost' || worker.ip.startsWith('127.');
       const probeTimeout = isLoopback ? 600 : 2000;
       const rpcProbe = await probeRpcHandshake(worker.ip, worker.rpcPort, probeTimeout);
       if (rpcProbe.nativeRpc) worker.rpcNativeReady = true;
@@ -634,8 +650,12 @@ async function pruneStaleWorkers(): Promise<void> {
           alive = true;
         }
       }
-      if (!alive) {
-        toDelete.push(id);
+      if (alive) {
+        worker.lastSeenMs = now;
+        worker.handshakeVerified = true;
+      } else {
+        // Mark unverified rather than deleting immediately within TTL window
+        worker.handshakeVerified = false;
       }
     }
   }
@@ -935,8 +955,20 @@ function probeTcpPort(host: string, port: number, timeoutMs = 800): Promise<bool
     }, timeoutMs);
     s.once('connect', () => {
       clearTimeout(timer);
-      s.destroy();
-      resolve(true);
+      if (port >= 50050 && port <= 50060) {
+        // Send authentic ggml-rpc HELLO so native rpc-server doesn't complain "Expected HELLO command"
+        const hello = Buffer.alloc(33, 0);
+        hello.writeUInt8(14, 0);
+        hello.writeBigUInt64LE(24n, 1);
+        hello.writeUInt8(7, 9);
+        s.write(hello, () => {
+          s.destroy();
+          resolve(true);
+        });
+      } else {
+        s.destroy();
+        resolve(true);
+      }
     });
     s.once('error', () => {
       clearTimeout(timer);
@@ -1044,7 +1076,7 @@ async function computeRuntimeSnapshot(): Promise<RuntimeClusterSnapshot> {
     engineStatus.serverType === 'llama-server' &&
     (!runtimeRpcActive || runtimeRpcEndpoints.length === 0);
 
-  if (isRunningWithoutRpc || (engineStatus.running && (!registeredWorkers.size || !plan.cliArgs.includes('--rpc')))) {
+  if (isRunningWithoutRpc) {
     for (const node of plan.nodes) {
       if (node.role === 'Master') {
         node.allocatedLayers = activeModel.layers;
@@ -1244,14 +1276,28 @@ export async function createApp() {
             isAlive = probe.ok || (!isLoopback && (await probeTcpPort(rHost, rPort, 2000)));
           }
           if (!isAlive && isLoopback) {
-            for (const w of registeredWorkers.values()) {
-              if (w.lanIp && w.lanPort) {
-                const lanAlive = (await probeRpcHandshake(w.lanIp, w.lanPort, 1800, true)).ok;
-                if (lanAlive) {
-                  const lanTarget = `${w.lanIp}:${w.lanPort}`;
-                  if (!verifiedRpcs.includes(lanTarget)) verifiedRpcs.push(lanTarget);
-                  isAlive = true;
-                  break;
+            // Also check alternative loopback port 50055/50052 in case ADB forward is on the sibling port
+            const altPort = rPort === 50052 ? 50055 : 50052;
+            const altProbe = await probeRpcHandshake(rHost, altPort, 800, true);
+            if (altProbe.ok) {
+              const altTarget = `${rHost}:${altPort}`;
+              if (!verifiedRpcs.includes(altTarget)) verifiedRpcs.push(altTarget);
+              isAlive = true;
+              for (const w of registeredWorkers.values()) {
+                if (w.ip === rHost && (w.rpcPort === rPort || w.rpcPort === altPort)) {
+                  w.rpcPort = altPort;
+                }
+              }
+            } else {
+              for (const w of registeredWorkers.values()) {
+                if (w.lanIp && w.lanPort) {
+                  const lanAlive = (await probeRpcHandshake(w.lanIp, w.lanPort, 1800, true)).ok;
+                  if (lanAlive) {
+                    const lanTarget = `${w.lanIp}:${w.lanPort}`;
+                    if (!verifiedRpcs.includes(lanTarget)) verifiedRpcs.push(lanTarget);
+                    isAlive = true;
+                    break;
+                  }
                 }
               }
             }
@@ -1350,6 +1396,26 @@ export async function createApp() {
         windowsHide: true,
       });
 
+      // Record child process and active RPC endpoints immediately so status checks don't prune or sever busy sockets during model loading
+      spawnedLlamaChild = child;
+      upstreamBaseUrl = engineOrigin;
+      runtimeRpcActive = finalCliArgs.includes('--rpc') && verifiedRpcs.length > 0;
+      runtimeRpcEndpoints = runtimeRpcActive ? [...verifiedRpcs] : [];
+      if (runtimeRpcActive) {
+        const refreshedAt = Date.now();
+        for (const w of registeredWorkers.values()) {
+          const ep = `${w.ip}:${w.rpcPort}`;
+          const lanEp = w.lanIp && w.lanPort ? `${w.lanIp}:${w.lanPort}` : '';
+          if (runtimeRpcEndpoints.includes(ep) || (lanEp && runtimeRpcEndpoints.includes(lanEp))) {
+            w.lastSeenMs = refreshedAt;
+          }
+        }
+      }
+      engineStatus.running = true;
+      engineStatus.upstreamUrl = upstreamBaseUrl;
+      engineStatus.serverType = 'llama-server';
+      engineStatus.lastError = null;
+
       let earlyStderr = '';
       let spawnErrMsg = '';
       child.on('error', (err) => {
@@ -1361,28 +1427,18 @@ export async function createApp() {
 
       const ready = await waitForServerHealth(engineOrigin, loadWaitMs, child);
       if (ready) {
-        spawnedLlamaChild = child;
-        upstreamBaseUrl = engineOrigin;
-        runtimeRpcActive = finalCliArgs.includes('--rpc') && verifiedRpcs.length > 0;
-        runtimeRpcEndpoints = runtimeRpcActive ? [...verifiedRpcs] : [];
-        if (runtimeRpcActive) {
-          const refreshedAt = Date.now();
-          for (const w of registeredWorkers.values()) {
-            const ep = `${w.ip}:${w.rpcPort}`;
-            const lanEp = w.lanIp && w.lanPort ? `${w.lanIp}:${w.lanPort}` : '';
-            if (runtimeRpcEndpoints.includes(ep) || (lanEp && runtimeRpcEndpoints.includes(lanEp))) {
-              w.lastSeenMs = refreshedAt;
-            }
-          }
-        }
-        engineStatus.running = true;
-        engineStatus.upstreamUrl = upstreamBaseUrl;
-        engineStatus.serverType = 'llama-server';
-        engineStatus.lastError = null;
         const rpcNote = activeRpcLabel ? ` [RPC: ${activeRpcLabel}]` : '';
         const msg = `Live stock llama-server running on ${engineOrigin} (${path.basename(modelLocalPath)})${rpcNote}`;
         return { ok: true, statusCode: 200, spawned: true, message: msg };
       }
+
+      // Revert if startup failed or timed out
+      spawnedLlamaChild = null;
+      runtimeRpcActive = false;
+      runtimeRpcEndpoints = [];
+      engineStatus.running = false;
+      engineStatus.serverType = 'offline';
+      engineStatus.upstreamUrl = null;
 
       if (child.exitCode === null) {
         try {

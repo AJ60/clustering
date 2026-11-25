@@ -620,6 +620,11 @@ class RpcService : Service(), ComponentCallbacks2 {
                 val isRpcAlive = try {
                     Socket().use { s ->
                         s.connect(InetSocketAddress("127.0.0.1", chosenPort), 400)
+                        val hello = ByteArray(33)
+                        hello[0] = 14
+                        hello[1] = 24
+                        s.outputStream.write(hello)
+                        s.outputStream.flush()
                         true
                     }
                 } catch (_: Exception) { false }
@@ -648,10 +653,14 @@ class RpcService : Service(), ComponentCallbacks2 {
                     try {
                         val currentSnap = _telemetry.value
                         if (currentSnap.workerState == WorkerRunState.THROTTLED_THERMAL ||
-                            currentSnap.workerState == WorkerRunState.SHEDDING_MEMORY
+                            currentSnap.workerState == WorkerRunState.SHEDDING_MEMORY ||
+                            currentSnap.workerState == WorkerRunState.STOPPED
                         ) {
-                            appendLog("Skipping native RPC spawn while halted for ${currentSnap.workerState.name}.")
-                            break
+                            appendLog("Native RPC watchdog paused while in state ${currentSnap.workerState.name}.")
+                            while (isActive && (_telemetry.value.workerState == WorkerRunState.THROTTLED_THERMAL || _telemetry.value.workerState == WorkerRunState.SHEDDING_MEMORY)) {
+                                delay(1000L)
+                            }
+                            if (!isActive || _telemetry.value.workerState == WorkerRunState.STOPPED) break
                         }
                         // Cap default ARM threads to 4 big/prime cores to prevent passive mobile thermal throttling
                         val threads = currentSnap.bigCoreCount.coerceIn(2, 4)
@@ -704,10 +713,16 @@ class RpcService : Service(), ComponentCallbacks2 {
                         if (!isActive ||
                             postExitState == WorkerRunState.THROTTLED_THERMAL ||
                             postExitState == WorkerRunState.SHEDDING_MEMORY ||
-                            postExitState == WorkerRunState.STOPPED
+                            postExitState == WorkerRunState.STOPPED ||
+                            exitCode == 143
                         ) {
                             appendLog("Native RPC server halted cleanly (state=${postExitState.name}, code $exitCode); watchdog paused.")
-                            break
+                            while (isActive && (_telemetry.value.workerState == WorkerRunState.THROTTLED_THERMAL || _telemetry.value.workerState == WorkerRunState.SHEDDING_MEMORY)) {
+                                delay(1000L)
+                            }
+                            if (!isActive || _telemetry.value.workerState == WorkerRunState.STOPPED) break
+                            restartAttempt = 0
+                            continue
                         }
                         restartAttempt += 1
                         val backoffMs = min(8000L, 1200L * restartAttempt)
@@ -856,7 +871,7 @@ class RpcService : Service(), ComponentCallbacks2 {
 
                 val lowBatteryUnplugged = bat.levelPercent < 15 && !bat.isPlugged
                 val overTemp = bat.tempCelsius >= 43.0f
-                val overAdpfHeadroom = !bat.thermalHeadroom.isNaN() && bat.thermalHeadroom >= 0.90f
+                val overAdpfHeadroom = !bat.thermalHeadroom.isNaN() && bat.thermalHeadroom >= 1.0f && bat.tempCelsius >= 42.0f
 
                 var nextState = current.workerState
                 if (current.workerState == WorkerRunState.RUNNING_USB ||
@@ -869,7 +884,7 @@ class RpcService : Service(), ComponentCallbacks2 {
                         val reason = when {
                             lowBatteryUnplugged -> "Battery ${bat.levelPercent}% (unplugged < 15%)"
                             overTemp -> "Temp ${"%.1f".format(bat.tempCelsius)}°C (>= 43.0°C)"
-                            else -> "ADPF ThermalHeadroom ${"%.2f".format(bat.thermalHeadroom)} (>= 0.90)"
+                            else -> "ADPF ThermalHeadroom ${"%.2f".format(bat.thermalHeadroom)} with elevated temp ${"%.1f".format(bat.tempCelsius)}°C (>= 42.0°C)"
                         }
                         appendLog("AUTO-PAUSED compute: $reason. Waiting for -5°C drop & 30s cooldown.")
                         // Publish throttled state BEFORE killing the native process so the watchdog sees THROTTLED_THERMAL immediately
@@ -880,7 +895,7 @@ class RpcService : Service(), ComponentCallbacks2 {
                     val cooledBy5C = bat.tempCelsius <= (peakPausedTempCelsius - 5.0f)
                     val elapsed30s = (System.currentTimeMillis() - cooldownStartedEpochMs) >= 30_000L
                     val batterySafe = bat.levelPercent >= 15 || bat.isPlugged
-                    val headroomSafe = bat.thermalHeadroom.isNaN() || bat.thermalHeadroom < 0.80f
+                    val headroomSafe = bat.thermalHeadroom.isNaN() || bat.thermalHeadroom < 0.95f || bat.tempCelsius < 39.0f
 
                     if (cooledBy5C && elapsed30s && batterySafe && headroomSafe) {
                         nextState = if (current.usbLoopbackOnly) {

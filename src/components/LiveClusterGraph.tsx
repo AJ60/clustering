@@ -63,7 +63,7 @@ export const LiveClusterGraph: React.FC<LiveClusterGraphProps> = ({
 }) => {
   const master = plan.nodes.find((n) => n.role === 'Master') ?? plan.nodes[0];
   const rawWorkers = plan.nodes.filter(
-    (n) => n.role === 'Worker' && n.isConnected && (n.allocatedLayers ?? 0) > 0
+    (n) => n.role === 'Worker' && (n.isConnected || (n.allocatedLayers ?? 0) > 0)
   );
   
   // Strict deduplication so duplicate aliases for the same physical device never display in the graph
@@ -113,7 +113,13 @@ export const LiveClusterGraph: React.FC<LiveClusterGraphProps> = ({
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
             Verified online nodes only · {activeNodes.length} active compute{' '}
-            {activeNodes.length === 1 ? 'node' : 'nodes'} · Split{' '}
+            {activeNodes.length === 1 ? 'node' : 'nodes'}
+            {workers.length > Math.max(0, activeNodes.length - 1) && (
+              <span className="text-slate-400">
+                {' '}· {workers.length - Math.max(0, activeNodes.length - 1)} standby
+              </span>
+            )}
+            {' '}· Split{' '}
             <span className="font-mono-num text-slate-700 dark:text-slate-200">
               {plan.tensorSplitLabel}
             </span>
@@ -172,10 +178,10 @@ export const LiveClusterGraph: React.FC<LiveClusterGraphProps> = ({
                     y1={masterPos.y}
                     x2={x2}
                     y2={y}
-                    stroke={node.pruned ? '#94A3B8' : color.stroke}
+                    stroke={node.pruned || node.allocatedLayers === 0 ? '#94A3B8' : color.stroke}
                     strokeWidth={node.pruned ? 1.5 : 2.25}
-                    strokeDasharray={node.pruned ? '5 5' : undefined}
-                    opacity={node.pruned ? 0.55 : 0.9}
+                    strokeDasharray={node.pruned || node.allocatedLayers === 0 ? '5 5' : undefined}
+                    opacity={node.pruned ? 0.55 : node.allocatedLayers === 0 ? 0.75 : 0.9}
                   />
                   <rect
                     x={midX - 116}
@@ -293,10 +299,10 @@ export const LiveClusterGraph: React.FC<LiveClusterGraphProps> = ({
                   <text
                     x={cardLeft + 16}
                     y={y - 30}
-                    fill={node.pruned ? '#94A3B8' : color.stroke}
+                    fill={node.pruned ? '#94A3B8' : node.allocatedLayers === 0 ? '#38BDF8' : color.stroke}
                     className="text-[10.5px] font-semibold font-mono-num"
                   >
-                    {node.pruned ? 'PRUNED' : 'ONLINE WORKER'} · {node.ip}:{node.rpcPort || 50052}
+                    {node.pruned ? 'PRUNED' : node.allocatedLayers === 0 ? 'STANDBY WORKER' : 'ONLINE WORKER'} · {node.ip}:{node.rpcPort || 50055}
                   </text>
                   <text
                     x={cardLeft + 16}
@@ -412,10 +418,16 @@ export const LiveClusterGraph: React.FC<LiveClusterGraphProps> = ({
                     className={`text-[11px] font-medium ${
                       node.pruned
                         ? 'text-amber-700 dark:text-amber-400'
-                        : 'text-emerald-700 dark:text-emerald-400'
+                        : node.allocatedLayers === 0 && node.role === 'Worker'
+                          ? 'text-sky-700 dark:text-sky-400'
+                          : 'text-emerald-700 dark:text-emerald-400'
                     }`}
                   >
-                    {node.pruned ? 'Pruned' : 'Online'}
+                    {node.pruned
+                      ? 'Pruned'
+                      : node.allocatedLayers === 0 && node.role === 'Worker'
+                        ? 'Standby'
+                        : 'Online'}
                   </span>
                 </div>
 
@@ -451,7 +463,7 @@ export const LiveClusterGraph: React.FC<LiveClusterGraphProps> = ({
                   <span>
                     {node.allocatedLayers > 0
                       ? `L${node.layerStart}–L${node.layerEnd} · ${node.sharePct.toFixed(1)}%`
-                      : '0 layers'}
+                      : node.statusNote || 'Standby (0 layers)'}
                   </span>
                   <span className="inline-flex items-center gap-2">
                     <span className="inline-flex items-center gap-0.5">

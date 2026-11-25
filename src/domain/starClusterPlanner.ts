@@ -687,13 +687,20 @@ export function planStarCluster(
       const isPassiveAndroidCpuOnly = w.platform === 'Android' && w.safeVramMb <= 0;
       const scoreShare = w.score / totalScore;
       const manualShare =
-        hasManualSplit && manualParts.length === workers.length + 1 && manualParts[workerIdx + 1]
-          ? manualParts[workerIdx + 1] / msum
+        hasManualSplit
+          ? manualParts.length === workers.length + 1
+            ? (manualParts[workerIdx + 1] ?? 0) / msum
+            : workerIdx < manualParts.length - 1
+              ? (manualParts[workerIdx + 1] ?? 0) / msum
+              : (manualParts.slice(1).reduce((a, b) => a + b, 0) / Math.max(1, workers.length * msum))
           : null;
 
       let targetLayers: number;
       if (manualShare !== null) {
-        targetLayers = Math.max(1, Math.round(totalLayers * manualShare));
+        targetLayers =
+          maxCapLayers >= 1
+            ? Math.max(1, Math.min(maxCapLayers, Math.round(totalLayers * manualShare)))
+            : 0;
       } else if (
         isPassiveAndroidCpuOnly &&
         masterCanHoldSolo &&
@@ -921,7 +928,7 @@ export function planStarCluster(
   const modelArg = model.isLocal && model.localPath ? model.localPath : `./models/${model.id}.gguf`;
   const activeWorkers = activeWithAlloc.filter((n) => n.role === 'Worker');
   const workerRpcs = activeWorkers
-    .map((n) => `${n.ip || '127.0.0.1'}:${n.rpcPort || 50052}`);
+    .map((n) => `${n.ip || '127.0.0.1'}:${n.rpcPort || 50055}`);
 
   // CRITICAL HARD-GUARD: Master GPU offload (-ngl) MUST NEVER exceed physical Dedicated VRAM.
   // Excess layers on Master GPU force Windows WDDM to spill into Shared GPU Memory (System RAM),
