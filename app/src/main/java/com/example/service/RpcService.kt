@@ -344,8 +344,7 @@ class RpcService : Service(), ComponentCallbacks2 {
             val nativeDir = context.applicationInfo.nativeLibraryDir ?: ""
             val candidateExecs = listOf(
                 File(nativeDir, "librpc_server_exec.so"),
-                File(context.filesDir, "librpc_server_exec.so"),
-                File("/data/local/tmp/ggml-rpc-server")
+                File(context.filesDir, "librpc_server_exec.so")
             )
             val execFile = candidateExecs.firstOrNull { it.exists() && (it.canExecute() || it.name.endsWith(".so")) }
                 ?: File(nativeDir, "librpc_server_exec.so")
@@ -398,6 +397,7 @@ class RpcService : Service(), ComponentCallbacks2 {
         }
 
         private fun appendLog(message: String) {
+            android.util.Log.i("SilicaRpcService", message)
             val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
                 .format(java.util.Date())
             _telemetry.update { state ->
@@ -607,14 +607,39 @@ class RpcService : Service(), ComponentCallbacks2 {
         val candidateFiles = listOf(
             File(snap.nativeBinaryPath),
             File(nativeDir, "librpc_server_exec.so"),
-            File(applicationContext.filesDir, "librpc_server_exec.so"),
-            File("/data/local/tmp/ggml-rpc-server")
+            File(applicationContext.filesDir, "librpc_server_exec.so")
         )
         val activeBin = candidateFiles.firstOrNull { it.exists() && (it.canExecute() || it.name.endsWith(".so")) }
 
         rpcServerJob = serviceScope.launch(Dispatchers.IO) {
             val cacheDir = TensorCacheManager.getCacheDir(applicationContext)
             val chosenPort = DEFAULT_RPC_PORT
+
+            // If port is already bound (e.g. orphan process or background daemon), check if it's alive
+            if (!isPortFree(chosenPort)) {
+                val isRpcAlive = try {
+                    Socket().use { s ->
+                        s.connect(InetSocketAddress("127.0.0.1", chosenPort), 400)
+                        true
+                    }
+                } catch (_: Exception) { false }
+
+                if (isRpcAlive) {
+                    appendLog("Port $chosenPort is already actively bound and listening — adopting running RPC server.")
+                    _telemetry.update {
+                        it.copy(
+                            bindAddress = "$hostIp:$chosenPort",
+                            workerState = if (usbOnly) WorkerRunState.RUNNING_USB else WorkerRunState.RUNNING_WIFI,
+                            pairingQrPayload = "clusterd://pair?master=${it.pairedMasterAddress.substringAfter("http://").substringBefore(" ")}&rpc=$chosenPort&secret=${it.clusterSecret}"
+                        )
+                    }
+                    updateNotification()
+                    while (isActive && !isPortFree(chosenPort)) {
+                        delay(2500L)
+                    }
+                    if (!isActive) return@launch
+                }
+            }
 
             if (activeBin != null) {
                 var restartAttempt = 0
@@ -687,8 +712,6 @@ class RpcService : Service(), ComponentCallbacks2 {
                         restartAttempt += 1
                         val backoffMs = min(8000L, 1200L * restartAttempt)
                         appendLog("[watchdog] Native RPC server exited (code $exitCode) — restarting in ${backoffMs}ms...")
-                        _telemetry.update { it.copy(workerState = WorkerRunState.PROBING) }
-                        updateNotification()
                         delay(backoffMs)
                     } catch (e: Exception) {
                         nativeProcess = null
